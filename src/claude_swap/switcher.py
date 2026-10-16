@@ -86,6 +86,8 @@ from claude_swap.paths import (
 )
 from claude_swap.process_detection import get_running_instances
 from claude_swap import poll_policy
+from claude_swap.estimator import estimate_account
+from claude_swap.usage_history import UsageHistory
 from claude_swap.settings import load_settings, parse_model_names, settings_path
 from claude_swap.usage_store import (
     FetchRecord,
@@ -331,6 +333,15 @@ class ClaudeAccountSwitcher:
         self.lock_file = self.backup_dir / ".lock"
         self._logger = setup_logging(self.backup_dir, debug=debug)
         self._usage_store = UsageStore(self.backup_dir / "cache")
+        # Burn history beside the store (best effort; feeds the estimator that
+        # tightens poll plans near the threshold, and the TUI's plots).
+        # The clock is read through the store at call time, so a store clock
+        # swapped in later (tests, simulations) governs retention too.
+        self.usage_history = UsageHistory(
+            self.backup_dir / "cache", clock=lambda: self._usage_store.clock()
+        )
+        # (settings mtime, cadence) — see _poll_cadence.
+        self._poll_cadence_cache: tuple[float | None, poll_policy.PollCadence] | None = None
         # (settings mtime, (threshold, models)) — see _poll_policy_inputs.
         self._poll_inputs_cache: tuple[float | None, tuple[float, tuple[str, ...]]] | None = None
         self._poll_inputs_override: tuple[float, tuple[str, ...]] | None = None
@@ -1830,6 +1841,20 @@ class ClaudeAccountSwitcher:
         inputs = (loaded.threshold, parse_model_names(loaded.model))
         self._poll_inputs_cache = (mtime, inputs)
         return inputs
+
+    def _poll_cadence(self) -> poll_policy.PollCadence:
+        """The user's cadence knobs (baseline, urgent, hourly budget) from the
+        settings file, reloaded only when it changes."""
+        path = settings_path(self.backup_dir)
+        try:
+            mtime: float | None = path.stat().st_mtime
+        except OSError:
+            mtime = None
+        if self._poll_cadence_cache is not None and self._poll_cadence_cache[0] == mtime:
+            return self._poll_cadence_cache[1]
+        cadence = poll_policy.load_cadence(self.backup_dir)
+        self._poll_cadence_cache = (mtime, cadence)
+        return cadence
 
     def switchable_account_numbers(self) -> list[str]:
         """Account numbers in rotation order eligible for automatic selection.
@@ -5111,7 +5136,12 @@ class ClaudeAccountSwitcher:
             records = self._run_usage_fetches(
                 [info_by_num[num] for num in claims], pre
             )
-            plans = self._plans_after_fetch(records, pre, info_by_num)
+            # History first, so the point just measured (and the attempt just
+            # spent) feed this pass's plans.
+            self._record_history(records, identities, now)
+            plans = self._plans_after_fetch(
+                records, pre, info_by_num, identities=identities
+            )
             accepted = store.record(records, identities, claims, plans)
             accepted_records = {
                 num: record for num, record in records.items() if num in accepted
@@ -5240,25 +5270,83 @@ class ClaudeAccountSwitcher:
             stored_fp=oauth.credential_fingerprint(backup)
         )
 
+    def _record_history(
+        self,
+        records: dict[str, FetchRecord],
+        identities: dict[str, tuple[str, str]],
+        at: float,
+    ) -> None:
+        """Log this pass's fetches to the usage history: a sample per success,
+        an attempt per real request (success or failure; sentinels made no
+        request). Best effort — history must never fail a fetch."""
+        try:
+            self.usage_history.record(
+                {
+                    num: rec.usage
+                    for num, rec in records.items()
+                    if rec.sentinel is None and rec.error is None
+                },
+                identities,
+                at,
+            )
+            self.usage_history.record_attempts(
+                [num for num, rec in records.items() if rec.sentinel is None],
+                identities,
+                at,
+            )
+        except Exception as e:
+            self._logger.warning(f"Usage history record failed: {e!r}")
+
     def _plans_after_fetch(
         self,
         records: dict[str, FetchRecord],
         pre: dict[str, UsageEntry],
         info_by_num: dict[str, tuple],
+        *,
+        identities: dict[str, tuple[str, str]] | None = None,
     ) -> dict[str, tuple[float | None, float | None]]:
         """Build successful-fetch cadence updates for atomic outcome commit.
 
-        Failures are paced by the store's backoff and keep their past-due plan
-        for when the backoff lifts.
+        Each success is planned with its burn estimate and its trailing-hour
+        attempt ledger from the usage history (when ``identities`` is given);
+        a history failure degrades to the plain baseline. Failures are paced
+        by the store's backoff and keep their past-due plan for when the
+        backoff lifts.
         """
         now = self._usage_store.clock()
         threshold, models = self._poll_policy_inputs()
+        cadence = self._poll_cadence()
+        successes = [
+            num for num, rec in records.items()
+            if rec.sentinel is None and rec.error is None
+        ]
+        series: dict[str, dict] = {}
+        if identities and successes:
+            try:
+                series = self.usage_history.series(
+                    {num: identities[num] for num in successes if num in identities}
+                )
+            except Exception as e:
+                self._logger.warning(f"Usage history read failed: {e!r}")
         plans: dict[str, tuple[float | None, float | None]] = {}
-        for num, rec in records.items():
-            if rec.sentinel is not None or rec.error is not None:
-                continue
+        for num in successes:
+            rec = records[num]
             before = pre.get(num)
             recent_429 = before is not None and before.recent_429(now)
+            estimate = None
+            attempts: list[float] = []
+            if identities and num in identities:
+                try:
+                    estimate = estimate_account(
+                        series.get(num, {}), models=models,
+                        threshold=threshold, now=now,
+                    )
+                    attempts = self.usage_history.attempts(
+                        num, identities[num], now - poll_policy.TRAILING_HOUR_S
+                    )
+                except Exception as e:
+                    self._logger.warning(f"Usage estimate failed for {num}: {e!r}")
+                    estimate, attempts = None, []
             plans[num] = poll_policy.plan_after_fetch(
                 prev_interval_s=before.poll_interval_s if before else None,
                 prev_usage=before.last_good if before else None,
@@ -5268,6 +5356,9 @@ class ClaudeAccountSwitcher:
                 models=models,
                 recent_429=recent_429,
                 now=now,
+                estimate=estimate,
+                attempts=attempts,
+                cadence=cadence,
             )
         return plans
 

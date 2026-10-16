@@ -63,34 +63,55 @@ module only.
 
 from __future__ import annotations
 
+import math
 import random
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
+from dataclasses import dataclass
 from datetime import datetime
+from pathlib import Path
+from typing import TYPE_CHECKING
 
 from claude_swap import oauth
+
+if TYPE_CHECKING:
+    from claude_swap.estimator import AccountEstimate
 
 # Freshness floor shared by every collector: an entry younger than this is
 # served from the store without any fetch, so the maximum sustained rate on
 # one token is 1/SERVE_TTL_S regardless of how many surfaces are open.
 SERVE_TTL_S = 180.0
 
-# Normal cadence floor — movement can halve an interval down to this, never
-# below.
+# Every account, active or idle, is polled at this cadence unless something
+# below tightens or widens it: 12 requests/hour, well under the budget. This
+# is the DEFAULT; the effective value comes from settings (see PollCadence).
+BASELINE_INTERVAL_S = 300.0
+
+# Approach floor: an account the estimator projects to cross the threshold
+# soon is sampled down to this cadence, never below (unless urgent).
 MIN_INTERVAL_S = 180.0
 
-# Urgent mode: the ACTIVE account, within ESCALATION_MARGIN_PCT of the
-# switch threshold, with movement observed this poll (i.e. actually burning
-# toward the limit). Bounded by construction: either the threshold is crossed
-# (the engine switches away) or the movement stops (the next poll decays back
-# to MIN_INTERVAL_S) — worst case margin/movement-delta ≈ 15 polls per
-# episode, inside the measured ~28-30 request rolling-hour window; overshoot
-# on top of steady traffic is absorbed by the post-429 floor below.
+# Urgent floor: only the ACTIVE account, only while no 429 was seen recently,
+# and only while its trailing-hour attempts are under the urgent budget. The
+# hourly budget below bounds it by construction.
 URGENT_INTERVAL_S = 60.0
 
-# Decay ceilings for an account whose usage is not moving: the active account
-# stays reasonably fresh, an idle alternate drifts out to ten minutes.
-ACTIVE_MAX_INTERVAL_S = 300.0
-CANDIDATE_DEFAULT_INTERVAL_S = 300.0
+# Aim to sample about this many times before the projected threshold
+# crossing, so the switch decision sees the crossing at most one poll late.
+POLLS_BEFORE_CROSSING = 3
+
+# Planned requests per token per trailing hour (the measured cap is ~28-30),
+# enforced last from the on-disk attempt ledger (usage_history), so nothing
+# schedules above it. Urgent polls stop once the trailing hour holds
+# URGENT_BUDGET_FRAC of the budget, leaving room for manual refreshes and
+# other machines. Defaults; the effective values come from settings.
+HOURLY_BUDGET = 20
+URGENT_BUDGET_FRAC = 0.75
+URGENT_BUDGET = round(HOURLY_BUDGET * URGENT_BUDGET_FRAC)  # 15
+
+# Kept for readers outside this module: the active account's age cap
+# (autoswitch) and the candidate defaults now all equal the baseline.
+ACTIVE_MAX_INTERVAL_S = BASELINE_INTERVAL_S
+CANDIDATE_DEFAULT_INTERVAL_S = BASELINE_INTERVAL_S
 CANDIDATE_MAX_INTERVAL_S = 600.0
 
 # Exhaustion is stable enough to poll slowly, but not to stop polling until a
@@ -101,11 +122,6 @@ CANDIDATE_MAX_INTERVAL_S = 600.0
 # detects recovery promptly; a nearer reported reset still pulls the next poll
 # forward.
 EXHAUSTED_INTERVAL_S = 600.0
-
-# A window whose binding pct moved at least this much between polls is being
-# consumed somewhere (this machine, another PC, session mode) → tighten; an
-# unmoved one backs off toward its ceiling.
-MOVEMENT_DELTA_PCT = 1.0
 
 # ±fraction applied to each scheduled interval so independent processes
 # (watch + menu bar + auto) drift apart instead of fetching in lockstep.
@@ -130,21 +146,78 @@ RECENT_429_WINDOW_S = 3600.0
 # blocked. So while 429s recur, each successful poll multiplicatively grows the
 # interval (×POST_429_BACKOFF_MULT) toward POST_429_MAX_INTERVAL_S — wider than
 # the normal candidate ceiling so several machines can each back off far enough
-# that their combined rate fits under the budget. Movement (a real success run
-# with no recent 429) decays it back down. This is TCP-style congestion control:
-# the budget gets fair-shared by reaction alone, with no machine count or
-# shared state to configure.
+# that their combined rate fits under the budget. Once the 429s age out of
+# RECENT_429_WINDOW_S the planner returns to the baseline.
+# This is TCP-style congestion control: the budget gets fair-shared by
+# reaction alone, with no machine count or shared state to configure.
 POST_429_BACKOFF_MULT = 1.5
 POST_429_MAX_INTERVAL_S = 1800.0
 
 # The engine escalates to a full candidate refresh when the active account is
-# within this margin of the threshold (decision policy, but the urgent-mode
+# within this margin of the threshold (decision policy, but the approach
 # cadence keys on the same band, so it lives with the cadence numbers).
 ESCALATION_MARGIN_PCT = 15.0
 
 # Never schedule a poll later than a known window reset (+ slack): stored
 # usage is obsolete the moment the window rolls over.
 RESET_SLACK_S = 60.0
+
+TRAILING_HOUR_S = 3600.0
+
+
+@dataclass(frozen=True)
+class PollCadence:
+    """The user-tunable cadence knobs; defaults are the constants above.
+
+    Read from ``settings.json`` (``autoswitch.pollBaselineSeconds``,
+    ``autoswitch.pollUrgentSeconds``, ``autoswitch.pollHourlyBudget``) by
+    :func:`load_cadence`. The post-429 AIMD is not tunable: it is the
+    safety net that converges whatever these are set to."""
+
+    baseline_s: float = BASELINE_INTERVAL_S
+    urgent_s: float = URGENT_INTERVAL_S
+    hourly_budget: int = HOURLY_BUDGET
+
+    @property
+    def urgent_budget(self) -> int:
+        return round(self.hourly_budget * URGENT_BUDGET_FRAC)
+
+
+DEFAULT_CADENCE = PollCadence()
+
+# settings.json key (autoswitch section) -> (field, kind, lo, hi)
+CADENCE_SETTING_KEYS: dict[str, tuple[str, str, float, float]] = {
+    "pollBaselineSeconds": ("baseline_s", "float", 10.0, 3600.0),
+    "pollUrgentSeconds": ("urgent_s", "float", 5.0, 3600.0),
+    "pollHourlyBudget": ("hourly_budget", "int", 1.0, 3600.0),
+}
+
+
+def cadence_from_section(section: object) -> PollCadence:
+    """Build a cadence from the raw ``autoswitch`` settings section. Missing
+    or non-numeric values take the default; numbers are clamped into range."""
+    if not isinstance(section, dict):
+        return DEFAULT_CADENCE
+    kwargs: dict[str, float | int] = {}
+    for key, (field_name, kind, lo, hi) in CADENCE_SETTING_KEYS.items():
+        value = section.get(key)
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            continue
+        if not math.isfinite(value):
+            continue
+        clamped = min(max(float(value), lo), hi)
+        kwargs[field_name] = int(clamped) if kind == "int" else clamped
+    return PollCadence(**kwargs)
+
+
+def load_cadence(backup_root: Path) -> PollCadence:
+    """The effective cadence from ``settings.json``; never raises."""
+    from claude_swap.settings import _read_raw, settings_path
+
+    try:
+        return cadence_from_section(_read_raw(settings_path(backup_root)).get("autoswitch"))
+    except Exception:
+        return DEFAULT_CADENCE
 
 
 def binding_pct(usage: dict | None, models: tuple[str, ...] = ()) -> float | None:
@@ -192,6 +265,27 @@ def parse_reset_ts(resets_at: str | None) -> float | None:
         return None
 
 
+def trailing_attempts(attempts: Sequence[float], now: float) -> list[float]:
+    """Attempts inside the trailing hour ending at ``now``, oldest first."""
+    return sorted(a for a in attempts if now - TRAILING_HOUR_S < a <= now)
+
+
+def budget_release_at(
+    attempts: Sequence[float], now: float, budget: int = HOURLY_BUDGET
+) -> float | None:
+    """Earliest time another request fits the hourly budget, or None if one
+    fits now.
+
+    With ``budget`` attempts already in the trailing hour, the next request
+    waits until the oldest of the newest ``budget`` ages out."""
+    trailing = trailing_attempts(attempts, now)
+    if budget <= 0:
+        return (trailing[-1] + TRAILING_HOUR_S) if trailing else None
+    if len(trailing) < budget:
+        return None
+    return trailing[-budget] + TRAILING_HOUR_S
+
+
 def plan_after_fetch(
     *,
     prev_interval_s: float | None,
@@ -203,63 +297,77 @@ def plan_after_fetch(
     recent_429: bool,
     now: float,
     rng: Callable[[], float] = random.random,
+    estimate: AccountEstimate | None = None,
+    attempts: Sequence[float] = (),
+    cadence: PollCadence = DEFAULT_CADENCE,
 ) -> tuple[float, float]:
     """``(next_poll_at, interval_s)`` for an account just fetched successfully.
 
-    Movement (binding pct changed ≥ ``MOVEMENT_DELTA_PCT`` since the previous
-    poll) halves the interval, floored at ``MIN_INTERVAL_S`` — or drops to
-    ``URGENT_INTERVAL_S`` when the active account is moving inside the
-    escalation band. No movement backs off ×1.5 toward the account's ceiling;
-    unknown utilization uses the default. A recent 429 on this token floors
-    the cadence at ``POST_429_MIN_INTERVAL_S`` (and suppresses urgent mode)
-    until ``RECENT_429_WINDOW_S`` has passed. The scheduled time gets
-    ``JITTER_FRAC`` noise, is never later than the account's next window
-    reset (+ ``RESET_SLACK_S``). An at-limit account keeps a bounded slow
-    poll instead of sleeping until that reset, so an early provider-side
-    quota grant is observed and its decision-grade status stays current.
+    In order:
+
+    1. Start from the baseline (``cadence.baseline_s``).
+    2. An exhausted account polls no faster than ``EXHAUSTED_INTERVAL_S``
+       (bounded, so an early quota grant is still observed).
+    3. Otherwise, when the estimator projects a threshold crossing, shrink
+       the interval to ``eta / POLLS_BEFORE_CROSSING``, floored at
+       ``MIN_INTERVAL_S`` — or at the urgent interval for the active account
+       with no recent 429 and fewer than ``cadence.urgent_budget`` attempts
+       in the trailing hour. Never above the baseline.
+    4. A recent 429 widens the interval multiplicatively (AIMD) toward
+       ``POST_429_MAX_INTERVAL_S``.
+    5. Jitter by ``JITTER_FRAC``.
+    6. Never later than the next known window reset (+ ``RESET_SLACK_S``).
+    7. Never earlier than the hourly budget allows (``attempts`` is this
+       token's ledger, including the fetch just made). Last, so nothing —
+       not even the reset pull-in — schedules above budget.
+
+    ``prev_usage`` is accepted for signature compatibility; burn is now read
+    from ``estimate`` rather than from a two-point movement delta.
     """
-    default = MIN_INTERVAL_S if is_active else CANDIDATE_DEFAULT_INTERVAL_S
-    ceiling = ACTIVE_MAX_INTERVAL_S if is_active else CANDIDATE_MAX_INTERVAL_S
-    base = prev_interval_s or default
-    prev_pct = binding_pct(prev_usage, models)
-    new_pct = binding_pct(new_usage, models)
-    if prev_pct is None or new_pct is None:
-        moving = False
-        interval = default
-    elif abs(new_pct - prev_pct) >= MOVEMENT_DELTA_PCT:
-        moving = True
-        interval = max(MIN_INTERVAL_S, base / 2)
-    else:
-        # Floored so a sub-floor base (urgent mode's 60s) snaps straight back
-        # to the normal cadence once movement stops, instead of decaying
-        # through 90s/135s polls that the budget never intended.
-        moving = False
-        interval = min(ceiling, max(MIN_INTERVAL_S, base * 1.5))
-    if (
-        is_active
-        and moving
-        and not recent_429
-        and new_pct is not None
-        and new_pct >= threshold - ESCALATION_MARGIN_PCT
-    ):
-        interval = URGENT_INTERVAL_S
+    del prev_usage
+    baseline = cadence.baseline_s
+    interval = baseline
+    headroom = oauth.account_headroom(new_usage, models)
+    exhausted = headroom is not None and headroom <= 0
+    if exhausted:
+        # Keep probing exhausted accounts: Anthropic can grant/reset quota
+        # before the previously advertised timestamp. The approach step is
+        # skipped: its ETA is 0 here, which would undo this bound.
+        interval = max(interval, EXHAUSTED_INTERVAL_S)
+    elif estimate is not None and estimate.confidence != "none":
+        eta = estimate.eta_threshold_s
+        if eta is not None:
+            urgent_ok = (
+                is_active
+                and not recent_429
+                and len(trailing_attempts(attempts, now)) < cadence.urgent_budget
+            )
+            # A floor is never above the baseline: a user who asked for a
+            # faster baseline must not be slowed down near the threshold.
+            floor = min(cadence.urgent_s if urgent_ok else MIN_INTERVAL_S, baseline)
+            interval = min(max(eta / POLLS_BEFORE_CROSSING, floor), baseline)
+        else:
+            binding = estimate.binding
+            if (
+                binding is not None
+                and binding.last_pct >= threshold - ESCALATION_MARGIN_PCT
+                and (binding.rate_pct_per_h or 0.0) > 0
+            ):
+                # Burning inside the band, but the crossing lands after the
+                # reset: the baseline is enough (the reset pull-in re-reads
+                # the new window).
+                interval = min(interval, baseline)
     if recent_429:
         # AIMD additive-increase: grow the interval multiplicatively from the
         # last one toward the wider 429 ceiling, so machines sharing a
         # contended token each retreat until their combined rate fits the
         # budget. Floored at POST_429_MIN_INTERVAL_S for the first 429.
+        base = prev_interval_s or baseline
         increased = max(base * POST_429_BACKOFF_MULT, POST_429_MIN_INTERVAL_S)
         interval = min(POST_429_MAX_INTERVAL_S, max(interval, increased))
 
-    headroom = oauth.account_headroom(new_usage, models)
-    if headroom is not None and headroom <= 0:
-        # Keep probing exhausted accounts: Anthropic can grant/reset quota
-        # before the previously advertised timestamp. Preserve a wider
-        # post-429 interval if congestion control already selected one.
-        interval = max(interval, EXHAUSTED_INTERVAL_S)
-
     next_poll = now + interval * (1.0 + JITTER_FRAC * (2.0 * rng() - 1.0))
-    if headroom is not None and headroom <= 0:
+    if exhausted:
         reset_ts = limiting_reset_ts(new_usage, models)
         if reset_ts is not None and reset_ts > now:
             next_poll = min(next_poll, reset_ts + RESET_SLACK_S)
@@ -267,4 +375,8 @@ def plan_after_fetch(
         reset_ts = earliest_future_reset_ts(new_usage, now, models)
         if reset_ts is not None:
             next_poll = min(next_poll, reset_ts + RESET_SLACK_S)
+
+    release = budget_release_at(attempts, now, cadence.hourly_budget)
+    if release is not None:
+        next_poll = max(next_poll, release)
     return next_poll, interval
