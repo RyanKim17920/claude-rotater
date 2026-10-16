@@ -1,7 +1,7 @@
 """Filesystem primitives with no claude_swap dependencies.
 
 Deliberately a leaf module: the atomic-write helpers here are needed by
-settings, credentials, mappings and session, which sit on both sides of
+settings, credentials and session, which sit on both sides of
 the paths/models/usage_store import cycle.
 """
 

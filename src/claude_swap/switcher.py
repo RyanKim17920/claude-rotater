@@ -916,20 +916,6 @@ class ClaudeAccountSwitcher:
             config_file.unlink()
         self._delete_session_profile(account_num, email)
 
-    def _prune_mappings(self, email: str, org_uuid: str) -> None:
-        """Drop directory mappings for an identity that no longer has a slot.
-
-        Called wherever an identity leaves the account table for good
-        (remove_account, add_account/add_token slot overwrite). Slot
-        *migration* and --import --force keep the (email, org) identity that
-        mappings are keyed by, so they need no pruning.
-        """
-        from claude_swap.mappings import MappingStore
-
-        pruned = MappingStore(self.backup_dir).prune_account(email, org_uuid or "")
-        if pruned:
-            print(dimmed(f"Removed {pruned} directory mapping(s) for this account"))
-
     def _read_account_config(self, account_num: str, email: str) -> str:
         """Read account config from backup."""
         config_file = self.configs_dir / f".claude-config-{account_num}-{email}.json"
@@ -1078,8 +1064,7 @@ class ClaudeAccountSwitcher:
         the per-slot credential and config backups, membership in
         ``sequence`` (kept sorted, so rotation and ``cswap list`` order
         follow the new numbers), ``activeAccountNumber``, and each slot's
-        session profile directory (history preserved). Directory mappings key on
-        (email, org) and are unaffected. Usage-cache rows key on the slot
+        session profile directory (history preserved). Usage-cache rows key on the slot
         number but carry the account identity, so a swapped row fails the
         identity check and self-heals on the next poll. Auto-switch
         quarantine entries also key on the slot number and are not moved,
@@ -1663,51 +1648,6 @@ class ClaudeAccountSwitcher:
             self._store.delete_previous_backup(target, email)
 
         self._logger.info(f"Moved slot: {num_src} ({email}) -> {target}")
-
-    def slot_for_directory(self, directory: str | Path) -> tuple[str | None, str | None]:
-        """Resolve a directory to its mapped account slot, for `cswap run`.
-
-        Returns (slot, email): (None, None) when no mapping covers the
-        directory, (None, email) when a mapping exists but its account was
-        removed, and (slot, email) when the mapping resolves.
-        """
-        from claude_swap.mappings import MappingStore
-
-        match = MappingStore(self.backup_dir).resolve(directory)
-        if match is None:
-            return None, None
-        _, entry = match
-        email = entry.get("email", "")
-        seq = self._get_sequence_data_migrated() or {}
-        slot = self._find_account_slot(
-            seq, email, entry.get("organizationUuid", "") or ""
-        )
-        return slot, email
-
-    def list_mappings(self) -> None:
-        """Print all directory → account mappings (for `cswap map`)."""
-        from claude_swap.mappings import MappingStore
-
-        mappings = MappingStore(self.backup_dir).all()
-        if not mappings:
-            print(dimmed("No directory mappings yet."))
-            print(muted("Map one with: cswap map <NUM|EMAIL> [PATH]"))
-            return
-        seq = self._get_sequence_data_migrated() or {}
-        print(bolded("Directory mappings:"))
-        for path in sorted(mappings):
-            entry = mappings[path]
-            email = entry.get("email", "")
-            org_uuid = entry.get("organizationUuid", "") or ""
-            slot = self._find_account_slot(seq, email, org_uuid)
-            if slot:
-                account = seq.get("accounts", {}).get(slot, {})
-                tag = self._get_display_tag(
-                    email, account.get("organizationName", ""), org_uuid
-                )
-                print(f"  {path} {dimmed('→')} {slot}: {email} {muted(f'[{tag}]')}")
-            else:
-                print(f"  {path} {dimmed('→')} {email} {muted('(account removed)')}")
 
     def read_account_credentials(self, account_num: str, email: str) -> str:
         """Public wrapper for session bootstrap. Empty string when missing."""
@@ -3802,14 +3742,13 @@ class ClaudeAccountSwitcher:
 
         # Now safe to perform destructive cleanup (new account data is in memory)
         if displace_slot:
-            d_num, d_email, d_org = displace_slot
+            d_num, d_email, _org = displace_slot
             self._delete_account_files(d_num, d_email)
             data = self._get_sequence_data()
             if int(d_num) in data["sequence"]:
                 data["sequence"].remove(int(d_num))
             del data["accounts"][d_num]
             self._write_json(self.sequence_file, data)
-            self._prune_mappings(d_email, d_org)
 
         if migrate_from:
             data = self._get_sequence_data()
@@ -4011,14 +3950,13 @@ class ClaudeAccountSwitcher:
             account_num = str(self._get_next_account_number())
 
         if displace_slot:
-            d_num, d_email, d_org = displace_slot
+            d_num, d_email, _org = displace_slot
             self._delete_account_files(d_num, d_email)
             data = self._get_sequence_data()
             if int(d_num) in data["sequence"]:
                 data["sequence"].remove(int(d_num))
             del data["accounts"][d_num]
             self._write_json(self.sequence_file, data)
-            self._prune_mappings(d_email, d_org)
 
         if migrate_from:
             data = self._get_sequence_data()
@@ -4148,8 +4086,6 @@ class ClaudeAccountSwitcher:
         self._write_json(self.sequence_file, data)
         self._logger.info(f"Removed account {account_num}: {email}")
         print(f"{accent('Removed')} Account-{account_num} ({email})")
-
-        self._prune_mappings(email, account_info.get("organizationUuid", ""))
 
     def _build_accounts_info(self) -> list[tuple[int, str, str, str, bool, str, str]]:
         """Build per-account (num, email, org_name, org_uuid, is_active, creds, alias).
