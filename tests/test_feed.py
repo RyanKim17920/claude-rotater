@@ -504,3 +504,20 @@ class TestReadingTimeInRecords:
         record = {"t": NOW, "five_hour": {"pct": 1.0}}
         assert feed.valid_record(record)
         assert not feed.valid_record(dict(record, at="soon"))
+
+
+class TestStatusLine:
+    def test_model_and_windows(self):
+        record = feed.parse_payload(raw(), NOW)
+        assert feed.status_line(record, raw()) == "Opus · 5h 42% · 7d 12%"
+
+    def test_no_rate_limits_shows_the_model_only(self):
+        data = raw(rate_limits=None)
+        assert feed.status_line(None, data) == "Opus"
+        assert feed.status_line(None, b"garbage") == ""
+
+    def test_line_flag_prints_even_when_nothing_is_recorded(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("ROTA_HOME", str(tmp_path / "absent"))
+        out = io.BytesIO()
+        assert feed.main(["--line"], io.BytesIO(raw(rate_limits=None)), out, now=NOW) == 0
+        assert out.getvalue() == b"Opus\n"

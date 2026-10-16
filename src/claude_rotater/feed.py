@@ -349,13 +349,33 @@ def read_new(path: str, cursor: FeedCursor | None) -> tuple[list[dict], FeedCurs
 
 # -- command --------------------------------------------------------------------
 
-_USAGE = """usage: rota feed [--tee]
+_USAGE = """usage: rota feed [--tee | --line]
 
 Record the usage Claude Code reports to its statusline. Reads the statusline
 JSON on stdin and appends a compact record to the feed the auto-switcher
 watches; never fails (exit 0). --tee also copies stdin to stdout so it can sit
-in the middle of a pipe. See the README section on live usage.
+in the middle of a pipe; --line prints a short usage line, a statusline of
+its own. See the README section on live usage.
 """
+
+
+def status_line(record: dict | None, raw: bytes) -> str:
+    """The one-line statusline ``--line`` prints: model and both windows."""
+    parts: list[str] = []
+    model = record.get("model") if record else None
+    if model is None:
+        try:
+            payload = json.loads(raw)
+            model = _text(payload.get("model", {}).get("display_name"))
+        except (ValueError, TypeError, AttributeError, RecursionError):
+            model = None
+    if model:
+        parts.append(model)
+    for key, label in (("five_hour", "5h"), ("seven_day", "7d")):
+        window = record.get(key) if record else None
+        if window:
+            parts.append(f"{label} {window['pct']:.0f}%")
+    return " · ".join(parts)
 
 
 def _drain(stdin, stdout) -> None:
@@ -376,6 +396,7 @@ def main(argv: list[str], stdin=None, stdout=None, *, now: float | None = None) 
             pass
         return 0
     tee = "--tee" in argv
+    line = "--line" in argv and not tee
     stdin = stdin if stdin is not None else sys.stdin.buffer
     stdout = stdout if stdout is not None else (sys.stdout.buffer if tee else None)
     data = b""
@@ -393,6 +414,7 @@ def main(argv: list[str], stdin=None, stdout=None, *, now: float | None = None) 
             return 0
     except Exception:
         return 0
+    record = None
     try:
         import time
 
@@ -407,4 +429,12 @@ def main(argv: list[str], stdin=None, stdout=None, *, now: float | None = None) 
         append_record(feed_path(backup_root), record)
     except Exception:
         pass
+    finally:
+        if line:
+            try:
+                out = stdout if stdout is not None else sys.stdout.buffer
+                out.write(status_line(record, data).encode("utf-8") + b"\n")
+                out.flush()
+            except Exception:
+                pass
     return 0
