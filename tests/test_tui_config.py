@@ -181,6 +181,15 @@ class TestLayout:
             assert detail.size.height >= 2  # wrapped, not cut
             assert footer(app) == full
             assert all(len(l) <= size[0] for l in plain(app).splitlines())
+            # no mid-sentence cut help in the rows: the footer carries it
+            assert "…" not in plain(app)
+            assert lst(app).spec.help not in plain(app)
+
+    async def test_wide_terminal_shows_help_column(self, tmp_path):
+        app = Host(tmp_path)
+        async with app.run_test(size=(140, 40)) as pilot:
+            await pilot.pause()
+            assert SETTING_SPECS["autoswitch.cooldownSeconds"].help in plain(app)
 
     async def test_selection_scrolls_into_view_at_80x24(self, tmp_path):
         app = Host(tmp_path)

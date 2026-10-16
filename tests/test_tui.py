@@ -1058,6 +1058,35 @@ class TestMainPage:
             await settle(pilot)
             assert fake_calls(app) == []
 
+    @pytest.mark.parametrize("size", [(120, 40), (80, 24)])
+    async def test_no_blank_band_above_action_bar(self, tmp_path, size):
+        """The plot takes the free height and an empty event log takes none."""
+        fake = three_accounts(tmp_path)
+        with_history(fake, burn_history(time.time()))
+        app = make_app(fake)
+        async with app.run_test(size=size) as pilot:
+            await settle(pilot)
+            log = app.screen.query_one("#event-log")
+            assert not log.display  # only a quiet no-switch event so far
+            detail = app.screen.query_one("#detail")
+            actions = app.screen.query_one("#actions")
+            assert detail.region.bottom == actions.region.y
+            painted_lines = painted(app, "#detail").splitlines()
+            assert len(painted_lines) >= detail.size.height - 1
+            assert actions.region.bottom == size[1]
+
+    async def test_event_log_appears_with_first_event(self, tmp_path, fake_engine):
+        from claude_swap.autoswitch import ErrorEvent
+
+        app = make_app(three_accounts(tmp_path))
+        async with app.run_test(size=(120, 40)) as pilot:
+            await settle(pilot)
+            engine = fake_engine.instances[0]
+            await emit(engine, ErrorEvent(message="boom"))
+            await settle(pilot)
+            assert app.screen.query_one("#event-log").display
+            assert "boom" in log_plain(app)
+
     @pytest.mark.parametrize("size", [(80, 24), (60, 20)])
     async def test_narrow_terminal(self, tmp_path, size):
         fake = three_accounts(tmp_path)

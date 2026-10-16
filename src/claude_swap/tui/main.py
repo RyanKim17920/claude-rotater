@@ -10,7 +10,7 @@ Layout, top to bottom:
 - detail pane for the highlighted account: a braille plot of the binding
   window (measured solid, projection dotted, threshold dashed, reset marker)
   plus a sparkline per other window;
-- a 3-line log of recent non-routine engine events;
+- a 3-line log of recent non-routine engine events (hidden until the first);
 - the action bar, mirroring the key bindings.
 
 The renderers below are plain functions of (snapshot row, estimate, now) so
@@ -151,7 +151,10 @@ _BURN_W = 9  # "+12.5%/h "
 _ETA_W = 10  # "3h 30m ~ "
 _RESET_W = 7  # "2h 13m"
 _MIN_NAME_W = 12
-MAX_PLOT_LINES = 11  # a compact plot reads better than a full-height one
+# The plot takes whatever height the detail pane has, so the page has no
+# dead band above the action bar; this only stops it turning into a wall on
+# a very tall terminal.
+MAX_PLOT_LINES = 32
 
 
 @dataclass(frozen=True)
@@ -584,7 +587,10 @@ class MainScreen(Screen):
         yield _Painted("header_line", id="columns")
         yield ListView(id="accounts")
         yield _Painted("detail_text", id="detail")
-        yield RichLog(id="event-log", highlight=False, markup=False, wrap=False, max_lines=50)
+        # Hidden until the first event: an empty log would only be a blank band.
+        log = RichLog(id="event-log", highlight=False, markup=False, wrap=False, max_lines=50)
+        log.display = False
+        yield log
         with Horizontal(id="actions"):
             for button_id, label, _action in ACTIONS:
                 yield ActionButton(label, id=button_id)
@@ -721,7 +727,9 @@ class MainScreen(Screen):
     def write_event(self, event: AutoSwitchEvent) -> None:
         if event.kind in QUIET_KINDS:
             return
-        self.query_one("#event-log", RichLog).write(event_text(event, palette=self.palette))
+        log = self.query_one("#event-log", RichLog)
+        log.display = True
+        log.write(event_text(event, palette=self.palette))
 
     # -- actions ---------------------------------------------------------------
 

@@ -59,7 +59,10 @@ _HINT = "↑↓ move · ←→ change · enter or 0-9 exact value · ctrl+r defa
 _LABEL_W = 26
 _VALUE_W = 16
 _MARKER_W = 8
-_MIN_HELP_W = 16  # narrower than this, the in-row help is dropped (footer has it)
+# Below this page width the in-row help column is dropped entirely: at 80
+# columns it could only show a few words cut off mid-sentence, and the footer
+# already shows the selected setting's full help.
+HELP_COLUMN_MIN_WIDTH = 110
 
 
 def spec_detail(spec: SettingSpec) -> str:
@@ -259,7 +262,7 @@ class SettingsList(Widget, can_focus=True):
             style=palette.accent if is_set else palette.muted,
         )
         help_w = width - row.cell_len - 2
-        if help_w >= _MIN_HELP_W:
+        if width >= HELP_COLUMN_MIN_WIDTH and help_w > 0:
             text = spec.help if len(spec.help) <= help_w else spec.help[: help_w - 1] + "…"
             row.append(text, style=palette.muted)
         if selected:

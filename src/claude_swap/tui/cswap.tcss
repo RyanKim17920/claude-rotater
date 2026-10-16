@@ -47,7 +47,6 @@ Screen {
 #detail {
     height: 1fr;
     min-height: 3;
-    max-height: 15;
     padding: 0 1;
     margin-top: 1;
 }
