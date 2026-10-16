@@ -65,3 +65,27 @@ def test_light_text_meets_AA_on_all_backgrounds():
     for color in text_colors:
         for bg in backgrounds:
             assert _contrast(color, bg) >= 4.5, f"{color} on {bg}"
+
+
+def test_dark_text_meets_AA_on_all_backgrounds():
+    text_colors = (
+        theme.FOREGROUND, theme.MUTED, theme.ACCENT,
+        theme.SEV_OK, theme.SEV_WARN, theme.SEV_CRIT,
+    )
+    for color in text_colors:
+        for bg in (theme.BACKGROUND, theme.SURFACE, theme.PANEL):
+            assert _contrast(color, bg) >= 4.5, f"{color} on {bg}"
+
+
+def test_accent_is_distinct_from_every_severity_color():
+    # The accent means "rota / on duty"; it must never read as a usage level.
+    for accent, ramp in (
+        (theme.ACCENT, (theme.SEV_OK, theme.SEV_WARN, theme.SEV_CRIT)),
+        (theme.ACCENT_LIGHT, (theme.SEV_OK_LIGHT, theme.SEV_WARN_LIGHT, theme.SEV_CRIT_LIGHT)),
+    ):
+        assert accent not in ramp
+
+
+def test_palette_carries_theme_background():
+    assert Palette.from_theme(ROTA_LIGHT).background == theme.BACKGROUND_LIGHT
+    assert Palette.DARK.background == theme.BACKGROUND

@@ -1,11 +1,12 @@
-"""The "rota-dark" Textual theme and shared color constants.
+"""rota's own Textual themes ("rota-dark", "rota-light") and shared colors.
 
-A subtle modern dark theme: neutral charcoal backgrounds in the VS Code
-register, one warm terracotta accent (the same xterm-173 tone printer.py has
-always used for the CLI — a deliberate nod to Claude Code's orange, used
-sparingly), and desaturated severity colors so usage bars read calmly on a
-dark background. Deliberately *not* a wholesale copy of any other tool's
-palette.
+Direction: a duty roster read at a glance, not a dashboard. Cool slate
+backgrounds (blue-grey, never the warm charcoal or cream most terminal tools
+default to), one periwinkle accent that means "rota itself": the brand chip,
+the account on duty, the key you press. Usage severity has its own ramp,
+sea glass → saffron → rose, so the accent is never mistaken for "fine" or
+"danger". Every text color clears WCAG AA (4.5:1) on all three background
+tiers in both themes; tests/test_theme.py holds that line.
 """
 
 from __future__ import annotations
@@ -17,18 +18,18 @@ from textual.theme import Theme
 
 # Core palette (single source of truth — widgets import these for rich
 # renderables, the Theme below maps them onto Textual's design tokens).
-ACCENT = "#d7875f"  # warm terracotta (xterm 173)
-FOREGROUND = "#e8e4de"  # soft, slightly warm off-white
-MUTED = "#8a8a8a"  # secondary text
-BACKGROUND = "#141414"
-SURFACE = "#1e1e1e"
-PANEL = "#262626"
+ACCENT = "#a3abff"  # periwinkle: brand, on-duty account, keys
+FOREGROUND = "#dde3ea"  # cool off-white
+MUTED = "#8a96a6"  # slate grey for labels and secondary text
+BACKGROUND = "#11151c"  # blue-black slate
+SURFACE = "#19202a"  # header band, highlighted row
+PANEL = "#232c38"  # most elevated: chips, modals
 
-# Usage severity ramp (desaturated for dark backgrounds).
-SEV_OK = "#87af87"  # calm green: plenty of headroom
-SEV_WARN = "#d7af5f"  # amber: climbing (>= 70%)
-SEV_CRIT = "#d75f5f"  # soft red: near the limit (>= 90%)
-TRACK = "#3a3a3a"  # unfilled bar track
+# Usage severity ramp.
+SEV_OK = "#6fc4aa"  # sea glass: plenty of headroom
+SEV_WARN = "#e3b866"  # saffron: climbing (>= 70%)
+SEV_CRIT = "#f08c82"  # rose: near the limit (>= 90%)
+TRACK = "#2a3442"  # unfilled meter track
 
 # Severity band edges. WARN mirrors where a user starts caring; CRIT mirrors
 # the auto-switch default threshold so bar color and switch behavior agree.
@@ -53,6 +54,7 @@ class Palette:
     sev_warn: str
     sev_crit: str
     track: str
+    background: str = BACKGROUND
 
     DARK: ClassVar["Palette"]
 
@@ -75,7 +77,18 @@ class Palette:
             sev_warn=theme.warning,
             sev_crit=theme.error,
             track=theme.variables.get("track", TRACK),
+            background=theme.background or BACKGROUND,
         )
+
+
+def _variables(accent: str, panel: str, foreground: str, track: str) -> dict[str, str]:
+    return {
+        "footer-key-foreground": accent,
+        "block-cursor-background": panel,
+        "block-cursor-foreground": foreground,
+        "block-cursor-text-style": "none",
+        "track": track,
+    }
 
 
 ROTA_DARK = Theme(
@@ -91,27 +104,20 @@ ROTA_DARK = Theme(
     warning=SEV_WARN,
     error=SEV_CRIT,
     dark=True,
-    variables={
-        # Footer keys pick up the accent instead of the default blue.
-        "footer-key-foreground": ACCENT,
-        "block-cursor-background": PANEL,
-        "block-cursor-foreground": FOREGROUND,
-        "block-cursor-text-style": "none",
-        "track": TRACK,
-    },
+    variables=_variables(ACCENT, PANEL, FOREGROUND, TRACK),
 )
 
-# Light companion palette (same intent, tuned for a warm near-white base).
-ACCENT_LIGHT = "#954c2a"  # burnt sienna — deepened for AA on panel (worst-case row bg)
-FOREGROUND_LIGHT = "#2b2723"
-MUTED_LIGHT = "#635d55"
-BACKGROUND_LIGHT = "#faf7f2"
-SURFACE_LIGHT = "#efeae1"
-PANEL_LIGHT = "#e2dbcf"  # most-elevated = darkest (inverted from dark)
-SEV_OK_LIGHT = "#3d6b3d"  # forest green — deepened for AA on panel
-SEV_WARN_LIGHT = "#795911"  # deep ochre — deepened for AA on panel
-SEV_CRIT_LIGHT = "#ad3128"  # brick red — deepened for AA on panel
-TRACK_LIGHT = "#cec7ba"
+# Light companion: the same roles on a cool near-white, deepened for AA.
+ACCENT_LIGHT = "#454bbf"  # indigo
+FOREGROUND_LIGHT = "#1b2330"
+MUTED_LIGHT = "#505c6d"
+BACKGROUND_LIGHT = "#f5f7fa"
+SURFACE_LIGHT = "#e8ecf2"
+PANEL_LIGHT = "#d9e0e9"  # most elevated = darkest (inverted from dark)
+SEV_OK_LIGHT = "#17705a"  # deep sea green
+SEV_WARN_LIGHT = "#7d5600"  # dark saffron
+SEV_CRIT_LIGHT = "#ad3229"  # brick rose
+TRACK_LIGHT = "#cfd7e2"
 
 ROTA_LIGHT = Theme(
     name="rota-light",
@@ -126,16 +132,11 @@ ROTA_LIGHT = Theme(
     warning=SEV_WARN_LIGHT,
     error=SEV_CRIT_LIGHT,
     dark=False,
-    variables={
-        "footer-key-foreground": ACCENT_LIGHT,
-        "block-cursor-background": PANEL_LIGHT,
-        "block-cursor-foreground": FOREGROUND_LIGHT,
-        "block-cursor-text-style": "none",
-        "track": TRACK_LIGHT,
-    },
+    variables=_variables(ACCENT_LIGHT, PANEL_LIGHT, FOREGROUND_LIGHT, TRACK_LIGHT),
 )
 
 Palette.DARK = Palette(
     accent=ACCENT, foreground=FOREGROUND, muted=MUTED,
     sev_ok=SEV_OK, sev_warn=SEV_WARN, sev_crit=SEV_CRIT, track=TRACK,
+    background=BACKGROUND,
 )
