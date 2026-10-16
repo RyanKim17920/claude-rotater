@@ -139,6 +139,8 @@ class AccountSnapshot:
     usage: UsageEntry
     alias: str = ""
     disabled: bool = False  # held out of auto-rotation (still a valid explicit target)
+    # Epoch seconds when the stored login (refresh token) lapses; None = unknown.
+    login_expires_at: float | None = None
 
     @property
     def display_tag(self) -> str:

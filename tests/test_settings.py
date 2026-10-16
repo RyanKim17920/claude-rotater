@@ -459,3 +459,33 @@ class TestAtomicWriteThroughSymlink:
         assert (repo.stat().st_mode & 0o777) == 0o755, "foreign dir untouched"
         assert (live.stat().st_mode & 0o777) == 0o700, "our dir hardened"
         assert (tracked.stat().st_mode & 0o777) == 0o600, "file still 0600"
+
+
+class TestLoginWarnDays:
+    def test_default_and_clamp(self, tmp_path):
+        import json as _json
+
+        from claude_swap.settings import load_ui_settings, settings_path
+
+        assert load_ui_settings(tmp_path).login_warn_days == 3
+        for raw, expected in ((7, 7), (999, 60), (-4, 0), ("x", 3), (True, 3), (2.9, 2)):
+            settings_path(tmp_path).write_text(_json.dumps({"ui": {"loginWarnDays": raw}}))
+            assert load_ui_settings(tmp_path).login_warn_days == expected, raw
+
+    def test_bad_theme_keeps_valid_days(self, tmp_path):
+        import json as _json
+
+        from claude_swap.settings import load_ui_settings, settings_path
+
+        settings_path(tmp_path).write_text(_json.dumps({"ui": {"theme": "neon", "loginWarnDays": 9}}))
+        ui = load_ui_settings(tmp_path)
+        assert (ui.theme, ui.login_warn_days) == ("auto", 9)
+
+    def test_set_validates_range(self, tmp_path):
+        from claude_swap.exceptions import ConfigError
+        from claude_swap.settings import load_ui_settings, set_setting
+
+        set_setting(tmp_path, "ui.loginWarnDays", "10")
+        assert load_ui_settings(tmp_path).login_warn_days == 10
+        with pytest.raises(ConfigError):
+            set_setting(tmp_path, "ui.loginWarnDays", "61")

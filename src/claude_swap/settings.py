@@ -61,10 +61,13 @@ class AutoSwitchSettings:
 
 @dataclass(frozen=True)
 class UiSettings:
-    """Appearance preferences (``ui`` section). ``theme`` selects the TUI/CLI
-    color theme; ``auto`` follows terminal-background detection."""
+    """TUI preferences (``ui`` section). ``theme`` selects the TUI/CLI
+    color theme; ``auto`` follows terminal-background detection.
+    ``login_warn_days`` flags an account whose stored login (refresh token)
+    lapses within that many days, so it can be re-logged in ahead of time."""
 
     theme: str = "auto"
+    login_warn_days: int = 3
 
 
 # Where each spec's default (and effective value) lives, by ``SettingSpec.source``.
@@ -192,6 +195,11 @@ SETTING_SPECS: dict[str, SettingSpec] = {
             help="Color theme; auto follows the terminal background",
             group="ui", label="Theme",
         ),
+        SettingSpec(
+            "ui", "loginWarnDays", "login_warn_days", "int", 0, 60,
+            help="Warn when an account's login ends within this many days (0 = never)",
+            group="ui", label="Login warning (days)",
+        ),
     )
 }
 
@@ -308,8 +316,13 @@ def load_ui_settings(backup_root: Path) -> UiSettings:
             "settings.json: unsupported ui.theme %r; using %r",
             theme, default.theme,
         )
-        return default
-    return UiSettings(theme=theme)
+        theme = default.theme
+    spec = SETTING_SPECS["ui.loginWarnDays"]
+    days = section.get(spec.json_key, default.login_warn_days)
+    if isinstance(days, bool) or not isinstance(days, (int, float)):
+        days = default.login_warn_days
+    days = int(min(max(days, spec.lo), spec.hi))
+    return UiSettings(theme=theme, login_warn_days=days)
 
 
 def save_settings(backup_root: Path, settings: AutoSwitchSettings) -> None:

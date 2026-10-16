@@ -70,6 +70,15 @@ def access_token_fingerprint(credentials: str) -> str | None:
     return "sha256-at:" + hashlib.sha256(token.encode()).hexdigest()
 
 
+def login_expires_at(credentials: str) -> float | None:
+    """Epoch seconds of ``refreshTokenExpiresAt`` (see :func:`login_expires_at_iso`)."""
+    data = extract_oauth_data(credentials)
+    value = data.get("refreshTokenExpiresAt") if data else None
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or value <= 0:
+        return None
+    return value / 1000
+
+
 def login_expires_at_iso(credentials: str) -> str | None:
     """When the stored *login* itself lapses, as ISO-8601 UTC, or ``None``.
 
@@ -81,12 +90,11 @@ def login_expires_at_iso(credentials: str) -> str | None:
     is the date worth showing *before* that happens. Logins issued before Claude
     Code recorded the field carry nothing, which means "unknown", never "now".
     """
-    data = extract_oauth_data(credentials)
-    value = data.get("refreshTokenExpiresAt") if data else None
-    if isinstance(value, bool) or not isinstance(value, (int, float)) or value <= 0:
+    value = login_expires_at(credentials)
+    if value is None:
         return None
     return (
-        datetime.fromtimestamp(value / 1000, tz=timezone.utc)
+        datetime.fromtimestamp(value, tz=timezone.utc)
         .isoformat(timespec="seconds")
         .replace("+00:00", "Z")
     )
