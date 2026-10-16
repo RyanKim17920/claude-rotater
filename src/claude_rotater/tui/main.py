@@ -222,7 +222,7 @@ _MIN_NAME_W = 12
 # The plot takes whatever height the detail pane has, so the page has no
 # dead band above the action bar; this only stops it turning into a wall on
 # a very tall terminal.
-MAX_PLOT_LINES = 32
+MAX_PLOT_LINES = 40
 
 
 @dataclass(frozen=True)
