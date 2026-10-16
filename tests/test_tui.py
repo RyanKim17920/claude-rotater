@@ -1217,6 +1217,7 @@ class TestMainPage:
             assert ("add_token", "sk-ant-oat-x", None, 7, True) in fake_calls(app)
 
     async def test_c_opens_config_and_back(self, tmp_path):
+        from claude_swap.tui.config import ConfigScreen
         from claude_swap.tui.main import MainScreen
 
         app = make_app(three_accounts(tmp_path))
@@ -1224,8 +1225,8 @@ class TestMainPage:
             await settle(pilot)
             await pilot.press("c")
             await pilot.pause()
-            assert not isinstance(app.screen, MainScreen)
-            assert type(app.screen).__name__ in {"ConfigScreen", "ConfigPlaceholder"}
+            assert isinstance(app.screen, ConfigScreen)
+            assert app.screen.backup_dir == tmp_path
             await pilot.press("escape")
             await pilot.pause()
             assert isinstance(app.screen, MainScreen)
@@ -1324,6 +1325,33 @@ class TestEngineHosting:
             assert fake._poll_inputs_override == (80.0, ())
             assert "thr 80%" in painted(app, "#status")
             assert "ETA→80%" in painted(app, "#columns")
+
+    async def test_threshold_edited_on_config_page_restarts_engine(
+        self, tmp_path, fake_engine
+    ):
+        """End to end: `c`, type a threshold, submit; the real ConfigScreen's
+        SettingChanged message reaches the app and the engine restarts."""
+        from textual.widgets import Input
+
+        from claude_swap.tui.config import ConfigScreen
+
+        app = make_app(three_accounts(tmp_path))
+        async with app.run_test(size=(120, 40)) as pilot:
+            await settle(pilot)
+            await pilot.press("c")
+            await pilot.pause()
+            screen = app.screen
+            assert isinstance(screen, ConfigScreen)
+            editor = screen.row("autoswitch.threshold").editor
+            assert isinstance(editor, Input)
+            editor.focus()
+            editor.value = ""
+            await pilot.press("8", "1", "enter")
+            await settle(pilot)
+            assert len(fake_engine.instances) == 2
+            assert fake_engine.instances[0].stopped
+            assert fake_engine.instances[1].settings.threshold == 81.0
+            assert app.threshold_pct == 81.0
 
     async def test_config_message_routes_to_settings_change(self, tmp_path, fake_engine):
         from claude_swap.settings import set_setting

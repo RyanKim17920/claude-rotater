@@ -24,8 +24,6 @@ from typing import Callable, Protocol
 from textual.app import App
 from textual.binding import Binding
 from textual.reactive import reactive
-from textual.screen import Screen
-from textual.widgets import Static
 from textual.worker import WorkerState
 
 from claude_swap import printer
@@ -41,6 +39,7 @@ from claude_swap.settings import (
 )
 from claude_swap.snapshot_source import account_identity
 from claude_swap.switcher import ClaudeAccountSwitcher
+from claude_swap.tui.config import ConfigScreen
 from claude_swap.tui.data import ActionResult, SnapshotSource, format_duration, run_action
 from claude_swap.tui.main import AutoStatus, MainScreen
 from claude_swap.tui.modals import AddTokenModal, ConfirmModal, OutputModal, TokenForm
@@ -68,19 +67,6 @@ def default_engine_factory(switcher, settings, on_event) -> EngineLike:
     from claude_swap.autoswitch import AutoSwitchEngine
 
     return AutoSwitchEngine(switcher, settings, on_event)
-
-
-class ConfigPlaceholder(Screen):
-    """TEMPORARY until WP3's ``claude_swap.tui.config.ConfigScreen`` lands."""
-
-    BINDINGS = [Binding("escape,c,q", "app.pop_screen", "Back")]
-
-    def __init__(self, backup_dir) -> None:
-        super().__init__()
-        self.backup_dir = backup_dir
-
-    def compose(self):
-        yield Static("Config page is not available in this build. esc to go back.")
 
 
 class CswapApp(App):
@@ -241,14 +227,10 @@ class CswapApp(App):
         self._start_engine()
         self.request_refresh()
 
-    def on_config_screen_setting_changed(self, message) -> None:
+    def on_config_screen_setting_changed(self, message: ConfigScreen.SettingChanged) -> None:
         self.on_settings_changed(message.key)
 
     def action_open_config(self) -> None:
-        try:
-            from claude_swap.tui.config import ConfigScreen  # type: ignore[import-not-found]
-        except ImportError:  # TEMPORARY: WP3 not merged yet
-            ConfigScreen = ConfigPlaceholder  # noqa: N806
         if isinstance(self.screen, ConfigScreen):
             return
         self.push_screen(ConfigScreen(self.switcher.backup_dir))
