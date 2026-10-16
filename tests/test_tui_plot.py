@@ -335,3 +335,53 @@ class TestPeakColumns:
     def test_degrades_to_sparkline(self, utc):
         lines = self._render([(NOW - 86400, 50.0)], width=12, height=2)
         assert len(lines) == 1
+
+    @staticmethod
+    def _back_to_back(n: int, *, last_reset: float = NOW + 2 * 3600) -> list[tuple[float, float]]:
+        """``n`` consecutive 5h windows, the newest still running at NOW."""
+        return [(last_reset - k * 5 * 3600, 40.0 + k % 5 * 10) for k in range(n)]
+
+    @staticmethod
+    def _runs(line) -> list[str]:
+        return line.plain[GUTTER:].split()
+
+    def test_windows_per_bar(self):
+        from claude_rotater.tui.plot import windows_per_bar
+
+        week, five = 7 * 86400, 5 * 3600
+        assert windows_per_bar(window_len_s=five, span_s=week, cols=74) == 1  # 80-col pane
+        assert windows_per_bar(window_len_s=five, span_s=week, cols=53) == 2  # 120-col, side by side
+        assert windows_per_bar(window_len_s=five, span_s=week, cols=20) == 4
+        assert windows_per_bar(window_len_s=five, span_s=week, cols=0) == 1
+        assert windows_per_bar(window_len_s=five, span_s=0, cols=50) == 1
+
+    @pytest.mark.parametrize("width", [40, 57, 60, 78, 100])
+    def test_back_to_back_week_never_touches(self, utc, width):
+        from claude_rotater.tui.plot import windows_per_bar
+
+        peaks = self._back_to_back(34)
+        lines = self._render(peaks, threshold=None, width=width)
+        bottom = lines[-2].plain[GUTTER:]
+        assert all(cell_len == width for cell_len in (line.cell_len for line in lines))
+        per_bar = windows_per_bar(window_len_s=5 * 3600, span_s=7 * 86400, cols=width - GUTTER)
+        runs = self._runs(lines[-2])
+        # Every bar is separated by blank space, and together they account
+        # for every window in the week, grouped ``per_bar`` at a time.
+        assert len(runs) == pytest.approx(34 / per_bar, abs=1.5)
+        assert bottom.rstrip() == bottom, "the running window reaches the right edge"
+
+    def test_one_bar_per_window_when_wide(self, utc):
+        lines = self._render(self._back_to_back(34), threshold=None, width=78)
+        assert len(self._runs(lines[-2])) == 34
+
+    def test_grouped_bar_shows_highest_peak(self, utc):
+        # Two windows in the same bucket: the bar is as tall as the higher.
+        peaks = [(NOW - 3 * 86400, 20.0), (NOW - 3 * 86400 + 5 * 3600, 100.0)]
+        lines = self._render(peaks, threshold=None, width=30)
+        assert len(self._runs(lines[-2])) == 1
+        assert "█" in lines[0].plain[GUTTER:]
+
+    def test_clipped_left_bucket_is_kept(self, utc):
+        # The oldest visible window sits right at the left edge.
+        lines = self._render([(NOW - 7 * 86400 + 60, 70.0)], threshold=None, width=30)
+        assert self._runs(lines[-2])

@@ -40,7 +40,14 @@ from claude_rotater.estimator import WINDOW_LEN_S, AccountEstimate, WindowEstima
 from claude_rotater.json_output import USAGE_API_KEY, USAGE_RELOGIN_REQUIRED
 from claude_rotater.models import AccountSnapshot, AccountsSnapshot
 from claude_rotater.tui import data
-from claude_rotater.tui.plot import history_plot, line_plot, peak_columns, sparkline
+from claude_rotater.tui.plot import (
+    GUTTER,
+    history_plot,
+    line_plot,
+    peak_columns,
+    sparkline,
+    windows_per_bar,
+)
 from claude_rotater.tui.theme import Palette, brand_chip
 from claude_rotater.tui.widgets import account_card_text, bar_cells
 from claude_rotater.usage_history import Point
@@ -591,6 +598,13 @@ def _side_by_side(left: list[Text], right: list[Text], col_w: int) -> list[Text]
     return out
 
 
+def _block_width(width: int, n_blocks: int) -> int:
+    """The width each of ``n_blocks`` graphs gets in a pane ``width`` wide."""
+    if n_blocks == 2 and width >= SIDE_BY_SIDE_MIN_WIDTH:
+        return (width - _SIDE_GAP) // 2
+    return width
+
+
 def _arrange(
     blocks: list[tuple[Text, object]], *, width: int, height: int
 ) -> list[Text]:
@@ -602,7 +616,7 @@ def _arrange(
     if not blocks or height <= 0:
         return []
     if len(blocks) == 2 and width >= SIDE_BY_SIDE_MIN_WIDTH:
-        col_w = (width - _SIDE_GAP) // 2
+        col_w = _block_width(width, 2)
         plot_h = min(MAX_PLOT_LINES, height - 1)
         columns = [[title, *render(col_w, plot_h)] for title, render in blocks]
         return _side_by_side(columns[0], columns[1], col_w)[:height]
@@ -727,6 +741,12 @@ def long_term_lines(
     title_5h.append(f"  last 7 days · {len(peaks)} windows", style=palette.muted)
     if threshold is not None and peaks:
         title_5h.append(f" · {over} past {pct_label(threshold)}%", style=palette.sev_warn if over else palette.muted)
+    # Too narrow for a bar per window: say how many windows each bar holds.
+    per_bar = windows_per_bar(
+        window_len_s=WINDOW_LEN_S["5h"], span_s=LONG_5H_SPAN_S, cols=_block_width(width, 2) - GUTTER
+    )
+    if per_bar > 1:
+        title_5h.append(f" · {per_bar}/bar", style=palette.muted)
 
     title_7d = Text(no_wrap=True, overflow="ellipsis")
     title_7d.append("7d usage", style=f"bold {palette.accent}")

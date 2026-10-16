@@ -1990,11 +1990,22 @@ class TestLongTermLines:
         )
         lines = long_term_lines(self._acc(), lt, now=now, threshold=90, width=120, height=20)
         text = "\n".join(line.plain for line in lines)
-        assert "5h peaks  last 7 days · 2 windows · 1 past 90%" in text
+        assert "5h peaks  last 7 days · 2 windows · 1 past 90% · 2/bar" in text
         assert "7d usage  since" in text and "peak 66%" in text
         assert "█" in text  # peak columns
         assert any(0x2800 <= ord(ch) <= 0x28FF for ch in text)  # 7d braille curve
         assert len(lines) <= 20 and all(line.cell_len <= 120 for line in lines)
+
+    def test_grouping_named_only_when_bars_hold_several_windows(self):
+        from claude_rotater.tui.main import LongTerm, long_term_lines
+
+        now = time.time()
+        lt = LongTerm(peaks_5h=((now - 86400, 50.0),))
+        for width, note in ((80, False), (120, True), (160, False)):
+            text = "\n".join(
+                l.plain for l in long_term_lines(self._acc(), lt, now=now, threshold=90, width=width, height=20)
+            )
+            assert ("/bar" in text) == note, width
 
     def test_side_by_side_when_wide_stacked_when_narrow(self):
         from claude_rotater.tui.main import LongTerm, long_term_lines

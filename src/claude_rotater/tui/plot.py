@@ -12,6 +12,7 @@ auto-switch threshold as a dashed row, and the reset as a marker column.
 
 from __future__ import annotations
 
+import math
 from datetime import datetime
 from typing import Sequence
 
@@ -321,6 +322,64 @@ def history_plot(
 COLUMN_GLYPHS = " ▁▂▃▄▅▆▇█"
 
 
+# A bar needs one column plus one blank column before its right neighbour.
+_MIN_COLS_PER_BAR = 2
+
+
+def windows_per_bar(*, window_len_s: float, span_s: float, cols: int) -> int:
+    """How many consecutive windows one peak bar stands for, so that every
+    bar keeps a blank column from the next one in ``cols`` plot columns."""
+    if cols <= 0 or span_s <= 0 or window_len_s <= 0:
+        return 1
+    per_window = cols * window_len_s / span_s
+    return max(1, math.ceil(_MIN_COLS_PER_BAR / per_window - 1e-9))
+
+
+def _peak_bars(
+    visible: Sequence[tuple[float, float]], *, window_len_s: float, x0: float, x1: float, cols: int
+) -> list[tuple[int, int, float]]:
+    """``(first_col, end_col, peak)`` bars, ``end_col`` exclusive, each leaving
+    at least one blank column before the next bar.
+
+    When a window gets two or more columns, each window is its own bar placed
+    at its real time, so idle stretches show as gaps. When windows are
+    narrower, they are grouped into buckets of ``N`` window lengths counted
+    back from ``x1`` and each bucket shows its highest peak."""
+
+    def col(t: float) -> int:
+        return math.floor(_clamp((t - x0) / (x1 - x0), 0.0, 1.0) * cols)
+
+    def bar(start: float, end: float, peak: float) -> tuple[int, int, float] | None:
+        c0 = col(start)
+        # The running window reaches the right edge; everything else gives up
+        # its last column as the gap before the next bar.
+        c1 = cols if end >= x1 else col(end) - 1
+        return (c0, c1, peak) if c1 > c0 else None
+
+    n = windows_per_bar(window_len_s=window_len_s, span_s=x1 - x0, cols=cols)
+    if n == 1:
+        bars = (bar(r - window_len_s, r, p) for r, p in visible)
+        return [b for b in bars if b is not None]
+    bucket_s = n * window_len_s
+    # Bucket ``edge`` holds ``x0``. Cut off too narrow for a bar, it joins
+    # its right neighbour, which then stretches to the left edge.
+    edge = math.floor((x1 - x0) / bucket_s)
+    merge_edge = edge > 0 and col(x1 - edge * bucket_s) < _MIN_COLS_PER_BAR
+    buckets: dict[int, float] = {}
+    for resets_at, peak in visible:
+        k = min(edge, max(0, math.floor((x1 - resets_at) / bucket_s)))
+        if merge_edge and k == edge:
+            k = edge - 1
+        buckets[k] = max(peak, buckets.get(k, 0.0))
+    out = []
+    for k, peak in sorted(buckets.items(), reverse=True):
+        start = x0 if merge_edge and k == edge - 1 else max(x0, x1 - (k + 1) * bucket_s)
+        found = bar(start, x1 - k * bucket_s, peak)
+        if found is not None:
+            out.append(found)
+    return out
+
+
 def peak_columns(
     peaks: Sequence[tuple[float, float]],
     *,
@@ -332,13 +391,16 @@ def peak_columns(
     height: int,
     palette: Palette = Palette.DARK,
 ) -> list[Text]:
-    """One column per past window, as tall as that window's peak pct.
+    """One bar per past window, as tall as that window's peak pct.
 
     ``peaks`` is ``(resets_at, peak_pct)`` pairs; a window covers
     ``[resets_at - window_len_s, resets_at]`` on the x axis, so gaps between
-    columns are real idle time. Columns use eighth blocks (8 steps per row)
-    and take the severity color of their peak. ``height`` lines including the
-    time axis; a sparkline of the peaks when the area is too small.
+    bars are real idle time, and adjacent bars always keep a blank column.
+    When the plot is too narrow for that, one bar stands for several
+    consecutive windows (see :func:`windows_per_bar`) and shows their highest
+    peak. Bars use eighth blocks (8 steps per row) and take the severity
+    color of their peak. ``height`` lines including the time axis; a
+    sparkline of the peaks when the area is too small.
     """
     if x1 <= x0:
         x1 = x0 + 1.0
@@ -350,21 +412,14 @@ def peak_columns(
     heights = [0] * cols  # eighths, per column
     colors: list[str | None] = [None] * cols
 
-    def col(t: float) -> int:
-        return int(_clamp((t - x0) / (x1 - x0), 0.0, 1.0) * (cols - 1))
-
-    for resets_at, peak in visible:
-        c0, c1 = col(resets_at - window_len_s), col(resets_at)
-        if c1 - c0 >= 3:
-            # Inset both edges so back-to-back windows keep a blank column.
-            c0, c1 = c0 + 1, c1 - 1
+    for c0, c1, peak in _peak_bars(visible, window_len_s=window_len_s, x0=x0, x1=x1, cols=cols):
         eighths = round(_clamp(peak, 0.0, 100.0) / 100.0 * rows * 8)
         # Windows that stayed under the threshold recede; the ones that
         # crossed it (the ones that forced a switch) keep full color.
         color = palette.severity(peak)
         if threshold is None or peak < threshold:
             color = f"{color} dim"
-        for c in range(c0, c1 + 1):
+        for c in range(c0, c1):
             if eighths >= heights[c]:
                 heights[c] = eighths
                 colors[c] = color
@@ -392,4 +447,4 @@ def peak_columns(
     return lines
 
 
-__all__ = ["history_plot", "line_plot", "peak_columns", "sparkline"]
+__all__ = ["history_plot", "line_plot", "peak_columns", "sparkline", "windows_per_bar"]
