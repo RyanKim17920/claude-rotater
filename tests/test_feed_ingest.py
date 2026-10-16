@@ -80,7 +80,7 @@ class TestAttribute:
         assert verdict(rec(t=NOW - 200), stale_s=120.0).reason == "stale"
 
     def test_other_profile_is_rejected(self):
-        v = verdict(rec(config_dir="/home/u/.claude-work"))
+        v = verdict(rec(config_dir="/home/u/.claude-other"))
         assert (v.slot, v.reason) == (None, "foreign-profile")
 
     def test_trailing_slash_and_dot_segments_still_match(self):

@@ -101,11 +101,11 @@ class TestParsePayload:
 
     def test_config_dir_from_transcript_beats_env(self):
         rec = feed.parse_payload(
-            raw(transcript_path="/w/.claude-work/projects/p/s.jsonl"),
+            raw(transcript_path="/w/.claude-other/projects/p/s.jsonl"),
             NOW,
             environ={"CLAUDE_CONFIG_DIR": "/elsewhere"},
         )
-        assert rec["config_dir"] == "/w/.claude-work"
+        assert rec["config_dir"] == "/w/.claude-other"
 
     def test_config_dir_falls_back_to_env_then_default(self):
         no_transcript = payload()
