@@ -85,7 +85,7 @@ Or let claude-swap auto-pick by remaining quota — `cswap switch --strategy bes
 Let claude-swap watch your usage and switch for you. When the active account's 5-hour or 7-day window reaches the threshold (default 90%), it switches to the account with the most quota left — before you hit the limit, and safe to run while Claude Code is working:
 
 ```bash
-cswap auto                     # foreground loop, polls every 60s
+cswap auto                     # foreground loop
 cswap auto --threshold 80      # switch earlier
 cswap auto --model Fable       # also switch when the Fable weekly limit is hit
 cswap auto --once              # single check-and-switch, for cron/scripts
@@ -99,7 +99,7 @@ cswap auto --strategy consume-first   # burn the soonest-resetting account first
 - Runs safely alongside Claude Code: switches take the same credential locks Claude Code uses, so a swap never collides with a token refresh.
 - A cooldown (default 5 min) and a hysteresis margin stop it flip-flopping near the threshold: a proactive switch only lands on an account that's below the threshold *and* better than the current one by the margin — a candidate that clears the margin is always taken, but two accounts hovering at the line never ping-pong. When every account is exhausted it keeps checking on a bounded slow cadence, waking sooner for an imminent reset.
 - **Strategies** (`--strategy`, or `cswap config set autoswitch.strategy`): `best` (default) stays put until the active account nears its limit, then moves to the account with the most quota left. `consume-first` proactively keeps you on the account whose **weekly window resets soonest** — use-it-or-lose-it — switching to a sooner-resetting account (with room to spare) even below the threshold, so perishable weekly quota isn't wasted.
-- Usage polling is adaptive — a couple of accounts per check, busy alternates watched more closely, and exhausted ones checked about every ten minutes (or slower after 429s) — so API traffic stays flat no matter how many accounts you manage.
+- Usage polling is adaptive and event-driven: each account is polled about every ten minutes (`autoswitch.pollSpareSeconds`), sooner when its burn projects a threshold crossing (never faster than every 3 minutes), once right after each known window reset, and never above an hourly budget per account (slower after 429s). Between polls the loop sleeps. With the [statusline feed](#live-usage-from-claude-codes-statusline) set up, the active account is not polled at all while Claude Code is reporting its usage.
 - It fails safe: if a usage check errors it keeps trusting the last-known numbers while retries back off, and an expired token on an idle machine makes it hold rather than fail over (Claude Code refreshes the token on your next message).
 - An account whose refresh token has died is quarantined and reported until you either log in with it and re-run `cswap add --slot N`, or replace its stored credentials from a known-good export — a plain `cswap import backup.cswap` replaces dead-token slots on its own (`--force` is still required to replace other existing accounts; note a stale export can carry an already-superseded token). API-key accounts are never rotated onto unless you pass `--include-api-key-accounts`.
 - To hold an account out of rotation yourself — a work account you don't want touched, one you're resting — run `cswap disable <num|email>`; `cswap enable <num|email>` puts it back. Disabled accounts are skipped by auto-switch, bare `cswap switch`, and the `best` / `next-available` strategies, but stay fully managed and remain a valid explicit `cswap switch <num|email>` target. They show a `(disabled)` marker in `cswap list`, in the [TUI](#interactive-dashboard-tui), and in the [menu bar](#menu-bar-macos) — both of which also let you toggle the state in place (TUI: `d` on the account; menu bar: *Disable / enable account*).
@@ -264,6 +264,21 @@ The agent lives at `~/Library/LaunchAgents/com.cswap.menubar.plist` and logs to 
 </details>
 
 ## Advanced
+
+### Live usage from Claude Code's statusline
+
+Claude Code passes the active account's 5-hour and 7-day usage to your [statusline](https://code.claude.com/docs/en/statusline) command on every refresh, at no API cost. Hand it to claude-swap with `cswap feed`, which reads that JSON on stdin, appends a small record to `<backup root>/cache/feed/statusline.jsonl`, and exits quickly (it never fails, so it cannot break your statusline). The auto-switcher (TUI, `cswap auto`, menu bar) wakes as soon as a record lands, reacts to the new reading at once, and stops polling the active account while the feed is fresh. Once it has been quiet for `autoswitch.feedStaleSeconds` (default 600) the account is polled like any other.
+
+In a statusline script that already reads its input into a variable:
+
+```bash
+input=$(cat)
+cswap feed <<<"$input" >/dev/null 2>&1 &
+```
+
+or put `cswap feed --tee` in front of an existing command, since `--tee` copies stdin to stdout: `"command": "cswap feed --tee | ~/.claude/statusline.sh"`.
+
+A reading is credited to the account that is active when it arrives, unless that is not safe to assume. A running Claude Code session keeps its old token for a moment after a switch (until its next request, or up to ~30 s on macOS) and keeps showing its last response's numbers until it makes a new one. So readings from the first 90 s after a switch, readings from another `CLAUDE_CONFIG_DIR`, and readings whose reset times disagree with what claude-swap already knows about the active account are dropped. Sessions started with `cswap run` are credited to their own account. A dropped reading just leaves the account on normal polling.
 
 ### Configuration
 
