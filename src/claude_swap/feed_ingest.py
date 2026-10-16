@@ -4,7 +4,7 @@ A feed record is the usage Claude Code saw on its last API response, but the
 record does not say which account that response was for. This module decides
 (:func:`attribute`), then writes accepted readings through
 :meth:`UsageStore.adopt` with a hold, which keeps every collector (engine,
-``cswap list``, TUI, menu bar) from polling that account while the feed is
+TUI, ``cswap status``) from polling that account while the feed is
 fresh, and into the usage history so the estimator and plots see them.
 
 **Attribution.** What a running session does after ``cswap switch``: it keeps

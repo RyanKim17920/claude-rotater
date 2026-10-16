@@ -5,7 +5,7 @@ Replaces the all-or-nothing 15s snapshot that previously lived in
 treated as empty — its data had a 15s shelf life anyway). One failed round
 trip no longer blanks every account: a failure updates the error/backoff
 fields and never touches the last-good measurement (stale-on-error). The
-table is shared by ``--list``/``--status`` (on-demand refresh of stale
+table is shared by the TUI/``status`` (on-demand refresh of stale
 entries) and ``cswap auto`` (scheduled polling), so each learns from the
 other's fetches.
 
@@ -310,8 +310,8 @@ class UsageEntry:
     # Appended to preserve positional compatibility for the older read-model
     # fields while exposing whether a fetch lease is currently live.
     claim_until: float | None = None
-    # Until when a reading adopted from another machine (``cswap
-    # import-usage``) keeps every collector off this slot. Appended for the
+    # Until when an adopted reading (the statusline feed's) keeps every
+    # collector off this slot. Appended for the
     # same positional compatibility as ``claim_until``.
     held_until: float | None = None
 
@@ -849,7 +849,7 @@ class UsageStore:
     ``(email, organizationUuid)``) and only ever touches rows for those slots:
     a row whose stored identity differs is invisible to reads and replaced on
     write, so slot reuse never serves the previous account's usage. Rows for
-    slots outside the map are left alone (callers like ``--status`` operate
+    slots outside the map are left alone (callers like ``status`` operate
     on a single slot).
     """
 

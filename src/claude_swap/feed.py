@@ -8,8 +8,8 @@ responses. That is the active account's usage, current to the last request,
 and it costs no request against the usage endpoint's ~30/hour budget.
 
 ``cswap feed`` turns each refresh into one compact JSON line appended to
-``<backup>/cache/feed/statusline.jsonl``. The engine (TUI, ``cswap auto``,
-menu bar) watches that directory and ingests new lines
+``<backup>/cache/feed/statusline.jsonl``. The engine (TUI, ``cswap auto``)
+watches that directory and ingests new lines
 (:mod:`claude_swap.feed_ingest`), so the active account no longer needs
 polling while a session is running.
 

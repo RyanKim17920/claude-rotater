@@ -371,7 +371,7 @@ class CswapApp(App):
 
     def _read_last_switch_at(self) -> float | None:
         """The engine's shared ``lastSwitchAt``: covers switches made by
-        another process (``cswap auto``, the menu bar). Lock-free read."""
+        another process (``cswap auto``, ``cswap switch``). Lock-free read."""
         try:
             raw = json.loads(
                 (self.switcher.backup_dir / STATE_FILENAME).read_text(encoding="utf-8")

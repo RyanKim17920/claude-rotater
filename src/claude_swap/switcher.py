@@ -1991,7 +1991,7 @@ class ClaudeAccountSwitcher:
         The next `cswap run` fails the reuse check and re-bootstraps from
         backup; the bootstrap merges .claude.json, so the profile's own
         projects/history survive. Used when backup credentials change under
-        an existing profile (e.g. --import --force).
+        an existing profile.
         """
         from claude_swap.session import (
             clear_session_stale,
@@ -2447,7 +2447,7 @@ class ClaudeAccountSwitcher:
         ``.claude.json`` renamed to the new profile while the live keychain
         item still held the original account's credential. The slot ends up
         LABELLED one account and CONTAINING another, so every later switch to
-        it logs the wrong user in and ``--status`` shows a name that is not
+        it logs the wrong user in and ``status`` shows a name that is not
         whose token is stored. Nothing surfaces the disagreement.
 
         ``fetch_oauth_profile`` already answers exactly this ("whose token is
@@ -2567,7 +2567,7 @@ class ClaudeAccountSwitcher:
         ``add_account`` snapshots the *live* active credential under an
         ``oauthAccount`` identity. Now that ``_read_credentials`` can return a raw
         ``sk-ant-…`` key, a live ``/login`` key could be backed up as a kindless
-        account, corrupting the session-guard / export / collision logic that keys
+        account, corrupting the session-guard / collision logic that keys
         off ``kind``. Reject with guidance toward the supported path instead.
         """
         if looks_like_api_key(creds):
@@ -4281,7 +4281,7 @@ class ClaudeAccountSwitcher:
     ) -> dict[str, UsageEntry]:
         """Store-backed usage collection: one :class:`UsageEntry` per account.
 
-        ``fetch=None`` (on-demand callers: ``--list``/``--status``/switch
+        ``fetch=None`` (on-demand callers: ``status``, the switch
         strategies, dashboards) makes every account a candidate but respects
         the persisted poll plans; the auto engine passes an explicit set whose
         members may beat the serve TTL when their plan says so (urgent
@@ -4368,7 +4368,7 @@ class ClaudeAccountSwitcher:
             if num in claims:
                 continue  # the fetch path will handle (or sentinel) it now
             if entries[num].held(now):
-                # Held for another machine's reading (``cswap import-usage``):
+                # Held for an adopted reading (the statusline feed's):
                 # that reading, not this token's refresh, is what the row is
                 # waiting on, and it stays decision-trusted, so there is no
                 # gap to idle-hold over. The fetch path refreshes the token
@@ -4903,9 +4903,9 @@ class ClaudeAccountSwitcher:
         """Store-backed usage entry for just the active account.
 
         Builds a single-account info row instead of the full accounts list
-        (``--status`` touches one slot) and runs it through the shared
+        (``status`` touches one slot) and runs it through the shared
         collector, so freshness/backoff/claim gating and the shared
-        ``cache/usage.json`` table behave exactly as in ``--list``.
+        ``cache/usage.json`` table behave exactly as for the full list.
         """
         active = self._read_active_credentials()
         creds = active.value or ""
@@ -4914,7 +4914,7 @@ class ClaudeAccountSwitcher:
         return self._collect_usage_entries([info])[str(account_num)]
 
     def _build_status_payload(self) -> dict:
-        """Build the ``--status --json`` payload (no active / unmanaged / managed)."""
+        """Build the ``status --json`` payload (no active / unmanaged / managed)."""
         identity = self._get_current_account()
         if identity is None:
             return {"schemaVersion": SCHEMA_VERSION, "active": None}
@@ -4939,7 +4939,7 @@ class ClaudeAccountSwitcher:
         org_uuid = acct.get("organizationUuid", "") or ""
         alias = acct.get("alias", "") or ""
         entry = self._active_account_usage(account_num, current_email, org_uuid)
-        # Decision-grade projection, same rule as the --list payload: stale
+        # Decision-grade projection, same rule as switch --json: stale
         # beyond STALE_OK_S reports unavailable, not "ok" with old numbers.
         status, usage = usage_fields(entry.decision_value(), entry.fetched_at)
         active: dict = {
@@ -5118,7 +5118,7 @@ class ClaudeAccountSwitcher:
         ``"next-available"`` rotates and skips accounts at their limit, falling
         back to plain rotation when usage is unavailable. Both apply only to the
         normal path (a live Claude login present); the fresh-machine path (no
-        live login, e.g. right after --import) ignores them.
+        live login, e.g. on a machine where Claude Code was logged out) ignores them.
         """
         strategy_label = strategy if strategy in ("best", "next-available") else "rotation"
         warnings: list[str] = []
@@ -5140,7 +5140,7 @@ class ClaudeAccountSwitcher:
         self._get_sequence_data_migrated()
 
         # Fresh-machine path: no live Claude session, but we have managed accounts
-        # (e.g. right after cswap --import). Activate the recorded
+        # (e.g. Claude Code was logged out). Activate the recorded
         # activeAccountNumber, or fall back to the first slot in sequence.
         # With no live state to capture, the target must have valid backups —
         # walk the sequence if the preferred target is broken.
@@ -5489,7 +5489,7 @@ class ClaudeAccountSwitcher:
 
         ``force`` activates the target's stored credentials directly, skipping
         both the already-active no-op guard and the backup-current step —
-        the recovery path for a live login gone stale (e.g. after --import).
+        the recovery path for a live login gone stale.
         """
         if not self.sequence_file.exists():
             raise ConfigError("No accounts are managed yet")

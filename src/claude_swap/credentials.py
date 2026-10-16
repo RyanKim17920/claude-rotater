@@ -132,7 +132,7 @@ _ACTIVE_READ_ATTEMPTS = 2
 _ACTIVE_READ_RETRY_DELAY = 0.3  # seconds between attempts
 
 # After a Keychain failure the store drops to file mode so one CLI invocation
-# can't split-brain between backends. A long-running daemon (menu bar / TUI)
+# can't split-brain between backends. A long-running process (TUI / auto)
 # instead re-probes this long after the last failure: far longer than any CLI
 # command runs (so the guarantee holds — a sub-second command never re-probes),
 # short enough that a transient `security` timeout self-heals within a minute

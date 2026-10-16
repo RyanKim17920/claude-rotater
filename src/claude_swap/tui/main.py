@@ -85,7 +85,7 @@ class AutoStatus:
     """What the status line knows about the engine, folded from its events.
 
     ``last_switch_at`` may also come from the shared state file, so a switch
-    made by another process (``cswap auto``, the menu bar) still shows its
+    made by another process (``cswap auto``, ``cswap switch``) still shows its
     cooldown here.
     """
 

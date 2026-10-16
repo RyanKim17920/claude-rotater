@@ -54,7 +54,7 @@ outlasts an hour *past* that margin.
 
 Plans computed here are persisted per account in the usage store
 (``nextPollAt``/``pollIntervalS``) by whichever collector fetched, so every
-surface — ``cswap list``, the TUI, the menu bar, the auto engine — inherits
+surface — ``cswap status``, the TUI, the auto engine — inherits
 the same cadence no matter how often it repaints.
 
 If a future probe revises the measured shape, adjust the constants in this
@@ -121,7 +121,7 @@ CANDIDATE_MAX_INTERVAL_S = SPARE_INTERVAL_S
 EXHAUSTED_INTERVAL_S = 600.0
 
 # ±fraction applied to each scheduled interval so independent processes
-# (watch + menu bar + auto) drift apart instead of fetching in lockstep.
+# (TUI + auto) drift apart instead of fetching in lockstep.
 JITTER_FRAC = 0.1
 
 # Reaction to a 429 with ``Retry-After: 0`` (the saturated-window edge):

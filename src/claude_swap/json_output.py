@@ -1,6 +1,6 @@
 """Serialization helpers for ``--json`` structured output.
 
-Centralizes the schema-v1 shapes so ``--list``/``--status``/``--switch`` agree on
+Centralizes the schema-v1 shapes so ``status --json`` and ``switch --json`` agree on
 field names (camelCase) and on how the
 internal usage dict is projected to JSON. Callers build payloads here; the CLI does
 the single ``json.dumps`` (see cli.py).

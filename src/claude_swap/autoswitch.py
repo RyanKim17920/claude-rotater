@@ -531,7 +531,7 @@ def _window_pcts(
     Deliberately restricted to the windows the *decision* reads (same
     ``models`` filter): showing an unconfigured scoped window at 100% next
     to a switch onto that account would look like a bug, when the engine
-    correctly ignored it. Full per-model usage lives in ``cswap list``.
+    correctly ignored it. Full per-model usage lives in the TUI.
     """
     return {
         name: pct for name, pct, _ in oauth.relevant_windows(usage, models)
@@ -686,7 +686,7 @@ def note_manual_switch(
     """Stamp a user-initiated switch into the shared engine state.
 
     Sets ``lastSwitchAt`` so every engine sharing the state file (TUI,
-    ``cswap auto``, menu bar) holds off proactive switching for its cooldown
+    ``cswap auto``) holds off proactive switching for its cooldown
     instead of bouncing straight back off the account the user just chose.
     Failover still ignores the cooldown, as it does after an engine switch.
     ``lastSwitchTo`` becomes the chosen slot and the engine's no-return
