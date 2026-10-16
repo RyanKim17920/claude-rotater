@@ -1798,15 +1798,20 @@ class ClaudeAccountSwitcher:
         read (no fetching, no credential access). The TUI watch view diffs
         consecutive snapshots to flash rows whose usage just refreshed.
         """
-        data = self._get_sequence_data() or {}
-        identities = {
-            num: (info.get("email", ""), info.get("organizationUuid", "") or "")
-            for num, info in data.get("accounts", {}).items()
-        }
         # No models needed: only fetched_at is read, never scoped-window trust.
         return {
             num: entry.fetched_at
-            for num, entry in self._usage_store.entries(identities).items()
+            for num, entry in self._usage_store.entries(self.usage_identities()).items()
+        }
+
+    def usage_identities(self) -> dict[str, tuple[str, str]]:
+        """Slot → ``(email, organizationUuid)`` for every managed account: the
+        identity key the usage store and history guard their rows with. A
+        pure file read (no credential access)."""
+        data = self._get_sequence_data() or {}
+        return {
+            num: (info.get("email", ""), info.get("organizationUuid", "") or "")
+            for num, info in data.get("accounts", {}).items()
         }
 
     def set_poll_policy_inputs(
