@@ -131,3 +131,11 @@ class TestHistoryFallback:
 
         assert _shim.long_series(Real(), "1", ("a", "b"), "5h", 10.0) == [Point(11.0, 1.0, None)]
         assert _shim.windows(Real(), "1", ("a", "b"), "5h", 10.0) == [_shim.WindowSummary(15.0, 42.0)]
+
+
+def test_preloaded_series_avoids_a_reread():
+    history = FakeHistory({"1": {"5h": [Point(NOW, 50.0, NOW + 60)]}})
+    loaded = {"5h": [Point(NOW, 70.0, NOW + 60)]}
+    out = _shim.windows(history, "1", ("a", "b"), "5h", 0, preloaded=loaded)
+    assert out == [_shim.WindowSummary(NOW + 60, 70.0)]
+    assert history.reads == 0

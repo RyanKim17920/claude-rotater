@@ -102,21 +102,30 @@ def uninstall_statusline() -> object:
     return module.uninstall()
 
 
-def long_series(history, num: str, identity, label: str, since: float) -> list[Point]:
-    """Points of one window label at or after ``since``, oldest first."""
+def long_series(
+    history, num: str, identity, label: str, since: float, *, preloaded=None
+) -> list[Point]:
+    """Points of one window label at or after ``since``, oldest first.
+
+    ``preloaded`` is the ``series()`` result the caller already holds for
+    this slot; the fallback reuses it instead of re-reading the file."""
     real = getattr(history, "long_series", None)
     if callable(real):
         return list(real(identity, label, since))
-    points = history.series({num: identity}).get(num, {}).get(label, [])
-    return [p for p in points if p.t >= since]
+    per_window = preloaded if preloaded is not None else history.series({num: identity}).get(num, {})
+    return [p for p in per_window.get(label, []) if p.t >= since]
 
 
-def windows(history, num: str, identity, label: str, since: float) -> list[WindowSummary]:
+def windows(
+    history, num: str, identity, label: str, since: float, *, preloaded=None
+) -> list[WindowSummary]:
     """Per-window peaks of one label whose reset falls at or after ``since``."""
     real = getattr(history, "windows", None)
     if callable(real):
         return [WindowSummary(float(w.resets_at), float(w.peak_pct)) for w in real(identity, label, since)]
-    return summarize_windows(long_series(history, num, identity, label, since))
+    return summarize_windows(
+        long_series(history, num, identity, label, since, preloaded=preloaded)
+    )
 
 
 def summarize_windows(points: list[Point]) -> list[WindowSummary]:

@@ -369,10 +369,10 @@ class RotaApp(App):
             if stamps == self._estimate_stamps:
                 return None
             self._estimate_stamps = stamps
+        identities = {acc.number: (acc.email, acc.org_uuid) for acc in snap.accounts}
         history = getattr(self.switcher, "usage_history", None)
         if history is None:
-            return {}, {}, ({} if self.long_view else None)
-        identities = {acc.number: (acc.email, acc.org_uuid) for acc in snap.accounts}
+            return {}, {}, self._empty_long_term(identities)
         now = time.time()
         threshold = self.settings.threshold
         try:
@@ -383,19 +383,30 @@ class RotaApp(App):
                 )
                 for num in identities
             }
-            long_term = self._long_term_for(history, identities, now) if self.long_view else None
+            long_term = (
+                self._long_term_for(history, identities, series, now) if self.long_view else None
+            )
         except Exception as exc:
             self.log.warning(f"usage history unavailable: {exc}")
-            return {}, {}, ({} if self.long_view else None)
+            return {}, {}, self._empty_long_term(identities)
         return estimates, series, long_term
 
+    def _empty_long_term(self, identities) -> dict[str, LongTerm] | None:
+        """No history at all: the long-term view says so instead of loading."""
+        return {num: LongTerm() for num in identities} if self.long_view else None
+
     @staticmethod
-    def _long_term_for(history, identities, now: float) -> dict[str, LongTerm]:
+    def _long_term_for(history, identities, series, now: float) -> dict[str, LongTerm]:
         """Past windows per account for the long-term view. Worker thread only."""
         out: dict[str, LongTerm] = {}
         for num, identity in identities.items():
-            peaks = _shim.windows(history, num, identity, "5h", now - LONG_5H_SPAN_S)
-            curve = _shim.long_series(history, num, identity, "7d", now - LONG_7D_SPAN_S)
+            loaded = series.get(num, {})
+            peaks = _shim.windows(
+                history, num, identity, "5h", now - LONG_5H_SPAN_S, preloaded=loaded
+            )
+            curve = _shim.long_series(
+                history, num, identity, "7d", now - LONG_7D_SPAN_S, preloaded=loaded
+            )
             out[num] = LongTerm(
                 peaks_5h=tuple((w.resets_at, w.peak_pct) for w in peaks),
                 series_7d=tuple(curve),
