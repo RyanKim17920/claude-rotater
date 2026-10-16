@@ -71,16 +71,7 @@ def access_token_fingerprint(credentials: str) -> str | None:
 
 
 def login_expires_at(credentials: str) -> float | None:
-    """Epoch seconds of ``refreshTokenExpiresAt`` (see :func:`login_expires_at_iso`)."""
-    data = extract_oauth_data(credentials)
-    value = data.get("refreshTokenExpiresAt") if data else None
-    if isinstance(value, bool) or not isinstance(value, (int, float)) or value <= 0:
-        return None
-    return value / 1000
-
-
-def login_expires_at_iso(credentials: str) -> str | None:
-    """When the stored *login* itself lapses, as ISO-8601 UTC, or ``None``.
+    """When the stored *login* itself lapses, as epoch seconds, or ``None``.
 
     Claude Code stores ``refreshTokenExpiresAt`` (epoch milliseconds) next to the
     access token's ``expiresAt``. The two age differently: the access token is
@@ -90,14 +81,11 @@ def login_expires_at_iso(credentials: str) -> str | None:
     is the date worth showing *before* that happens. Logins issued before Claude
     Code recorded the field carry nothing, which means "unknown", never "now".
     """
-    value = login_expires_at(credentials)
-    if value is None:
+    data = extract_oauth_data(credentials)
+    value = data.get("refreshTokenExpiresAt") if data else None
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or value <= 0:
         return None
-    return (
-        datetime.fromtimestamp(value, tz=timezone.utc)
-        .isoformat(timespec="seconds")
-        .replace("+00:00", "Z")
-    )
+    return value / 1000
 
 
 def is_oauth_token_expired(expires_at: object) -> bool:

@@ -1467,12 +1467,12 @@ class TestConsumeBusyIsDeterministic:
         assert not missing, missing
 
 
-class TestLoginExpiresAtIso:
-    def test_refresh_token_expiry_is_reported_as_iso_utc(self):
+class TestLoginExpiresAt:
+    def test_refresh_token_expiry_is_reported_in_epoch_seconds(self):
         creds = json.dumps({"claudeAiOauth": {
             "accessToken": "sk-x", "refreshTokenExpiresAt": 1791421596865,
         }})
-        assert oauth.login_expires_at_iso(creds) == "2026-10-08T01:06:36Z"
+        assert oauth.login_expires_at(creds) == pytest.approx(1791421596.865)
 
     @pytest.mark.parametrize("creds", [
         "",
@@ -1484,4 +1484,4 @@ class TestLoginExpiresAtIso:
         json.dumps({"other": {}}),
     ])
     def test_anything_but_a_positive_epoch_is_unknown(self, creds):
-        assert oauth.login_expires_at_iso(creds) is None
+        assert oauth.login_expires_at(creds) is None
