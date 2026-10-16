@@ -59,20 +59,18 @@ class TestLoadSettings:
         )
         loaded = load_settings(tmp_path)
         assert loaded.threshold == 80.0
-        assert loaded.interval_seconds == AutoSwitchSettings().interval_seconds
+        assert loaded.cooldown_seconds == AutoSwitchSettings().cooldown_seconds
 
     def test_values_are_clamped(self, tmp_path: Path):
         settings_path(tmp_path).write_text(json.dumps({
             "autoswitch": {
                 "threshold": 200,
-                "intervalSeconds": 1,
                 "hysteresisPct": -5,
                 "unhealthyTicks": 0,
             }
         }))
         loaded = load_settings(tmp_path)
         assert loaded.threshold == 99.9
-        assert loaded.interval_seconds == 15.0  # usage-cache TTL floor
         assert loaded.hysteresis_pct == 0.0
         assert loaded.unhealthy_ticks == 1
 
@@ -190,7 +188,8 @@ class TestSettingSpecs:
         assert len(labels) == len(set(labels))
 
     def test_group_assignments(self):
-        assert SETTING_SPECS["autoswitch.intervalSeconds"].group == "polling"
+        assert SETTING_SPECS["autoswitch.pollSpareSeconds"].group == "polling"
+        assert "autoswitch.intervalSeconds" not in SETTING_SPECS  # retired
         assert SETTING_SPECS["ui.theme"].group == "ui"
         for key in (
             "threshold", "cooldownSeconds", "hysteresisPct", "strategy",
@@ -200,7 +199,7 @@ class TestSettingSpecs:
 
     def test_group_does_not_change_json_location(self):
         # `group` is display only: settings.json keeps section/json_key.
-        assert SETTING_SPECS["autoswitch.intervalSeconds"].section == "autoswitch"
+        assert SETTING_SPECS["autoswitch.pollSpareSeconds"].section == "autoswitch"
 
     def test_defaults_match_dataclass(self):
         sources = {
@@ -332,7 +331,7 @@ class TestEffectiveSettings:
         set_setting(tmp_path, "autoswitch.threshold", "90")  # equals default
         by_key = {spec.dotted: is_set for spec, _, is_set in effective_settings(tmp_path)}
         assert by_key["autoswitch.threshold"] is True
-        assert by_key["autoswitch.intervalSeconds"] is False
+        assert by_key["autoswitch.cooldownSeconds"] is False
 
 
 class TestMergedWithCli:
@@ -344,12 +343,11 @@ class TestMergedWithCli:
         base = AutoSwitchSettings(threshold=80.0, cooldown_seconds=10.0)
         merged = merged_with_cli(base, _args(threshold=60.0, interval=30.0))
         assert merged.threshold == 60.0
-        assert merged.interval_seconds == 30.0
         assert merged.cooldown_seconds == 10.0  # untouched
 
     def test_cli_values_are_clamped(self):
-        merged = merged_with_cli(AutoSwitchSettings(), _args(interval=1.0))
-        assert merged.interval_seconds == 15.0
+        merged = merged_with_cli(AutoSwitchSettings(), _args(threshold=1.0))
+        assert merged.threshold == 50.0
 
     def test_boolean_override(self):
         merged = merged_with_cli(

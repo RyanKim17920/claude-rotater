@@ -63,10 +63,12 @@ EngineFactory = Callable[
 
 
 def default_engine_factory(switcher, settings, on_event) -> EngineLike:
-    """A LIVE engine: the TUI never passes ``dry_run``."""
+    """A LIVE engine: the TUI never passes ``dry_run``. It ingests the
+    statusline feed, so the active account goes unpolled while it is fresh."""
     from claude_swap.autoswitch import AutoSwitchEngine
+    from claude_swap.feed_ingest import FeedIngestor
 
-    return AutoSwitchEngine(switcher, settings, on_event)
+    return AutoSwitchEngine(switcher, settings, on_event, feed=FeedIngestor(switcher))
 
 
 class CswapApp(App):

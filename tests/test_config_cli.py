@@ -42,7 +42,6 @@ class TestConfigList:
         assert code == 0
         for key in (
             "autoswitch.threshold",
-            "autoswitch.intervalSeconds",
             "autoswitch.cooldownSeconds",
             "autoswitch.hysteresisPct",
             "autoswitch.strategy",
@@ -259,7 +258,7 @@ class TestConfigMisc:
 
         class FakeEngine:
             def __init__(self, switcher, settings, on_event, *, dry_run=False,
-                         state_path=None, clock=None):
+                         state_path=None, clock=None, feed=None):
                 captured["settings"] = settings
 
             def tick(self):

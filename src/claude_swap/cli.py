@@ -629,12 +629,10 @@ Defaults live in settings.json in the backup root; flags override them.
         action="store_true",
         help="Emit one machine-readable JSON event per line on stdout",
     )
-    parser.add_argument(
-        "--interval",
-        type=float,
-        metavar="SECONDS",
-        help="Poll interval in loop mode (min 15; default 60)",
-    )
+    # Retired: the loop now sleeps until the next poll plan or statusline
+    # feed change. Still accepted (and ignored) so existing service units
+    # and cron lines keep starting.
+    parser.add_argument("--interval", type=float, help=argparse.SUPPRESS)
     parser.add_argument(
         "--threshold",
         type=float,
@@ -716,12 +714,21 @@ Defaults live in settings.json in the backup root; flags override them.
                 error("Error: Do not run this script as root (unless running in a container)")
                 sys.exit(1)
 
+        if args.interval is not None:
+            print(
+                "cswap auto: --interval is no longer used (polling follows "
+                "each account's plan and the statusline feed); ignoring it",
+                file=sys.stderr,
+            )
         settings = merged_with_cli(load_settings(switcher.backup_dir), args)
+        from claude_swap.feed_ingest import FeedIngestor
+
         engine = AutoSwitchEngine(
             switcher,
             settings,
             jsonl_emit if args.json else human_emit,
             dry_run=args.dry_run,
+            feed=FeedIngestor(switcher),
         )
 
         if args.once:
@@ -732,8 +739,7 @@ Defaults live in settings.json in the backup root; flags override them.
         if not args.json:
             print(
                 dimmed(
-                    f"Auto-switch running: threshold {settings.threshold:.0f}%, "
-                    f"every {settings.interval_seconds:.0f}s"
+                    f"Auto-switch running: threshold {settings.threshold:.0f}%"
                     f"{' (dry-run)' if args.dry_run else ''} — Ctrl-C to stop"
                 )
             )

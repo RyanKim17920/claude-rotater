@@ -1059,8 +1059,9 @@ class TestAutoCommand:
         tick_outcome = None  # set per test (TickOutcome)
 
         def __init__(self, switcher, settings, on_event, *, dry_run=False,
-                     state_path=None, clock=None):
+                     state_path=None, clock=None, feed=None):
             self.switcher = switcher
+            self.feed = feed
             self.settings = settings
             self.on_event = on_event
             self.dry_run = dry_run
@@ -1129,6 +1130,20 @@ class TestAutoCommand:
     def test_dry_run_forwarded(self, temp_home):
         self._run(["--once", "--dry-run"], temp_home)
         assert self.FakeEngine.instances[-1].dry_run is True
+
+    def test_headless_engine_ingests_this_profiles_feed(self, temp_home):
+        from claude_swap.paths import get_backup_root
+
+        self._run(["--once"], temp_home)
+        feed = self.FakeEngine.instances[-1].feed
+        assert feed is not None
+        assert feed.backup_dir == get_backup_root()
+
+    def test_retired_interval_flag_is_accepted_and_ignored(self, temp_home, capsys):
+        """Old service units pass --interval; they must keep starting."""
+        assert self._run(["--once", "--interval", "30"], temp_home) == 2
+        assert "--interval is no longer used" in capsys.readouterr().err
+        assert not hasattr(self.FakeEngine.instances[-1].settings, "interval_seconds")
 
     def test_json_stdout_is_pure_jsonl(self, temp_home, capsys):
         from claude_swap.autoswitch import NoSwitchEvent, TickOutcome

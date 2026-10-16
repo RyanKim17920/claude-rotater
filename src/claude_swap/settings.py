@@ -45,7 +45,6 @@ class AutoSwitchSettings:
     """
 
     threshold: float = 90.0
-    interval_seconds: float = 60.0
     cooldown_seconds: float = 300.0
     hysteresis_pct: float = 10.0
     strategy: str = "best"  # "best" (most headroom) or "consume-first" (soonest weekly reset)
@@ -155,11 +154,6 @@ SETTING_SPECS: dict[str, SettingSpec] = {
             "autoswitch", "threshold", "threshold", "float", 50.0, 99.9,
             help="Switch when the binding 5h/7d window reaches this pct",
             group="autoswitch", label="Threshold %",
-        ),
-        SettingSpec(
-            "autoswitch", "intervalSeconds", "interval_seconds", "float", 15.0, 3600.0,
-            help="Poll interval for the cswap auto loop, in seconds",
-            group="polling", label="Loop interval (s)",
         ),
         SettingSpec(
             "autoswitch", "cooldownSeconds", "cooldown_seconds", "float", 0.0, 86400.0,
@@ -497,7 +491,6 @@ def merged_with_cli(settings: AutoSwitchSettings, args) -> AutoSwitchSettings:
     overrides = {}
     for attr, field in (
         ("threshold", "threshold"),
-        ("interval", "interval_seconds"),
         ("cooldown", "cooldown_seconds"),
         ("include_api_key_accounts", "include_api_key_accounts"),
         ("model", "model"),

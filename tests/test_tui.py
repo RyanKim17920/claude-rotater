@@ -1232,7 +1232,7 @@ class TestMainPage:
             assert isinstance(app.screen, MainScreen)
 
 
-def test_default_factory_builds_live_engine(monkeypatch):
+def test_default_factory_builds_live_engine(monkeypatch, tmp_path):
     # Drop the autouse FakeEngine patch: this test checks the real factory.
     monkeypatch.undo()
     import claude_swap.autoswitch as autoswitch
@@ -1246,8 +1246,11 @@ def test_default_factory_builds_live_engine(monkeypatch):
         return object()
 
     monkeypatch.setattr(autoswitch, "AutoSwitchEngine", recorder)
-    default_engine_factory(object(), AutoSwitchSettings(), lambda e: None)
+    switcher = type("S", (), {"backup_dir": tmp_path})()
+    default_engine_factory(switcher, AutoSwitchSettings(), lambda e: None)
     assert built["kwargs"].get("dry_run", False) is False
+    # The TUI engine ingests the statusline feed of this profile.
+    assert built["kwargs"]["feed"].backup_dir == tmp_path
 
 
 @pytest.mark.asyncio

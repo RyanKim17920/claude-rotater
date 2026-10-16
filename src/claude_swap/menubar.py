@@ -671,11 +671,14 @@ def run(switcher) -> int:
             if self._engine is not None:
                 return
             try:
+                from claude_swap.feed_ingest import FeedIngestor
+
                 engine = AutoSwitchEngine(
                     self.switcher,
                     load_settings(self.switcher.backup_dir),
                     self._on_engine_event,
                     dry_run=False,
+                    feed=FeedIngestor(self.switcher),
                 )
             except Exception as e:  # never let a bad start crash the menu bar
                 self.switcher._logger.warning("auto-switch engine failed to start: %s", e)

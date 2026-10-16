@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import threading
+import time
 from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch
@@ -14,6 +15,8 @@ import pytest
 from claude_swap import oauth, poll_policy
 from claude_swap.autoswitch import (
     IDLE_HOLD_MAX_S,
+    MAX_SLEEP_S,
+    MIN_TICK_S,
     NO_RESET_FALLBACK_S,
     RECOVERY_HORIZON_S,
     SPENT_HEADROOM_PCT,
@@ -349,7 +352,8 @@ class TestDecisionTable:
         assert reasons == ["no-qualifying-candidate"]
         assert harness.engine._sleep_until_ts is None
         delay = harness.engine._next_delay(outcome)
-        assert delay <= 1.1 * harness.settings.interval_seconds
+        # Near the limit the loop stays responsive (no reset-length sleep).
+        assert delay <= poll_policy.MIN_INTERVAL_S
 
     def test_issue_115_strictly_better_candidate_switches(self, harness):
         # Regression for #115: active bound by 5h (99%), candidate bound by
@@ -413,7 +417,8 @@ class TestDecisionTable:
         assert reasons == ["no-qualifying-candidate"]
         assert harness.engine._sleep_until_ts is None
         delay = harness.engine._next_delay(outcome)
-        assert delay <= 1.1 * harness.settings.interval_seconds
+        # Near the limit the loop stays responsive (no reset-length sleep).
+        assert delay <= poll_policy.MIN_INTERVAL_S
 
     def test_stale_beyond_trust_blocks_all_exhausted(self, harness):
         # One candidate exhausted on trusted-stale data, the other's data aged
@@ -2213,15 +2218,15 @@ class TestRunLoop:
         harness.engine._blocked_wait_long = True
         assert harness.engine._next_delay(TickOutcome.BLOCKED) == 300.0
 
-    def test_blocked_on_resolvable_condition_keeps_normal_cadence(self, harness):
+    def test_blocked_on_resolvable_condition_waits_for_the_next_reading(self, harness):
+        seed_plans(harness, {"1": 300.0, "2": 400.0, "3": 500.0})
         harness.engine._sleep_until_ts = None
         harness.engine._blocked_wait_long = False
-        delay = harness.engine._next_delay(TickOutcome.BLOCKED)
-        assert 0.9 * 60 <= delay <= 1.1 * 60
+        assert harness.engine._next_delay(TickOutcome.BLOCKED) == 300.0
 
-    def test_normal_delay_is_jittered_interval(self, harness):
-        delay = harness.engine._next_delay(TickOutcome.NO_ACTION)
-        assert 0.9 * 60 <= delay <= 1.1 * 60
+    def test_normal_delay_sleeps_until_the_next_plan(self, harness):
+        seed_plans(harness, {"1": 450.0, "2": 250.0, "3": 500.0})
+        assert harness.engine._next_delay(TickOutcome.NO_ACTION) == 250.0
 
     def test_sleep_cap(self, harness):
         harness.engine._sleep_until_ts = harness.clock() + 50 * 3600
@@ -2231,66 +2236,218 @@ class TestRunLoop:
         )
 
 
-class TestLoopObeysThePollPlan:
-    """The loop must not oversleep the plan the planner wrote.
+def seed_plans(h, due_in: dict[str, float], pct: float = 10.0) -> None:
+    """Give each slot a measurement and a poll plan ``due_in`` seconds out."""
+    ids = h.switcher.usage_identities()
+    store = h.switcher._usage_store
+    store.record({n: FetchRecord(usage=_usage(pct)) for n in due_in}, ids)
+    store.set_poll_plan(
+        {n: (h.clock.now + d, 600.0) for n, d in due_in.items()}, ids
+    )
 
-    When the active account burns near the threshold the planner tightens its
-    row to URGENT_INTERVAL_S so the crossing is caught quickly. The loop used
-    to sleep ``interval_seconds`` regardless, so on any machine configured
-    slower than the plan (360s here, the default) that plan could not be
-    honoured: measured on the linux box mid-episode, the active row asked to
-    be polled 112s ago while the engine still had minutes of sleep left, and
-    the account sat over the threshold until the engine was restarted by hand.
-    """
 
-    def _plan(self, harness, *, due_in: float) -> None:
-        num = harness.engine.switcher.current_account_number()
-        real = harness.engine.switcher.usage_entries_by_account
+class TestEventDrivenSchedule:
+    """No fixed tick: the loop sleeps until the store next has work for it.
 
-        def patched(fetch=frozenset(), **kw):
-            entries = dict(real(fetch=fetch, **kw))
-            entries[num] = replace(
-                entries[num], next_poll_at=harness.clock() + due_in
-            )
-            return entries
+    Replaces the old ``intervalSeconds`` loop, which woke every 15-60 s
+    whether or not anything could have changed and then had to be cut short
+    whenever a plan was due sooner (it once ran a due plan 112 s late)."""
 
-        harness.engine.switcher.usage_entries_by_account = patched
+    def test_earliest_plan_wins(self, harness):
+        seed_plans(harness, {"1": 400.0, "2": 120.0, "3": 590.0})
+        assert harness.engine._next_delay(TickOutcome.NO_ACTION) == 120.0
 
-    def test_sleep_is_cut_to_the_rows_next_poll(self, harness):
-        harness.engine.settings = replace(
-            harness.engine.settings, interval_seconds=360.0
+    def test_overdue_row_never_spins_the_loop(self, harness):
+        seed_plans(harness, {"1": -500.0, "2": 300.0, "3": 300.0})
+        assert harness.engine._next_delay(TickOutcome.NO_ACTION) == MIN_TICK_S
+
+    def test_a_near_plan_is_kept_down_to_the_floor(self, harness):
+        seed_plans(harness, {"1": 5.0, "2": 300.0, "3": 300.0})
+        assert harness.engine._next_delay(TickOutcome.NO_ACTION) == MIN_TICK_S
+
+    def test_capped_at_max_sleep(self, harness):
+        seed_plans(harness, {"1": 5000.0, "2": 5000.0, "3": 5000.0})
+        assert harness.engine._next_delay(TickOutcome.NO_ACTION) == MAX_SLEEP_S
+
+    def test_a_feed_hold_defers_the_active_rows_wakeup(self, harness):
+        seed_plans(harness, {"1": 0.0, "2": 590.0, "3": 590.0})
+        harness.switcher._usage_store.adopt(
+            {"1": (_usage(10), 0.0)}, {"1": ("a@example.com", "")}, hold_s=400.0
         )
-        self._plan(harness, due_in=200.0)
-        # Pre-fix this returned ~360s and the 200s plan silently ran late.
-        assert harness.engine._next_delay(TickOutcome.NO_ACTION) == 200.0
+        assert harness.engine._next_delay(TickOutcome.NO_ACTION) == 400.0
 
-    def test_never_sleeps_below_the_planners_own_floor(self, harness):
-        """A row already overdue must not spin: the floor is the rate budget."""
-        harness.engine.settings = replace(
-            harness.engine.settings, interval_seconds=360.0
+    def test_backoff_defers_the_wakeup(self, harness):
+        seed_plans(harness, {"1": 590.0, "2": 0.0, "3": 590.0})
+        harness.switcher._usage_store.record(
+            {"2": FetchRecord(error="timeout", retry_after_s=200.0)},
+            {"2": ("b@example.com", "")},
         )
-        self._plan(harness, due_in=-500.0)
+        assert harness.engine._next_delay(TickOutcome.NO_ACTION) == pytest.approx(200.0)
+
+    def test_disabled_accounts_do_not_wake_the_loop(self, harness):
+        seed_plans(harness, {"1": 500.0, "2": 590.0, "3": 30.0})
+        harness.switcher.switchable_account_numbers = lambda: ["2"]
+        assert harness.engine._next_delay(TickOutcome.NO_ACTION) == 500.0
+
+    def test_near_the_threshold_wakes_within_the_serve_ttl(self, harness):
+        seed_plans(harness, {"1": 590.0, "2": 590.0, "3": 590.0}, pct=80.0)
         assert (
             harness.engine._next_delay(TickOutcome.NO_ACTION)
             == poll_policy.MIN_INTERVAL_S
         )
 
-    def test_a_relaxed_plan_never_lengthens_the_sleep(self, harness):
-        """Only ever shortens — a distant plan must not stretch the cadence
-        past what the user configured."""
-        harness.engine.settings = replace(
-            harness.engine.settings, interval_seconds=60.0
+    def test_unknown_active_wakes_within_the_serve_ttl(self, harness):
+        seed_plans(harness, {"2": 590.0, "3": 590.0})
+        # A plan but no reading (failures only): usage unknown, so a
+        # failover could be near.
+        harness.switcher._usage_store.set_poll_plan(
+            {"1": (harness.clock.now + 590.0, 600.0)}, {"1": ("a@example.com", "")}
         )
-        self._plan(harness, due_in=3600.0)
-        assert harness.engine._next_delay(TickOutcome.NO_ACTION) <= 1.1 * 60
+        assert (
+            harness.engine._next_delay(TickOutcome.NO_ACTION)
+            == poll_policy.MIN_INTERVAL_S
+        )
 
-    def test_a_store_failure_leaves_the_cadence_alone(self, harness):
+    def test_cooldown_end_wakes_the_loop(self, harness):
+        seed_plans(harness, {"1": 590.0, "2": 590.0, "3": 590.0})
+        harness.engine._mutate_state(
+            lambda st: st.update(lastSwitchAt=harness.clock.now - 250.0)
+        )
+        # cooldown 300 s: it ends in 50 s, which may unblock a switch.
+        assert harness.engine._next_delay(TickOutcome.NO_ACTION) == 50.0
+
+    def test_a_store_failure_sleeps_the_fallback(self, harness):
         def boom(*a, **k):
             raise RuntimeError("store unreadable")
 
         harness.engine.switcher.usage_entries_by_account = boom
-        delay = harness.engine._next_delay(TickOutcome.NO_ACTION)
-        assert 0.9 * 60 <= delay <= 1.1 * 60
+        assert harness.engine._next_delay(TickOutcome.NO_ACTION) == NO_RESET_FALLBACK_S
+
+
+class _Feed:
+    """A stand-in FeedIngestor: counts ingests, watches a real directory."""
+
+    def __init__(self, directory):
+        self.watch_dir = str(directory)
+        self.ingests = 0
+
+    def ingest(self):
+        self.ingests += 1
+
+
+class TestFeedInTheLoop:
+    def _engine(self, harness, tmp_path):
+        feed = _Feed(tmp_path / "feed")
+        engine = harness._make_engine(feed=feed)
+        return engine, feed
+
+    def test_tick_ingests_first(self, harness, tmp_path):
+        """``cswap auto --once`` reads the feed too: every tick does."""
+        engine, feed = self._engine(harness, tmp_path)
+        order = []
+        feed.ingest = lambda: order.append("ingest")
+        with patch.object(engine, "_tick_inner", side_effect=lambda: order.append("tick")):
+            engine.tick()
+        assert order == ["ingest", "tick"]
+
+    def test_ingest_failure_never_fails_the_tick(self, harness, tmp_path):
+        engine, feed = self._engine(harness, tmp_path)
+
+        def boom():
+            raise RuntimeError("feed broken")
+
+        feed.ingest = boom
+        with patch.object(engine, "_tick_inner", return_value=TickOutcome.NO_ACTION):
+            assert engine.tick() is TickOutcome.NO_ACTION
+
+    def _run(self, engine, monkeypatch, *, min_tick):
+        from claude_swap import autoswitch
+
+        monkeypatch.setattr(autoswitch, "MIN_TICK_S", min_tick)
+        ticks: list[float] = []
+        ticked = threading.Event()
+
+        def fake_tick():
+            engine._ingest_feed()
+            ticks.append(time.monotonic())
+            ticked.set()
+            return TickOutcome.NO_ACTION
+
+        monkeypatch.setattr(engine, "tick", fake_tick)
+        monkeypatch.setattr(engine, "_next_delay", lambda outcome: 30.0)
+        worker = threading.Thread(target=engine.run_loop, daemon=True)
+        worker.start()
+        return worker, ticks, ticked
+
+    def _write(self, feed_obj):
+        from claude_swap import feed
+
+        feed.append_record(
+            os.path.join(feed_obj.watch_dir, feed.FEED_FILENAME),
+            {"t": 1.0, "five_hour": {"pct": 1.0}},
+        )
+
+    def test_a_feed_write_wakes_a_sleeping_loop(self, harness, tmp_path, monkeypatch):
+        engine, feed_obj = self._engine(harness, tmp_path)
+        worker, ticks, ticked = self._run(engine, monkeypatch, min_tick=0.0)
+        try:
+            assert ticked.wait(5)
+            ticked.clear()
+            time.sleep(0.2)  # let the watcher arm
+            self._write(feed_obj)
+            assert ticked.wait(5), "feed write did not wake the 30 s sleep"
+            assert feed_obj.ingests >= 2
+        finally:
+            engine.stop()
+            worker.join(5)
+        assert not worker.is_alive()
+
+    def test_feed_wakes_are_coalesced_but_wake_is_not(self, harness, tmp_path, monkeypatch):
+        engine, feed_obj = self._engine(harness, tmp_path)
+        worker, ticks, ticked = self._run(engine, monkeypatch, min_tick=1.0)
+        try:
+            assert ticked.wait(5)
+            ticked.clear()
+            engine._on_feed_change()  # as the watcher would, right away
+            assert not ticked.wait(0.5), "a feed wake ran inside MIN_TICK_S"
+            assert ticked.wait(5)
+            assert ticks[1] - ticks[0] >= 0.9
+            ticked.clear()
+            engine._on_feed_change()
+            engine.wake()  # explicit: never delayed
+            assert ticked.wait(0.5)
+        finally:
+            engine.stop()
+            worker.join(5)
+
+    def test_watcher_stops_with_the_loop(self, harness, tmp_path, monkeypatch):
+        engine, _ = self._engine(harness, tmp_path)
+        watchers = []
+        from claude_swap import feed_watch
+
+        real = feed_watch.FeedWatcher
+
+        class Spy(real):
+            def __init__(self, *a, **k):
+                super().__init__(*a, **k)
+                watchers.append(self)
+
+        monkeypatch.setattr(feed_watch, "FeedWatcher", Spy)
+        worker, _, ticked = self._run(engine, monkeypatch, min_tick=0.0)
+        assert ticked.wait(5)
+        engine.stop()
+        worker.join(5)
+        assert watchers and watchers[0]._thread is None
+
+    def test_no_feed_no_watcher(self, harness, monkeypatch):
+        from claude_swap import feed_watch
+
+        def explode(*a, **k):
+            raise AssertionError("watcher started without a feed")
+
+        monkeypatch.setattr(feed_watch, "FeedWatcher", explode)
+        harness.engine.stop()
+        assert harness.engine.run_loop() == 0
 
 
 class TestSessionThreshold:
@@ -6762,26 +6919,6 @@ class TestReviewFindings202:
             .isoformat()
             .replace("+00:00", "Z")
         )
-
-    def test_a_short_interval_is_never_lengthened(self, harness):
-        """The default is 60s and the floor is 15s, not the 360s I developed
-        against. max(min(delay, due_in), URGENT) RAISES a delay already below
-        URGENT, so a 15s interval slept 60s — the exact opposite of the
-        'only ever shortens' invariant this function claims."""
-        num = harness.engine.switcher.current_account_number()
-        real = harness.engine.switcher.usage_entries_by_account
-
-        def patched(fetch=frozenset(), **kw):
-            entries = dict(real(fetch=fetch, **kw))
-            entries[num] = replace(entries[num], next_poll_at=harness.clock() + 5.0)
-            return entries
-
-        harness.engine.switcher.usage_entries_by_account = patched
-        harness.engine.settings = replace(
-            harness.engine.settings, interval_seconds=15.0
-        )
-        delay = harness.engine._next_delay(TickOutcome.NO_ACTION)
-        assert delay <= 15.0 * 1.1, f"a 15s interval slept {delay:.1f}s"
 
     def test_recovery_reads_the_binding_windows_reset(self, harness):
         """Filtering unusable resets BEFORE taking the max let a lower window

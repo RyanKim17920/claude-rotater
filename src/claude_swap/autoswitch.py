@@ -33,14 +33,13 @@ import enum
 import json
 import logging
 import math
-import random
 import threading
 import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import ClassVar
+from typing import TYPE_CHECKING, ClassVar
 
 from claude_swap import oauth, poll_policy
 from claude_swap.exceptions import ClaudeSwitchError
@@ -54,6 +53,9 @@ from claude_swap.poll_policy import (
 from claude_swap.settings import AutoSwitchSettings, atomic_write_json, parse_model_names
 from claude_swap.switcher import ClaudeAccountSwitcher
 from claude_swap.usage_store import due_candidate, plan_oversleeps_interval
+
+if TYPE_CHECKING:
+    from claude_swap.feed_ingest import FeedIngestor
 
 STATE_FILENAME = "autoswitch_state.json"
 STATE_SCHEMA_VERSION = 1
@@ -95,6 +97,15 @@ FRESHEN_BUFFER_MS = 10 * 60 * 1000
 # a long engine sleep must not suppress the fetch that discovers it.
 MAX_SLEEP_S = poll_policy.EXHAUSTED_INTERVAL_S
 NO_RESET_FALLBACK_S = 300.0
+
+# The loop has no fixed tick. It sleeps until the store next has something
+# for it (an account's poll plan comes due, a backoff or feed hold lifts, the
+# cooldown ends), or until the statusline feed changes. MIN_TICK_S floors
+# that sleep so a row that is due but not fetchable this pass (another
+# collector's claim) cannot spin the loop; it is also how often feed-driven
+# ticks may run, since a busy session refreshes its statusline every few
+# seconds.
+MIN_TICK_S = 15.0
 
 # Idle-hold cap (elapsed, not ticks — the hold itself slows the cadence to
 # NO_RESET_FALLBACK_S): an owned-and-expired token normally means Claude Code
@@ -727,6 +738,7 @@ class AutoSwitchEngine:
         dry_run: bool = False,
         state_path: Path | None = None,
         clock: Callable[[], float] = time.time,
+        feed: FeedIngestor | None = None,
     ):
         self.switcher = switcher
         self.settings = settings
@@ -748,6 +760,14 @@ class AutoSwitchEngine:
         # Cuts the current inter-tick sleep short (a session threshold change
         # from the TUI should show a fresh decision now, not next interval).
         self._wake = threading.Event()
+        # Set by wake() (not by feed changes), so a feed-only wake can be
+        # coalesced while an explicit one is honored at once.
+        self._explicit_wake = threading.Event()
+        # Live usage from Claude Code's statusline (``cswap feed``): ingested
+        # at the top of every tick, and watched by run_loop so a refresh
+        # wakes the loop. None disables both.
+        self.feed = feed
+        self._feed_dirty = threading.Event()
         self._unhealthy_ticks = 0
         # Both set per tick: a known-reset sleep target, and whether a BLOCKED
         # outcome is static enough (truly exhausted / no candidates) to wait
@@ -957,7 +977,9 @@ class AutoSwitchEngine:
     # -- tick -----------------------------------------------------------------
 
     def tick(self) -> TickOutcome:
-        """Evaluate once: poll usage, maybe switch. Never raises."""
+        """Evaluate once: ingest the statusline feed, poll usage, maybe
+        switch. Never raises."""
+        self._ingest_feed()
         try:
             return self._tick_inner()
         except ClaudeSwitchError as e:
@@ -2332,6 +2354,22 @@ class AutoSwitchEngine:
     def _emit(self, event: AutoSwitchEvent) -> None:
         self.on_event(event)
 
+    def _ingest_feed(self) -> None:
+        """Adopt new statusline feed readings before deciding. A failure
+        only costs the feed: the account stays on polling."""
+        if self.feed is None:
+            return
+        self._feed_dirty.clear()
+        try:
+            self.feed.ingest()
+        except Exception as e:  # ingest() already guards; belt and braces
+            _logger.warning(f"Statusline feed ingest failed: {e!r}")
+
+    def _on_feed_change(self) -> None:
+        """Watcher thread: the feed was written; tick soon."""
+        self._feed_dirty.set()
+        self._wake.set()
+
     # -- loop -------------------------------------------------------------------
 
     def stop(self) -> None:
@@ -2343,6 +2381,7 @@ class AutoSwitchEngine:
 
     def wake(self) -> None:
         """Cut the current inter-tick sleep short and tick now."""
+        self._explicit_wake.set()
         self._wake.set()
 
     def apply_threshold(self, threshold: float) -> None:
@@ -2354,81 +2393,144 @@ class AutoSwitchEngine:
         self.switcher.set_poll_policy_inputs(threshold, self._models)
 
     def _next_delay(self, outcome: TickOutcome) -> float:
-        interval = self.settings.interval_seconds
         if outcome is TickOutcome.BLOCKED:
             if self._sleep_until_ts is not None:
                 delay = self._sleep_until_ts - self.clock()
-                return min(max(delay, interval), MAX_SLEEP_S)
+                return min(max(delay, MIN_TICK_S), MAX_SLEEP_S)
             if self._blocked_wait_long:
                 # Truly exhausted with no reset time known / no candidates.
-                return max(interval, NO_RESET_FALLBACK_S)
-            # Blocked on something that can resolve any tick (hysteresis,
-            # unreadable usage) — keep the normal cadence so the at-limit
-            # escape isn't missed.
+                return NO_RESET_FALLBACK_S
+            # Blocked on something that can resolve with the next reading
+            # (hysteresis, unreadable usage): wait for one.
         elif outcome is TickOutcome.NO_ACTION and self._idle_hold_slow:
             # Idle-hold: Claude is idle on an expired token — nothing changes
             # until the user comes back, so crawl. Worst case protection
             # resumes one slow tick after they do.
-            return max(interval, NO_RESET_FALLBACK_S)
-        # ±10% jitter so multiple machines don't synchronize their API hits.
-        return self._respect_poll_plan(interval * (0.9 + 0.2 * random.random()))
+            return NO_RESET_FALLBACK_S
+        return self._schedule_delay()
 
-    def _respect_poll_plan(self, delay: float) -> float:
-        """Shorten a normal-cadence sleep to the store's own next-poll time.
+    def _schedule_delay(self) -> float:
+        """Seconds until the store next has work for this engine.
 
-        The planner tightens the active row to URGENT_INTERVAL_S while it
-        burns toward the threshold, but the loop always slept
-        ``interval_seconds`` — so the plan ran late. Measured mid-episode: the
-        row was due 112s ago while the engine still had minutes of sleep left.
-
-        Only ever shortens, never below the planner's floor: the 429 budget
-        lives in the plan, and this makes the loop obey it rather than
-        override it. Best-effort — the unshortened delay is always safe.
+        The earliest moment any account the engine polls (the active one and
+        every switchable candidate) becomes fetchable: its poll plan comes
+        due, and no failure backoff, feed hold or other collector's claim
+        holds it. Also the end of the switch cooldown, which can unblock a
+        proactive switch with no new reading. While a switch could be near
+        (the active account inside the escalation band, or unknown), at most
+        ``MIN_INTERVAL_S``: escalation refreshes rows past the serve TTL
+        regardless of their plans. Floored at ``MIN_TICK_S``, capped at
+        ``MAX_SLEEP_S``. Statusline feed changes wake the loop early. The
+        plans are already jittered, so no jitter is added here.
         """
         try:
+            now = self.clock()
+            entries = self.switcher.usage_entries_by_account(fetch=set())
             current = self.switcher.current_account_number()
-            if current is None:
-                return delay
-            entry = self.switcher.usage_entries_by_account(fetch=set()).get(current)
-            if entry is None or entry.next_poll_at is None:
-                return delay
-            due_in = entry.next_poll_at - self.clock()
-            # Clamp the DEADLINE, not the result. max(min(delay, due_in), U)
-            # raises a delay that was ALREADY below U: at the configurable
-            # floor of 15s it turns a 13.5s jittered sleep into 60s, and at
-            # the 60s default it flattens the entire lower jitter half.
-            # Bounding due_in instead keeps "only ever shortens" true at every
-            # configured interval, and still refuses to poll faster than the
-            # planner's own floor when the row is overdue.
-            return min(delay, max(due_in, poll_policy.MIN_INTERVAL_S))
-        except Exception:
-            return delay
+            nums = set(self.switcher.switchable_account_numbers())
+            if current is not None:
+                nums.add(current)
+            wake_at = now + MAX_SLEEP_S
+            for num in nums:
+                entry = entries.get(num)
+                if entry is None:
+                    wake_at = now
+                    continue
+                if entry.sentinel is not None or entry.token_dead():
+                    continue  # nothing to fetch
+                due = entry.next_poll_at if entry.next_poll_at is not None else now
+                for gate in (entry.backoff_until, entry.held_until, entry.claim_until):
+                    if gate is not None:
+                        due = max(due, gate)
+                wake_at = min(wake_at, due)
+            if current is not None:
+                active = entries.get(current)
+                value = active.decision_value() if active is not None else None
+                headroom = oauth.account_headroom(
+                    value if isinstance(value, dict) else None, self._models
+                )
+                if headroom is None or (
+                    100.0 - headroom
+                    >= self.settings.threshold - ESCALATION_MARGIN_PCT
+                ):
+                    wake_at = min(wake_at, now + poll_policy.MIN_INTERVAL_S)
+            last = self._read_state().get("lastSwitchAt")
+            if isinstance(last, (int, float)) and not isinstance(last, bool):
+                cooldown_end = last + self.settings.cooldown_seconds
+                if cooldown_end > now:
+                    wake_at = min(wake_at, cooldown_end)
+            return min(max(wake_at - now, MIN_TICK_S), MAX_SLEEP_S)
+        except Exception as e:
+            _logger.debug("schedule delay fell back: %r", e)
+            return NO_RESET_FALLBACK_S
 
     def run_loop(self) -> int:
-        """Tick forever (until :meth:`stop`); a failing tick never kills it."""
-        while True:
-            # Clear at the top, not after the wait: a wake() racing a wait
-            # timeout is then never lost — the tick right after this clear
-            # already sees whatever settings that wake announced.
-            self._wake.clear()
-            if self._stop.is_set():
-                return 0
-            try:
-                outcome = self.tick()
-            except Exception as e:  # pragma: no cover - tick() already guards
-                self._emit(
-                    ErrorEvent(message=f"{type(e).__name__}: {e}", transient=True)
-                )
-                outcome = TickOutcome.ERROR
-            delay = self._next_delay(outcome)
-            if delay > self.settings.interval_seconds * 1.5:
-                until = datetime.now(timezone.utc) + timedelta(seconds=delay)
-                self._emit(
-                    SleepEvent(
-                        seconds=delay,
-                        until=until.isoformat(timespec="seconds").replace(
-                            "+00:00", "Z"
-                        ),
+        """Tick until :meth:`stop`; a failing tick never kills it.
+
+        Sleeps per :meth:`_next_delay`, and wakes early on :meth:`wake` or a
+        statusline feed change (watched with kernel events, see
+        ``feed_watch``). Feed-driven ticks are spaced at least ``MIN_TICK_S``
+        apart; an explicit wake is never delayed."""
+        watcher = self._start_feed_watch()
+        try:
+            while True:
+                # Clear at the top, not after the wait: a wake() racing a wait
+                # timeout is then never lost — the tick right after this clear
+                # already sees whatever settings that wake announced.
+                self._wake.clear()
+                self._explicit_wake.clear()
+                if self._stop.is_set():
+                    return 0
+                started = time.monotonic()
+                try:
+                    outcome = self.tick()
+                except Exception as e:  # pragma: no cover - tick() already guards
+                    self._emit(
+                        ErrorEvent(message=f"{type(e).__name__}: {e}", transient=True)
                     )
-                )
-            self._wake.wait(delay)
+                    outcome = TickOutcome.ERROR
+                delay = self._next_delay(outcome)
+                if delay > MIN_TICK_S * 4:
+                    until = datetime.now(timezone.utc) + timedelta(seconds=delay)
+                    self._emit(
+                        SleepEvent(
+                            seconds=delay,
+                            until=until.isoformat(timespec="seconds").replace(
+                                "+00:00", "Z"
+                            ),
+                        )
+                    )
+                self._wake.wait(delay)
+                self._coalesce_feed_wake(started)
+        finally:
+            if watcher is not None:
+                watcher.stop()
+
+    def _coalesce_feed_wake(self, started: float) -> None:
+        """After a wake caused only by the feed, hold the next tick until
+        ``MIN_TICK_S`` after the previous one started. stop() and wake()
+        still cut this short."""
+        while (
+            self._feed_dirty.is_set()
+            and not self._explicit_wake.is_set()
+            and not self._stop.is_set()
+        ):
+            remaining = MIN_TICK_S - (time.monotonic() - started)
+            if remaining <= 0:
+                return
+            self._wake.clear()
+            self._wake.wait(remaining)
+
+    def _start_feed_watch(self):
+        if self.feed is None:
+            return None
+        from claude_swap.feed import FEED_FILENAME
+        from claude_swap.feed_watch import FeedWatcher
+
+        try:
+            watcher = FeedWatcher(self.feed.watch_dir, FEED_FILENAME, self._on_feed_change)
+            watcher.start()
+            return watcher
+        except Exception as e:
+            _logger.warning(f"Statusline feed watch failed to start: {e!r}")
+            return None
