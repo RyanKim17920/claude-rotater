@@ -124,11 +124,6 @@ class _Canvas:
             step += 1
 
 
-def _clock(t: float, window_len_s: float) -> str:
-    fmt = "%H:%M" if window_len_s <= 86400 else "%a %H:%M"
-    return datetime.fromtimestamp(t).strftime(fmt)
-
-
 def _place(buf: list[str], start: int, label: str) -> bool:
     """Write ``label`` into ``buf`` at ``start`` if it fits on blank cells
     with one blank cell of breathing room on each side."""
@@ -201,24 +196,56 @@ def line_plot(
             dx(est.last_t), dy(est.last_pct), dx(t_end), dy(p_end), dotted=True
         )
 
-    thr_row = None
-    if threshold is not None:
-        thr_row = (canvas.dot_h - 1 - dy(threshold)) // 4
     reset_col = None
     if est.resets_at is not None and x0 <= est.resets_at <= x1:
         reset_col = dx(est.resets_at) // 2
 
+    lines = _grid_rows(canvas, threshold=threshold, reset_col=reset_col, palette=palette)
+    lines.append(_time_axis(cols, x0, x1, now, _clock_fmt(window_len), palette))
+    return lines
+
+
+def _clock_fmt(span_s: float) -> str:
+    """Axis label format for one usage window (5h: clock, 7d: weekday+clock)."""
+    return "%H:%M" if span_s <= 86400 else "%a %H:%M"
+
+
+def _span_fmt(span_s: float) -> str:
+    """Axis label format for a multi-window span: dates once it passes a day."""
+    return "%H:%M" if span_s <= 86400 else "%b %d"
+
+
+def _y_label(r: int, rows: int, thr_row: int | None, threshold: float | None) -> str:
+    if r == 0:
+        return "100"
+    if r == rows - 1:
+        return "0"
+    if r == thr_row and threshold is not None:
+        return f"{threshold:.0f}"
+    return ""
+
+
+def _threshold_row(threshold: float | None, dot_h: int) -> int | None:
+    if threshold is None:
+        return None
+    dot = round(_clamp(threshold, 0.0, 100.0) / 100.0 * (dot_h - 1))
+    return (dot_h - 1 - dot) // 4
+
+
+def _grid_rows(
+    canvas: "_Canvas",
+    *,
+    threshold: float | None,
+    reset_col: int | None,
+    palette: Palette,
+) -> list[Text]:
+    """The plot body: y-axis gutter, braille cells, threshold row, reset column."""
+    rows, cols = canvas.rows, canvas.cols
+    thr_row = _threshold_row(threshold, canvas.dot_h)
     lines: list[Text] = []
     for r in range(rows):
         line = Text(no_wrap=True)
-        if r == 0:
-            label = "100"
-        elif r == rows - 1:
-            label = "0"
-        elif r == thr_row and threshold is not None:
-            label = f"{threshold:.0f}"
-        else:
-            label = ""
+        label = _y_label(r, rows, thr_row, threshold)
         line.append(f"{label:>{GUTTER - 1}}{'┤' if label else '│'}", style=palette.muted)
         # Color by height: a cell's severity is its row's midpoint pct, so the
         # curve warms as it climbs instead of taking one flat color.
@@ -236,15 +263,128 @@ def line_plot(
             else:
                 line.append(" ")
         lines.append(line)
-
-    axis = [" "] * cols
-    _place(axis, 0, _clock(x0, window_len))
-    right = _clock(x1, window_len)
-    _place(axis, cols - len(right), right)
-    if x0 <= now <= x1:
-        _place(axis, dx(now) // 2 - 1, "now")
-    lines.append(Text(" " * GUTTER + "".join(axis), style=palette.muted, no_wrap=True))
     return lines
 
 
-__all__ = ["line_plot", "sparkline"]
+def _time_axis(
+    cols: int, x0: float, x1: float, now: float | None, fmt: str, palette: Palette
+) -> Text:
+    axis = [" "] * cols
+    _place(axis, 0, datetime.fromtimestamp(x0).strftime(fmt))
+    right = datetime.fromtimestamp(x1).strftime(fmt)
+    _place(axis, cols - len(right), right)
+    if now is not None and x0 <= now <= x1:
+        dot = round((now - x0) / (x1 - x0) * (cols * 2 - 1))
+        _place(axis, dot // 2 - 1, "now")
+    return Text(" " * GUTTER + "".join(axis), style=palette.muted, no_wrap=True)
+
+
+def history_plot(
+    points: Sequence[Point],
+    *,
+    x0: float,
+    x1: float,
+    threshold: float | None,
+    width: int,
+    height: int,
+    palette: Palette = Palette.DARK,
+) -> list[Text]:
+    """Measured series over an arbitrary span (days to weeks), no projection.
+
+    Used by the long-term view: the curve runs straight through window resets,
+    so each drop reads as the window rolling over. ``height`` lines including
+    the time axis; a sparkline when the area is too small.
+    """
+    pts = sorted((p for p in points if x0 <= p.t <= x1), key=lambda p: p.t)
+    if height < MIN_PLOT_HEIGHT or width < MIN_PLOT_WIDTH:
+        return [sparkline(pts, max(0, width), palette=palette, span=(x0, x1))]
+    if x1 <= x0:
+        x1 = x0 + 1.0
+    cols, rows = width - GUTTER, height - 1
+    canvas = _Canvas(cols, rows)
+
+    def dx(t: float) -> int:
+        return round(_clamp((t - x0) / (x1 - x0), 0.0, 1.0) * (canvas.dot_w - 1))
+
+    def dy(pct: float) -> int:
+        return round(_clamp(pct, 0.0, 100.0) / 100.0 * (canvas.dot_h - 1))
+
+    for a, b in zip(pts, pts[1:]):
+        canvas.line(dx(a.t), dy(a.pct), dx(b.t), dy(b.pct))
+    if len(pts) == 1:
+        canvas.set(dx(pts[0].t), dy(pts[0].pct))
+    lines = _grid_rows(canvas, threshold=threshold, reset_col=None, palette=palette)
+    lines.append(_time_axis(cols, x0, x1, None, _span_fmt(x1 - x0), palette))
+    return lines
+
+
+COLUMN_GLYPHS = " ▁▂▃▄▅▆▇█"
+
+
+def peak_columns(
+    peaks: Sequence[tuple[float, float]],
+    *,
+    window_len_s: float,
+    x0: float,
+    x1: float,
+    threshold: float | None,
+    width: int,
+    height: int,
+    palette: Palette = Palette.DARK,
+) -> list[Text]:
+    """One column per past window, as tall as that window's peak pct.
+
+    ``peaks`` is ``(resets_at, peak_pct)`` pairs; a window covers
+    ``[resets_at - window_len_s, resets_at]`` on the x axis, so gaps between
+    columns are real idle time. Columns use eighth blocks (8 steps per row)
+    and take the severity color of their peak. ``height`` lines including the
+    time axis; a sparkline of the peaks when the area is too small.
+    """
+    if x1 <= x0:
+        x1 = x0 + 1.0
+    visible = sorted((r, p) for r, p in peaks if r > x0 and r - window_len_s < x1)
+    if height < MIN_PLOT_HEIGHT or width < MIN_PLOT_WIDTH:
+        pts = [Point(r, p, r) for r, p in visible]
+        return [sparkline(pts, max(0, width), palette=palette, span=(x0, x1))]
+    cols, rows = width - GUTTER, height - 1
+    heights = [0] * cols  # eighths, per column
+    colors: list[str | None] = [None] * cols
+
+    def col(t: float) -> int:
+        return int(_clamp((t - x0) / (x1 - x0), 0.0, 1.0) * (cols - 1))
+
+    for resets_at, peak in visible:
+        c0, c1 = col(resets_at - window_len_s), col(resets_at)
+        if c1 - c0 >= 3:
+            # Inset both edges so back-to-back windows keep a blank column.
+            c0, c1 = c0 + 1, c1 - 1
+        eighths = round(_clamp(peak, 0.0, 100.0) / 100.0 * rows * 8)
+        for c in range(c0, c1 + 1):
+            if eighths >= heights[c]:
+                heights[c] = eighths
+                colors[c] = palette.severity(peak)
+
+    thr_row = None
+    if threshold is not None:
+        thr_eighths = _clamp(threshold, 0.0, 100.0) / 100.0 * rows * 8
+        thr_row = rows - 1 - min(rows - 1, int(thr_eighths // 8))
+    lines: list[Text] = []
+    for r in range(rows):
+        line = Text(no_wrap=True)
+        label = _y_label(r, rows, thr_row, threshold)
+        line.append(f"{label:>{GUTTER - 1}}{'┤' if label else '│'}", style=palette.muted)
+        floor = (rows - 1 - r) * 8  # eighths below this row
+        for c in range(cols):
+            fill = heights[c] - floor
+            if fill > 0:
+                line.append(COLUMN_GLYPHS[min(8, fill)], style=colors[c] or palette.muted)
+            elif r == thr_row:
+                line.append(THRESHOLD_GLYPH, style=f"{palette.sev_warn} dim")
+            else:
+                line.append(" ")
+        lines.append(line)
+    lines.append(_time_axis(cols, x0, x1, None, _span_fmt(x1 - x0), palette))
+    return lines
+
+
+__all__ = ["history_plot", "line_plot", "peak_columns", "sparkline"]

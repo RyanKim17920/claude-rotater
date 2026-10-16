@@ -238,3 +238,100 @@ class TestLinePlot:
         after = [line.plain for line in line_plot(est, now=NOW, threshold=90, width=40, height=8)]
         assert before == after
         assert os.environ["TZ"] == "UTC"
+
+
+class TestHistoryPlot:
+    def test_shape_and_axis_in_days(self, utc):
+        from claude_rotater.tui.plot import history_plot
+
+        pts = [Point(NOW - 86400 * (7 - i), 10.0 * i, None) for i in range(8)]
+        lines = history_plot(pts, x0=NOW - 7 * 86400, x1=NOW, threshold=90, width=50, height=8)
+        assert len(lines) == 8
+        assert all(line.cell_len == 50 for line in lines)
+        axis = lines[-1].plain
+        assert "Nov 07" in axis and "Nov 14" in axis  # day labels, not clocks
+        assert "now" not in axis
+
+    def test_monotone_series_climbs(self, utc):
+        from claude_rotater.tui.plot import history_plot
+
+        pts = [Point(NOW - 3600 * (24 - i), 4.0 * i, None) for i in range(25)]
+        lines = history_plot(pts, x0=NOW - 86400, x1=NOW, threshold=None, width=40, height=9)
+        tops = top_dot_per_column(lines)
+        ordered = [tops[x] for x in sorted(tops)]
+        assert ordered == sorted(ordered, reverse=True)
+
+    def test_points_outside_span_ignored_and_threshold_drawn(self, utc):
+        from claude_rotater.tui.plot import history_plot
+
+        pts = [Point(NOW - 10 * 86400, 99.0, None)]
+        lines = history_plot(pts, x0=NOW - 86400, x1=NOW, threshold=50, width=30, height=6)
+        body = "".join(line.plain[GUTTER:] for line in lines[:-1])
+        assert not any(ord(ch) in BRAILLE for ch in body)
+        assert THRESHOLD_GLYPH in body
+
+    def test_degrades_to_sparkline(self, utc):
+        from claude_rotater.tui.plot import history_plot
+
+        pts = [Point(NOW - 60, 50.0, None)]
+        lines = history_plot(pts, x0=NOW - 3600, x1=NOW, threshold=90, width=10, height=8)
+        assert len(lines) == 1 and lines[0].cell_len == 10
+
+    def test_empty_draws_axes_only(self, utc):
+        from claude_rotater.tui.plot import history_plot
+
+        lines = history_plot([], x0=NOW - 86400, x1=NOW, threshold=None, width=30, height=5)
+        assert len(lines) == 5
+        assert lines[0].plain.startswith("100┤")
+
+
+class TestPeakColumns:
+    def _render(self, peaks, **kw):
+        from claude_rotater.tui.plot import peak_columns
+
+        args = dict(window_len_s=5 * 3600, x0=NOW - 7 * 86400, x1=NOW,
+                    threshold=90, width=60, height=10)
+        args.update(kw)
+        return peak_columns(peaks, **args)
+
+    def test_shape(self, utc):
+        lines = self._render([(NOW - 86400, 50.0)])
+        assert len(lines) == 10
+        assert all(line.cell_len == 60 for line in lines)
+
+    def test_column_height_tracks_peak(self, utc):
+        from claude_rotater.tui.plot import COLUMN_GLYPHS
+
+        lines = self._render([(NOW - 5 * 86400, 100.0), (NOW - 86400, 25.0)], threshold=None)
+        body = [line.plain[GUTTER:] for line in lines[:-1]]
+        tall = [c for c in range(len(body[0])) if body[0][c] == "█"]
+        assert tall, "a 100% window fills to the top row"
+        short_rows = [r for r, row in enumerate(body) if any(ch in COLUMN_GLYPHS[1:] for ch in row[max(tall) + 2:])]
+        # 25% of 9 rows ≈ 2.25 rows: only the bottom three rows hold the short column
+        assert short_rows and min(short_rows) >= len(body) - 3
+
+    def test_peak_color_is_severity(self, utc):
+        lines = self._render([(NOW - 86400, 95.0)], threshold=None)
+        styles = {str(span.style) for span in lines[-2].spans if lines[-2].plain[span.start:span.end].strip()}
+        assert any(SEV_CRIT in s for s in styles)
+
+    def test_threshold_row_dashed_where_empty(self, utc):
+        lines = self._render([])
+        assert any(THRESHOLD_GLYPH in line.plain for line in lines[:-1])
+
+    def test_windows_outside_span_dropped(self, utc):
+        lines = self._render([(NOW - 30 * 86400, 80.0)], threshold=None)
+        body = "".join(line.plain[GUTTER:] for line in lines[:-1])
+        assert body.strip() == ""
+
+    def test_neighbours_keep_a_gap(self, utc):
+        reset = NOW - 86400
+        lines = self._render(
+            [(reset, 60.0), (reset + 5 * 3600, 60.0)], threshold=None, x0=reset - 10 * 3600, x1=reset + 5 * 3600
+        )
+        bottom = lines[-2].plain[GUTTER:].rstrip()
+        assert " " in bottom.strip()
+
+    def test_degrades_to_sparkline(self, utc):
+        lines = self._render([(NOW - 86400, 50.0)], width=12, height=2)
+        assert len(lines) == 1
