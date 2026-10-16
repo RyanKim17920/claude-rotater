@@ -8353,7 +8353,7 @@ class TestAddAccountAlias:
 
 
 class TestDisableEnableAccount:
-    """`cswap disable`/`cswap enable`: park a managed account out of automatic
+    """Disable/enable (TUI key d): park a managed account out of automatic
     rotation without removing it. Disabled slots are skipped by the auto-switch
     engine, bare `switch` rotation, and the usage-aware strategies, but stay
     valid explicit `switch <num|email>` targets."""

@@ -1098,7 +1098,7 @@ class ClaudeAccountSwitcher:
         """Account numbers in rotation order eligible for automatic selection.
 
         Excludes slots without usable stored backups and slots the user has
-        disabled (``cswap disable``). Disabled slots stay managed and remain
+        disabled (key d in the TUI). Disabled slots stay managed and remain
         valid explicit ``cswap switch <num|email>`` targets — they are only
         held out of automatic rotation and the usage-aware strategies.
         """
@@ -1180,8 +1180,8 @@ class ClaudeAccountSwitcher:
             if not self.switchable_account_numbers():
                 warning(
                     "  No accounts remain in rotation — auto-switch and bare "
-                    "switch have nothing to pick. Re-enable one with "
-                    "cswap enable <num|email>."
+                    "switch have nothing to pick. Re-enable one: open "
+                    "cswap, select it and press d."
                 )
         else:
             print(dimmed("  It is back in the rotation."))
@@ -3310,7 +3310,7 @@ class ClaudeAccountSwitcher:
 
         # Check before the confirmation prompt (better UX); the chokepoint in
         # _delete_account_files re-checks as a safety net for all paths.
-        self._ensure_no_live_session(account_num, email, "--remove-account")
+        self._ensure_no_live_session(account_num, email, "the removal")
 
         if str(active_account) == account_num:
             warning(f"Warning: Account-{account_num} ({email}) is currently active")
@@ -5178,8 +5178,8 @@ class ClaudeAccountSwitcher:
                         self._account_is_switchable(str(num)) for num in sequence
                     ):
                         raise ConfigError(
-                            "No accounts remain in rotation. Re-enable one with: "
-                            "cswap enable <num|email>"
+                            "No accounts remain in rotation. Re-enable one: "
+                            "open cswap, select it and press d."
                         )
                     raise ConfigError(
                         "No managed accounts have valid stored credentials/config. "
