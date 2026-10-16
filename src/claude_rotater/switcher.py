@@ -81,6 +81,7 @@ from claude_rotater.paths import (
     get_default_claude_config_home,
     get_global_config_path,
 )
+from claude_rotater.legacy_import import import_legacy_data
 from claude_rotater.process_detection import get_running_instances
 from claude_rotater import poll_policy
 from claude_rotater.estimator import estimate_account
@@ -279,11 +280,20 @@ class ClaudeAccountSwitcher:
         self.platform = Platform.detect()
         self.backup_dir = get_backup_root()
 
+        # One-time copy of upstream claude-swap data into a fresh data dir,
+        # before anything below can create it (see legacy_import). A failure
+        # raises MigrationError, which the CLI reports like any other error.
+        imported = import_legacy_data(self.backup_dir, self.platform)
+        if imported is not None:
+            print(imported.describe(), file=sys.stderr)
+
         self.sequence_file = self.backup_dir / "sequence.json"
         self.configs_dir = self.backup_dir / "configs"
         self.credentials_dir = self.backup_dir / "credentials"
         self.lock_file = self.backup_dir / ".lock"
         self._logger = setup_logging(self.backup_dir, debug=debug)
+        if imported is not None:
+            self._logger.info(imported.describe())
         self._usage_store = UsageStore(self.backup_dir / "cache")
         # Burn history beside the store (best effort; feeds the estimator that
         # tightens poll plans near the threshold, and the TUI's plots).
