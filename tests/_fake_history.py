@@ -8,7 +8,7 @@ fetch stamp advances. Never touches disk.
 
 from __future__ import annotations
 
-from claude_swap.tui._wp1_stub import Point
+from claude_swap.usage_history import Point
 
 
 class FakeHistory:

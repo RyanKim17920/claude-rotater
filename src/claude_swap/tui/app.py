@@ -30,6 +30,7 @@ from textual.worker import WorkerState
 
 from claude_swap import printer
 from claude_swap.autoswitch import STATE_FILENAME, AutoSwitchEvent
+from claude_swap.estimator import AccountEstimate, estimate_account
 from claude_swap.models import AccountsSnapshot
 from claude_swap.settings import (
     AutoSwitchSettings,
@@ -40,11 +41,11 @@ from claude_swap.settings import (
 )
 from claude_swap.snapshot_source import account_identity
 from claude_swap.switcher import ClaudeAccountSwitcher
-from claude_swap.tui._wp1_stub import AccountEstimate, Point, estimate_account
 from claude_swap.tui.data import ActionResult, SnapshotSource, format_duration, run_action
 from claude_swap.tui.main import AutoStatus, MainScreen
 from claude_swap.tui.modals import AddTokenModal, ConfirmModal, OutputModal, TokenForm
 from claude_swap.tui.theme import CSWAP_DARK, CSWAP_LIGHT
+from claude_swap.usage_history import Point
 
 
 class EngineLike(Protocol):

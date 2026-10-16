@@ -17,8 +17,9 @@ from typing import Sequence
 
 from rich.text import Text
 
-from claude_swap.tui._wp1_stub import WINDOW_LEN_S, Point, WindowEstimate
+from claude_swap.estimator import WINDOW_LEN_S, WindowEstimate
 from claude_swap.tui.theme import Palette
+from claude_swap.usage_history import Point
 
 SPARK_GLYPHS = "▁▂▃▄▅▆▇█"
 THRESHOLD_GLYPH = "┄"

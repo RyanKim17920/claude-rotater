@@ -7,7 +7,7 @@ import time
 
 import pytest
 
-from claude_swap.tui._wp1_stub import Point, WindowEstimate, estimate_account
+from claude_swap.estimator import WindowEstimate, estimate_account
 from claude_swap.tui.plot import (
     GUTTER,
     RESET_GLYPH,
@@ -17,6 +17,7 @@ from claude_swap.tui.plot import (
     sparkline,
 )
 from claude_swap.tui.theme import CSWAP_LIGHT, SEV_CRIT, Palette
+from claude_swap.usage_history import Point
 
 NOW = 1_700_000_000.0
 BRAILLE = range(0x2800, 0x2900)

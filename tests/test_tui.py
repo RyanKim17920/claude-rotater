@@ -719,7 +719,7 @@ class TestAccountRowText:
         assert "%/h" not in row
 
     def test_eta_burn_and_projection_from_estimate(self):
-        from claude_swap.tui._wp1_stub import WindowEstimate, AccountEstimate
+        from claude_swap.estimator import WindowEstimate, AccountEstimate
 
         now = time.time()
         # measured 60% 30 min ago at 10%/h: 65% projected now, 90% in 2.5h
@@ -732,7 +732,7 @@ class TestAccountRowText:
         assert "2h 30m ~" in row
 
     def test_projection_hidden_below_one_point(self):
-        from claude_swap.tui._wp1_stub import WindowEstimate, AccountEstimate
+        from claude_swap.estimator import WindowEstimate, AccountEstimate
 
         now = time.time()
         win = WindowEstimate("5h", 60.0, now - 60, now + 3600, 10.0, "high", ())
@@ -834,7 +834,7 @@ class TestStatusText:
 
 class TestEtaCell:
     def _est(self, conf, rate=10.0, last=50.0, resets_in=5 * 3600):
-        from claude_swap.tui._wp1_stub import AccountEstimate, WindowEstimate
+        from claude_swap.estimator import AccountEstimate, WindowEstimate
 
         now = time.time()
         win = WindowEstimate("5h", last, now, now + resets_in, rate, conf, ())

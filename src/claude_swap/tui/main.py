@@ -34,13 +34,14 @@ from textual.widgets import Button, ListItem, ListView, RichLog, Static
 
 from claude_swap import oauth
 from claude_swap.autoswitch import AutoSwitchEvent, pct_label
+from claude_swap.estimator import AccountEstimate, WindowEstimate
 from claude_swap.json_output import USAGE_API_KEY
 from claude_swap.models import AccountSnapshot, AccountsSnapshot
 from claude_swap.tui import data
-from claude_swap.tui._wp1_stub import AccountEstimate, Point, WindowEstimate
 from claude_swap.tui.plot import line_plot, sparkline
 from claude_swap.tui.theme import Palette
 from claude_swap.tui.widgets import account_card_text, bar_cells
+from claude_swap.usage_history import Point
 from claude_swap.usage_store import STALE_OK_S
 
 if TYPE_CHECKING:
