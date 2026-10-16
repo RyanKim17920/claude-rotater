@@ -6,6 +6,7 @@ import json
 import os
 import subprocess
 import sys
+import threading
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -1078,13 +1079,38 @@ class TestAutoCommand:
         def stop(self):
             pass
 
+    class FakeRefresher:
+        """Stands in for TokenRefresher; ``run_loop`` replays ``events``."""
+
+        instances: list = []
+        events: list = []
+
+        def __init__(self, switcher, *, on_event):
+            self.switcher = switcher
+            self.on_event = on_event
+            self.ran = threading.Event()
+            self.stopped = False
+            type(self).instances.append(self)
+
+        def run_loop(self):
+            for event in type(self).events:
+                self.on_event(event)
+            self.ran.set()
+            return 0
+
+        def stop(self):
+            self.stopped = True
+
     @pytest.fixture(autouse=True)
     def _fresh_fake(self):
         self.FakeEngine.instances = []
         self.FakeEngine.tick_outcome = None
+        self.FakeRefresher.instances = []
+        self.FakeRefresher.events = []
 
     def _run(self, argv: list[str], temp_home):
         with patch("claude_swap.autoswitch.AutoSwitchEngine", self.FakeEngine), \
+             patch("claude_swap.token_refresh.TokenRefresher", self.FakeRefresher), \
              patch("os.geteuid", return_value=1000, create=True), \
              patch.object(sys, "argv", ["claude-swap", "auto", *argv]):
             with pytest.raises(SystemExit) as excinfo:
@@ -1112,6 +1138,44 @@ class TestAutoCommand:
     def test_loop_mode_returns_loop_exit(self, temp_home):
         assert self._run([], temp_home) == 0
         assert self.FakeEngine.instances  # loop path constructed the engine
+
+    def test_loop_hosts_the_token_refresher_and_stops_it(self, temp_home):
+        assert self._run([], temp_home) == 0
+        refresher, = self.FakeRefresher.instances
+        assert refresher.ran.wait(5)
+        assert refresher.stopped
+
+    @pytest.mark.parametrize("argv", [["--once"], ["--dry-run"]])
+    def test_once_and_dry_run_never_refresh_tokens(self, temp_home, argv):
+        self._run(argv, temp_home)
+        assert self.FakeRefresher.instances == []
+
+    def _replay(self, argv, temp_home, capsys):
+        from claude_swap.token_refresh import RefreshEvent
+
+        self.FakeRefresher.events = [
+            RefreshEvent("refreshed", "2", "a@x.com"),
+            RefreshEvent("held", "3", "b@x.com"),
+            RefreshEvent("dead", "4", "c@x.com", "invalid_grant"),
+        ]
+        self._run(argv, temp_home)
+        assert self.FakeRefresher.instances[0].ran.wait(5)
+        return capsys.readouterr().out
+
+    def test_refresh_events_print_in_human_mode(self, temp_home, capsys):
+        out = self._replay([], temp_home, capsys)
+        assert "refreshed account 2 (a@x.com)'s token" in out
+        assert "account 4 (c@x.com) needs a re-login" in out
+        assert "b@x.com" not in out  # held is routine
+
+    def test_refresh_events_are_json_lines_in_json_mode(self, temp_home, capsys):
+        out = self._replay(["--json"], temp_home, capsys)
+        events = [json.loads(line) for line in out.splitlines() if line.strip()]
+        assert [(e["event"], e["account"]) for e in events] == [
+            ("token-refreshed", "2"), ("token-dead", "4"),
+        ]
+        assert events[1]["detail"] == "invalid_grant"
+        assert all(e["schemaVersion"] == 1 for e in events)
 
     def test_flags_override_settings_json(self, temp_home):
         from claude_swap.paths import get_backup_root

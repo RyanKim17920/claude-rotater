@@ -34,6 +34,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Callable, Iterator
 
 from claude_swap import oauth
+from claude_swap.json_output import SCHEMA_VERSION
 from claude_swap.usage_store import FetchRecord
 
 if TYPE_CHECKING:
@@ -66,6 +67,17 @@ class RefreshEvent:
     number: str
     email: str
     detail: str = ""
+
+    def to_json(self, ts: float) -> dict:
+        """One ``cswap auto --json`` line: ``event`` is ``token-<kind>``."""
+        return {
+            "schemaVersion": SCHEMA_VERSION,
+            "event": f"token-{self.kind}",
+            "ts": ts,
+            "account": self.number,
+            "email": self.email,
+            "detail": self.detail,
+        }
 
     def human(self) -> str:
         who = f"account {self.number} ({self.email})"

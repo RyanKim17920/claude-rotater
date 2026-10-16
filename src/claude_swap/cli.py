@@ -743,7 +743,16 @@ Defaults live in settings.json in the backup root; flags override them.
                     f"{' (dry-run)' if args.dry_run else ''} — Ctrl-C to stop"
                 )
             )
-        sys.exit(engine.run_loop())
+        # The headless loop keeps idle accounts' tokens warm like the TUI
+        # does. Not in --dry-run (a refresh rotates and writes credentials)
+        # and not with --once (a single tick has no timer to host).
+        refresher = None if args.dry_run else _start_token_refresher(switcher, args.json)
+        try:
+            code = engine.run_loop()
+        finally:
+            if refresher is not None:
+                refresher.stop()
+        sys.exit(code)
     except ClaudeSwitchError as e:
         if args.json:
             print(json.dumps(error_envelope(e)))
@@ -756,6 +765,33 @@ Defaults live in settings.json in the backup root; flags override them.
             file=sys.stderr if args.json else sys.stdout,
         )
         sys.exit(130)
+
+
+def _start_token_refresher(switcher: ClaudeAccountSwitcher, json_mode: bool):
+    """Run a TokenRefresher on a daemon thread, reporting like ``cswap auto``.
+
+    Safe beside a TUI or another ``cswap auto``: every refresh goes through
+    ``consume_backup_grant``, which serializes grant use per slot.
+    """
+    import threading
+    import time as _time
+
+    from claude_swap.printer import yellowed
+    from claude_swap.token_refresh import RefreshEvent, TokenRefresher
+
+    def emit(event: RefreshEvent) -> None:
+        if event.kind == "held":
+            return  # routine; the TUI hides it too
+        if json_mode:
+            print(json.dumps(event.to_json(_time.time())), flush=True)
+            return
+        line = event.human()
+        line = dimmed(line) if event.kind == "refreshed" else yellowed(line)
+        print(f"{_time.strftime('%H:%M:%S')}  {line}", flush=True)
+
+    refresher = TokenRefresher(switcher, on_event=emit)
+    threading.Thread(target=refresher.run_loop, name="token-refresher", daemon=True).start()
+    return refresher
 
 
 def _config_command(argv: list[str]) -> None:
