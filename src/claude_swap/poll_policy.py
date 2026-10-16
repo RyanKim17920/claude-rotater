@@ -81,14 +81,16 @@ if TYPE_CHECKING:
 # one token is 1/SERVE_TTL_S regardless of how many surfaces are open.
 SERVE_TTL_S = 180.0
 
-# Every account, active or idle, is polled at this cadence unless something
-# below tightens or widens it: 12 requests/hour, well under the budget. This
-# is the DEFAULT; the effective value comes from settings (see PollCadence).
-BASELINE_INTERVAL_S = 300.0
-
 # Approach floor: an account the estimator projects to cross the threshold
 # soon is sampled down to this cadence, never below (unless urgent).
 MIN_INTERVAL_S = 180.0
+
+# Baselines, unless something below tightens or widens them. The active
+# account (the one whose usage moves) polls at the floor, 20 requests/hour;
+# an idle spare drifts at ten minutes, 6/hour. DEFAULTS; the effective values
+# come from settings (see PollCadence).
+ACTIVE_INTERVAL_S = MIN_INTERVAL_S
+SPARE_INTERVAL_S = 600.0
 
 # Urgent floor: only the ACTIVE account, only while no 429 was seen recently,
 # and only while its trailing-hour attempts are under the urgent budget. The
@@ -108,11 +110,12 @@ HOURLY_BUDGET = 20
 URGENT_BUDGET_FRAC = 0.75
 URGENT_BUDGET = round(HOURLY_BUDGET * URGENT_BUDGET_FRAC)  # 15
 
-# Kept for readers outside this module: the active account's age cap
-# (autoswitch) and the candidate defaults now all equal the baseline.
-ACTIVE_MAX_INTERVAL_S = BASELINE_INTERVAL_S
-CANDIDATE_DEFAULT_INTERVAL_S = BASELINE_INTERVAL_S
-CANDIDATE_MAX_INTERVAL_S = 600.0
+# Kept for readers outside this module: the engine's age cap on the active
+# row (a plan written while it was a spare must not gate it longer than
+# this), and the candidate names for the spare baseline.
+ACTIVE_MAX_INTERVAL_S = 300.0
+CANDIDATE_DEFAULT_INTERVAL_S = SPARE_INTERVAL_S
+CANDIDATE_MAX_INTERVAL_S = SPARE_INTERVAL_S
 
 # Exhaustion is stable enough to poll slowly, but not to stop polling until a
 # reported reset. Quota grants and provider-side corrections can make an
@@ -147,7 +150,7 @@ RECENT_429_WINDOW_S = 3600.0
 # interval (×POST_429_BACKOFF_MULT) toward POST_429_MAX_INTERVAL_S — wider than
 # the normal candidate ceiling so several machines can each back off far enough
 # that their combined rate fits under the budget. Once the 429s age out of
-# RECENT_429_WINDOW_S the planner returns to the baseline.
+# RECENT_429_WINDOW_S the planner returns to the account's baseline.
 # This is TCP-style congestion control: the budget gets fair-shared by
 # reaction alone, with no machine count or shared state to configure.
 POST_429_BACKOFF_MULT = 1.5
@@ -169,14 +172,18 @@ TRAILING_HOUR_S = 3600.0
 class PollCadence:
     """The user-tunable cadence knobs; defaults are the constants above.
 
-    Read from ``settings.json`` (``autoswitch.pollBaselineSeconds``,
-    ``autoswitch.pollUrgentSeconds``, ``autoswitch.pollHourlyBudget``) by
+    Read from ``settings.json`` (``autoswitch.pollActiveSeconds``,
+    ``pollSpareSeconds``, ``pollUrgentSeconds``, ``pollHourlyBudget``) by
     :func:`load_cadence`. The post-429 AIMD is not tunable: it is the
     safety net that converges whatever these are set to."""
 
-    baseline_s: float = BASELINE_INTERVAL_S
+    active_s: float = ACTIVE_INTERVAL_S
+    spare_s: float = SPARE_INTERVAL_S
     urgent_s: float = URGENT_INTERVAL_S
     hourly_budget: int = HOURLY_BUDGET
+
+    def baseline_for(self, is_active: bool) -> float:
+        return self.active_s if is_active else self.spare_s
 
     @property
     def urgent_budget(self) -> int:
@@ -187,7 +194,8 @@ DEFAULT_CADENCE = PollCadence()
 
 # settings.json key (autoswitch section) -> (field, kind, lo, hi)
 CADENCE_SETTING_KEYS: dict[str, tuple[str, str, float, float]] = {
-    "pollBaselineSeconds": ("baseline_s", "float", 10.0, 3600.0),
+    "pollActiveSeconds": ("active_s", "float", 10.0, 3600.0),
+    "pollSpareSeconds": ("spare_s", "float", 10.0, 3600.0),
     "pollUrgentSeconds": ("urgent_s", "float", 5.0, 3600.0),
     "pollHourlyBudget": ("hourly_budget", "int", 1.0, 3600.0),
 }
@@ -305,14 +313,15 @@ def plan_after_fetch(
 
     In order:
 
-    1. Start from the baseline (``cadence.baseline_s``).
+    1. Start from the account's baseline (``cadence.active_s`` for the
+       active account, ``cadence.spare_s`` for a spare).
     2. An exhausted account polls no faster than ``EXHAUSTED_INTERVAL_S``
        (bounded, so an early quota grant is still observed).
     3. Otherwise, when the estimator projects a threshold crossing, shrink
        the interval to ``eta / POLLS_BEFORE_CROSSING``, floored at
        ``MIN_INTERVAL_S`` — or at the urgent interval for the active account
        with no recent 429 and fewer than ``cadence.urgent_budget`` attempts
-       in the trailing hour. Never above the baseline.
+       in the trailing hour. Never above the account's baseline.
     4. A recent 429 widens the interval multiplicatively (AIMD) toward
        ``POST_429_MAX_INTERVAL_S``.
     5. Jitter by ``JITTER_FRAC``.
@@ -325,7 +334,7 @@ def plan_after_fetch(
     from ``estimate`` rather than from a two-point movement delta.
     """
     del prev_usage
-    baseline = cadence.baseline_s
+    baseline = cadence.baseline_for(is_active)
     interval = baseline
     headroom = oauth.account_headroom(new_usage, models)
     exhausted = headroom is not None and headroom <= 0

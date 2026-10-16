@@ -726,21 +726,19 @@ class TestAdaptiveScheduler:
         # t0: active (never fetched) + the stalest candidate.
         self._tick(h, counts, usage)
         assert counts == {"1": 1, "2": 1}
-        # t60: active planned BASELINE_INTERVAL_S out; the never-fetched
+        # t60: active planned ACTIVE_INTERVAL_S out; the never-fetched
         # candidate is the due one.
         h.clock.advance(60)
         self._tick(h, counts, usage)
         assert counts == {"1": 1, "2": 1, "3": 1}
-        # t120..t240: nobody due — everyone served from the store.
-        for _ in range(3):
-            h.clock.advance(60)
-            self._tick(h, counts, usage)
-        assert counts == {"1": 1, "2": 1, "3": 1}
-        # t300: the active account's plan comes due, plus the stalest due
-        # candidate.
+        # t120: nobody due — everyone served from the store.
         h.clock.advance(60)
         self._tick(h, counts, usage)
-        assert counts == {"1": 2, "2": 2, "3": 1}
+        assert counts == {"1": 1, "2": 1, "3": 1}
+        # t180: the active account's plan comes due; spares wait 600s.
+        h.clock.advance(60)
+        self._tick(h, counts, usage)
+        assert counts == {"1": 2, "2": 1, "3": 1}
 
     def test_near_threshold_escalates_to_full_refresh(self, temp_home, monkeypatch):
         # threshold 90, margin 15 → active at 80% is within the escalation band.
@@ -767,18 +765,18 @@ class TestAdaptiveScheduler:
 
     def test_active_polls_at_the_baseline(self, temp_home, monkeypatch):
         # Far from the threshold, the active account polls every
-        # BASELINE_INTERVAL_S, steadily (no decay, no estimate-driven shrink).
+        # ACTIVE_INTERVAL_S, steadily (no decay, no estimate-driven shrink).
         h = self._harness(temp_home, monkeypatch, accounts=2)
         usage = {"1": _usage(10), "2": _usage(20)}
         counts: dict[str, int] = {}
         self._tick(h, counts, usage)  # never-fetched → fetched
         assert counts["1"] == 1
         for expected in (2, 3):
-            for _ in range(4):  # ages 60..240s — inside the 300s baseline
+            for _ in range(2):  # ages 60..120s — inside the 180s baseline
                 h.clock.advance(60)
                 self._tick(h, counts, usage)
             assert counts["1"] == expected - 1
-            h.clock.advance(60)  # age 300s → due again
+            h.clock.advance(60)  # age 180s → due again
             self._tick(h, counts, usage)
             assert counts["1"] == expected
 
@@ -807,24 +805,24 @@ class TestAdaptiveScheduler:
         assert counts["1"] == 4
 
     def test_in_band_without_movement_keeps_the_baseline(self, temp_home, monkeypatch):
-        # In the escalation band but not burning: no ETA, so the plan stays at
-        # the baseline. The escalation still refreshes a row once it is stale
-        # past SERVE_TTL_S, so the active is refetched then — never every tick.
+        # In the escalation band but not burning: no ETA, so no tightening —
+        # the 180s active baseline applies (escalation keeps candidates fresh;
+        # it must not re-fetch a fresh, unmoving active every tick).
         h = self._harness(temp_home, monkeypatch, accounts=2)
         usage = {"1": _usage(80), "2": _usage(10)}
         counts: dict[str, int] = {}
-        self._tick(h, counts, usage)
-        for _ in range(3):  # ages 60..180s: fresh, served from the store
-            h.clock.advance(60)
+        for expected in (1, 2):
             self._tick(h, counts, usage)
-        assert counts["1"] == 1
-        e = h.switcher._usage_store.entries({"1": ("a@example.com", "")})["1"]
-        assert e.poll_interval_s == poll_policy.BASELINE_INTERVAL_S
-        h.clock.advance(60)  # age 240s: stale past the TTL → escalation refetch
+            assert counts["1"] == expected
+            for _ in range(2):
+                h.clock.advance(60)
+                self._tick(h, counts, usage)
+            assert counts["1"] == expected  # not due inside the baseline
+            e = h.switcher._usage_store.entries({"1": ("a@example.com", "")})["1"]
+            assert e.poll_interval_s == poll_policy.ACTIVE_INTERVAL_S
+            h.clock.advance(60)
         self._tick(h, counts, usage)
-        assert counts["1"] == 2
-        e = h.switcher._usage_store.entries({"1": ("a@example.com", "")})["1"]
-        assert e.poll_interval_s == poll_policy.BASELINE_INTERVAL_S  # flat: no ETA
+        assert counts["1"] == 3
 
     @pytest.mark.parametrize("threshold,tightened", [(50, True), (90, False)])
     def test_approach_follows_the_threshold(
@@ -957,7 +955,9 @@ class TestAdaptiveScheduler:
         assert outcome is TickOutcome.NO_ACTION
         assert h.engine._unhealthy_ticks == 0
         assert "1" not in counts  # backoff respected
-        assert sum(counts.values()) == 1  # baseline slot only, no escalate-all
+        # At most the one baseline candidate slot (spares poll every 600s, so
+        # none may be due yet) — never an escalate-all burst.
+        assert sum(counts.values()) <= 1
 
     def test_a_non_429_ask_is_bounded_at_its_own_trust_ceiling(
         self, temp_home, monkeypatch
@@ -1523,15 +1523,15 @@ class TestAdaptiveScheduler:
             )["2"].poll_interval_s
 
         self._tick(h, counts, usage)          # first data point → baseline
-        assert interval() == poll_policy.BASELINE_INTERVAL_S  # 300s
-        h.clock.advance(180)
-        self._tick(h, counts, usage)          # not due yet (300s interval)
+        assert interval() == poll_policy.SPARE_INTERVAL_S  # 600s
+        h.clock.advance(300)
+        self._tick(h, counts, usage)          # not due yet (600s interval)
         assert counts["2"] == 1
-        h.clock.advance(120)
+        h.clock.advance(300)
         self._tick(h, counts, usage)          # unmoved → stays at baseline
         assert counts["2"] == 2
-        assert interval() == poll_policy.BASELINE_INTERVAL_S
-        h.clock.advance(300)
+        assert interval() == poll_policy.SPARE_INTERVAL_S
+        h.clock.advance(600)
         usage["2"] = _usage(80)               # burned 70 pts on another machine
         self._tick(h, counts, usage)
         assert counts["2"] == 3
@@ -1653,12 +1653,12 @@ class TestAdaptiveScheduler:
         with patch.object(
             h.switcher, "usage_entries_by_account", side_effect=spying_collect
         ):
-            for _ in range(6):  # t0 .. t300
+            for _ in range(4):  # t0, t60, t120, t180
                 outcome = self._tick(h, counts, usage)
                 assert outcome is TickOutcome.NO_ACTION
                 h.clock.advance(60)
         # (a) HTTP volume identical to the baseline cadence under `best`.
-        assert counts == {"1": 2, "2": 2, "3": 1}
+        assert counts == {"1": 2, "2": 1, "3": 1}
         # (b) no collection ever requested the all-candidates escalation set.
         assert {"1", "2", "3"} not in fetch_sets
 
@@ -1686,13 +1686,6 @@ class TestAdaptiveScheduler:
         h.switcher._usage_store.record(
             {"2": FetchRecord(error="http-429", retry_after_s=600.0)},
             {"2": ("b@example.com", "")},
-        )
-        # The active's baseline plan (300s) would not come due until t300,
-        # past #2's decision trust; pull it to t241 so the refetch below runs
-        # while #2 is still trusted.
-        h.switcher._usage_store.set_poll_plan(
-            {"1": (h.clock.now + 181, poll_policy.BASELINE_INTERVAL_S)},
-            {"1": ("a@example.com", "")},
         )
         h.clock.advance(181)                   # t241
         h.events.clear()
@@ -2819,7 +2812,7 @@ class TestModelAwareSwitch:
         # 24%/h, 2 pts to go: crossing in 300s → 300/3 = 100s, under the
         # 180s floor only an active account may use.
         assert plan(("Fable",)) == pytest.approx(100.0)
-        assert plan(()) == poll_policy.BASELINE_INTERVAL_S
+        assert plan(()) == poll_policy.ACTIVE_INTERVAL_S
 
     def test_unmatched_model_name_warns_once(self, temp_home):
         h = self._seed(temp_home, model="Fabel")  # deliberate typo

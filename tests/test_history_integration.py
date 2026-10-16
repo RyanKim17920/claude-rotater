@@ -90,15 +90,15 @@ class TestPlanFollowsEstimate:
             exact = min(exact + 0.03 * intervals[-1], 89.0)  # 108%/h
         # First plan has a single point: the baseline. Then the ETA shrinks
         # the interval monotonically as the crossing approaches.
-        assert intervals[0] == poll_policy.BASELINE_INTERVAL_S
-        assert intervals[-1] < poll_policy.BASELINE_INTERVAL_S
-        assert intervals[-1] <= poll_policy.MIN_INTERVAL_S
+        assert intervals[0] == poll_policy.ACTIVE_INTERVAL_S
+        assert intervals[-1] < poll_policy.ACTIVE_INTERVAL_S
+        assert intervals[-1] < poll_policy.ACTIVE_INTERVAL_S
         assert all(b <= a for a, b in zip(intervals[1:], intervals[2:]))
 
     def test_flat_usage_stays_at_baseline(self, h):
         for _ in range(4):
             collect(h, {"1": _usage(40)}, fetch={"1"})
-            assert plan_of(h, "1", ID1)[1] == poll_policy.BASELINE_INTERVAL_S
+            assert plan_of(h, "1", ID1)[1] == poll_policy.ACTIVE_INTERVAL_S
             advance_to_plan(h, "1", ID1)
 
     def test_ledger_budget_caps_the_next_poll(self, h):
@@ -112,7 +112,7 @@ class TestPlanFollowsEstimate:
 
     def test_cadence_settings_drive_the_plan(self, h):
         (h.switcher.backup_dir / "settings.json").write_text(
-            json.dumps({"autoswitch": {"pollBaselineSeconds": 200}})
+            json.dumps({"autoswitch": {"pollActiveSeconds": 200}})
         )
         collect(h, {"1": _usage(40)}, fetch={"1"})
         assert plan_of(h, "1", ID1)[1] == 200.0
@@ -128,7 +128,7 @@ class TestBestEffort:
         collect(h, {"1": _usage(40)}, fetch={"1"})
         e = h.switcher._usage_store.entries({"1": ID1})["1"]
         assert e.last_good["five_hour"]["pct"] == 40
-        assert e.poll_interval_s == poll_policy.BASELINE_INTERVAL_S
+        assert e.poll_interval_s == poll_policy.ACTIVE_INTERVAL_S
 
     def test_history_read_failure_degrades_to_baseline(self, h, monkeypatch):
         collect(h, {"1": _usage(40)}, fetch={"1"})
@@ -142,7 +142,7 @@ class TestBestEffort:
         collect(h, {"1": _usage(70)}, fetch={"1"})  # would otherwise tighten
         e = h.switcher._usage_store.entries({"1": ID1})["1"]
         assert e.last_good["five_hour"]["pct"] == 70
-        assert e.poll_interval_s == poll_policy.BASELINE_INTERVAL_S
+        assert e.poll_interval_s == poll_policy.ACTIVE_INTERVAL_S
 
     def test_corrupt_history_file_is_tolerated(self, h):
         path = h.switcher.usage_history.path
