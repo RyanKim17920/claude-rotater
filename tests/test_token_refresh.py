@@ -316,7 +316,9 @@ class TestRealSwitcher:
             lambda c, timeout_s=10.0: RefreshOutcome(None, "invalid_grant"),
         )
         TokenRefresher(s).tick()
-        assert s._slot_token_dead("2", "idle@x.com")
+        org = s._get_sequence_data()["accounts"]["2"].get("organizationUuid", "")
+        entry = s._usage_store.entries({"2": ("idle@x.com", org)})["2"]
+        assert entry.token_dead()  # struck: every surface shows "re-login needed"
 
 
 def test_login_expires_at_epoch():

@@ -1,7 +1,7 @@
 """Serialization helpers for ``--json`` structured output.
 
 Centralizes the schema-v1 shapes so ``--list``/``--status``/``--switch`` agree on
-field names (camelCase, matching the export envelope in transfer.py) and on how the
+field names (camelCase) and on how the
 internal usage dict is projected to JSON. Callers build payloads here; the CLI does
 the single ``json.dumps`` (see cli.py).
 """

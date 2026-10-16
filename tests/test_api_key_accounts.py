@@ -3,7 +3,7 @@
 Covers kind detection, ``--add-token`` auto-detection, the cross-kind collision
 guard, the ``add_account`` live-key guard, kind+platform-aware active credential
 read/write with OAuth↔API-key mutual exclusion, the "API key — no quota" usage
-display, the ``cswap run`` session guard, and export/import of raw keys.
+display, the ``cswap run`` session guard, and the managed-key paths.
 """
 
 from __future__ import annotations
@@ -37,7 +37,6 @@ from claude_swap.models import Platform
 from claude_swap.paths import get_credentials_path, get_global_config_path
 from claude_swap.session import SessionManager
 from claude_swap.switcher import ClaudeAccountSwitcher
-from claude_swap.transfer import export_accounts, import_accounts
 
 API_KEY = "sk-ant-api03-" + "a1b2c3d4e5" * 4  # 53 chars
 OTHER_KEY = "sk-ant-api03-" + "z9y8x7w6v5" * 4
@@ -369,60 +368,6 @@ class TestSessionGuard:
         monkeypatch.setattr(session_mod.shutil, "which", lambda name: "/fake/claude")
         with pytest.raises(SessionError, match="does not support API-key accounts"):
             mgr.run("2", [], share=True)
-
-
-# ---------------------------------------------------------------------------
-# Export / import of raw keys
-# ---------------------------------------------------------------------------
-
-
-class TestExportImport:
-    @pytest.mark.parametrize("key", [API_KEY, PERSONAL_KEY])
-    def test_round_trip_preserves_key_and_kind(self, tmp_path: Path, key):
-        src_home = tmp_path / "src"
-        (src_home / ".claude").mkdir(parents=True)
-        with _patched_home(src_home):
-            src = _linux_switcher()
-            src.add_account_from_token(key, slot=1)
-            out = tmp_path / "b.cswap"
-            export_accounts(src, str(out))
-            payload = json.loads(out.read_text(encoding="utf-8"))
-            # exported as a raw string, tagged api_key — not a JSON object.
-            assert payload["accounts"][0]["credentials"] == key
-            assert payload["accounts"][0]["kind"] == "api_key"
-
-        dst_home = tmp_path / "dst"
-        (dst_home / ".claude").mkdir(parents=True)
-        with _patched_home(dst_home):
-            dst = _linux_switcher()
-            import_accounts(dst, str(out))
-            assert dst._account_kind("1") == "api_key"
-            assert dst._read_account_credentials("1", "api-key-1@token.local") == key
-
-
-class _patched_home:
-    """Redirect HOME/Path.home() to ``home`` for export/import on two homes."""
-
-    def __init__(self, home: Path):
-        self.home = home
-        self._patches: list = []
-
-    def __enter__(self):
-        import os
-        from unittest.mock import patch
-
-        self._patches = [
-            patch.dict(os.environ, {"HOME": str(self.home), "USERPROFILE": str(self.home)}),
-            patch("pathlib.Path.home", return_value=self.home),
-        ]
-        for p in self._patches:
-            p.start()
-        return self
-
-    def __exit__(self, *exc):
-        for p in reversed(self._patches):
-            p.stop()
-        return False
 
 
 class TestAnUnreadableGlobalConfigIsNotAnEmptyOne:

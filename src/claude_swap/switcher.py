@@ -605,7 +605,7 @@ class ClaudeAccountSwitcher:
     #
     # The active and per-account backup credential stores live in
     # ``CredentialStore`` (credentials.py). The methods below are thin delegators
-    # kept so existing call sites (migrations, transfer, models, session, tests)
+    # kept so existing call sites (migrations, models, session, tests)
     # keep working unchanged. The store reads platform / _logger / credentials_dir
     # back off this switcher, but its sticky capability cache and last-active
     # backend live on the store — exposed here as proxy properties so callers that
@@ -2693,8 +2693,7 @@ class ClaudeAccountSwitcher:
         ``keychain_failed`` stays False on Linux/WSL/Windows (there is no
         Keychain to fail there) — ``value is None`` is the only surviving
         signal of the three states (readable / genuinely absent / could not
-        be read). Mirrors the ``is None`` guard ``_slot_token_dead`` already
-        uses for the same tri-state on the backup side.
+        be read).
         """
         return self._active_verdict().value is None
 
@@ -5229,63 +5228,6 @@ class ClaudeAccountSwitcher:
             num: with_sentinel(entries[num], sentinels.get(num))
             for num in info_by_num
         }
-
-    def _slot_token_dead(self, num: str, email: str) -> bool:
-        """Is this slot quarantined as refresh-token-dead, right now?
-
-        The same question :meth:`_entry_token_dead` answers for the collectors,
-        reachable from a caller that has only a slot number — `cswap import`'s
-        auto-heal, which must agree with them: the heal exists to release a
-        quarantine the collectors imposed, so a different verdict means the
-        remedy the "re-login needed" message names silently does nothing.
-
-        In particular the ACTIVE slot has two stored sources, and a strike may
-        be bound to either (see :meth:`_entry_token_dead`). Comparing only the
-        backup — as the import used to — leaves an active slot struck on its
-        live generation unhealable, and that is the slot most likely to be
-        quarantined in the first place.
-        """
-        # The org uuid is part of the row identity (UsageStore._matches
-        # compares it for EQUALITY), so an empty one silently matches nothing:
-        # every real account carries a non-empty org, and the lookup would
-        # return a blank entry whose token_dead() is always False.
-        data = self._get_sequence_data() or {}
-        org = (
-            (data.get("accounts", {}).get(num) or {})
-            .get("organizationUuid", "") or ""
-        )
-        ident = {num: (email, org)}
-        entry = self._usage_store.entries(ident).get(num)
-        if entry is None:
-            return False
-        is_active = num == self.current_account_number()
-        # The backup is a stored source on BOTH paths — directly when idle,
-        # and as _entry_token_dead's second source when active — and each
-        # turns an unreadable one into "dead" by a different route: an empty
-        # fingerprint skips token_dead's binding check, and the active path
-        # deliberately HOLDS a strike it cannot disprove (right for the
-        # collectors, wrong here). Both end in `import_accounts` replacing a
-        # healthy slot without --force. We cannot see it, so we cannot
-        # condemn it.
-        backup, unreadable = self._read_account_credentials_ex(num, email)
-        if unreadable:
-            return False
-        # The stored source, as _build_accounts_info reports it: the LIVE
-        # credential for the active slot, the backup otherwise. `.value` is
-        # tri-state (`""` genuinely absent, `None` a read ERROR) — collapsing
-        # it with `or ""` fed `credential_fingerprint("")` (None) into
-        # `token_dead`, which treats a None stored_fp as "binds
-        # unconditionally" and condemned a slot whose live credential simply
-        # could not be read this instant. Same "we cannot see it, we cannot
-        # condemn it" rule as the backup guard above.
-        if is_active:
-            active_value = self._store._read_active_credentials().value
-            if active_value is None:
-                return False
-            stored = active_value
-        else:
-            stored = backup
-        return self._entry_token_dead(entry, num, email, stored, is_active)
 
     def _entry_token_dead(
         self,
