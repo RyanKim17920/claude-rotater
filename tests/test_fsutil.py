@@ -1,4 +1,4 @@
-"""Tests for claude_swap.fsutil filesystem primitives."""
+"""Tests for claude_rotater.fsutil filesystem primitives."""
 
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from claude_swap.fsutil import read_text_with_retry, replace_with_retry
+from claude_rotater.fsutil import read_text_with_retry, replace_with_retry
 
 
 class TestReplaceWithRetry:
@@ -26,7 +26,7 @@ class TestReplaceWithRetry:
 
     @pytest.mark.parametrize("winerror", [5, 32, 33])
     def test_retries_transient_windows_errors(self, tmp_path, monkeypatch, winerror):
-        monkeypatch.setattr("claude_swap.fsutil.sys.platform", "win32")
+        monkeypatch.setattr("claude_rotater.fsutil.sys.platform", "win32")
         calls = []
         real_replace = os.replace
 
@@ -36,7 +36,7 @@ class TestReplaceWithRetry:
                 raise self._win_oserror(winerror)
             return real_replace(src, dst)
 
-        monkeypatch.setattr("claude_swap.fsutil.os.replace", flaky)
+        monkeypatch.setattr("claude_rotater.fsutil.os.replace", flaky)
         src = tmp_path / "tmp.tmp"
         src.write_text("payload")
         dst = tmp_path / "target.json"
@@ -47,38 +47,38 @@ class TestReplaceWithRetry:
         assert dst.read_text() == "payload"
 
     def test_gives_up_and_raises_after_attempts(self, tmp_path, monkeypatch):
-        monkeypatch.setattr("claude_swap.fsutil.sys.platform", "win32")
+        monkeypatch.setattr("claude_rotater.fsutil.sys.platform", "win32")
 
         def always_fail(src, dst):
             raise self._win_oserror(5)
 
-        monkeypatch.setattr("claude_swap.fsutil.os.replace", always_fail)
+        monkeypatch.setattr("claude_rotater.fsutil.os.replace", always_fail)
         with pytest.raises(OSError):
             replace_with_retry(tmp_path / "a", tmp_path / "b", attempts=3)
 
     def test_does_not_retry_real_errors(self, tmp_path, monkeypatch):
         """A genuine failure (e.g. missing source) must surface immediately."""
-        monkeypatch.setattr("claude_swap.fsutil.sys.platform", "win32")
+        monkeypatch.setattr("claude_rotater.fsutil.sys.platform", "win32")
         calls = []
 
         def missing(src, dst):
             calls.append(1)
             raise self._win_oserror(2)  # ERROR_FILE_NOT_FOUND
 
-        monkeypatch.setattr("claude_swap.fsutil.os.replace", missing)
+        monkeypatch.setattr("claude_rotater.fsutil.os.replace", missing)
         with pytest.raises(OSError):
             replace_with_retry(tmp_path / "a", tmp_path / "b")
         assert len(calls) == 1
 
     def test_posix_never_retries(self, tmp_path, monkeypatch):
-        monkeypatch.setattr("claude_swap.fsutil.sys.platform", "linux")
+        monkeypatch.setattr("claude_rotater.fsutil.sys.platform", "linux")
         calls = []
 
         def fail(src, dst):
             calls.append(1)
             raise self._win_oserror(5)
 
-        monkeypatch.setattr("claude_swap.fsutil.os.replace", fail)
+        monkeypatch.setattr("claude_rotater.fsutil.os.replace", fail)
         with pytest.raises(OSError):
             replace_with_retry(tmp_path / "a", tmp_path / "b")
         assert len(calls) == 1
@@ -105,7 +105,7 @@ class TestReadTextWithRetry:
 
     @pytest.mark.parametrize("winerror", [5, 32, 33])
     def test_retries_transient_windows_errors(self, tmp_path, monkeypatch, winerror):
-        monkeypatch.setattr("claude_swap.fsutil.sys.platform", "win32")
+        monkeypatch.setattr("claude_rotater.fsutil.sys.platform", "win32")
         target = tmp_path / "sequence.json"
         target.write_text("payload")
         calls = []
@@ -124,7 +124,7 @@ class TestReadTextWithRetry:
         assert len(calls) == 4
 
     def test_gives_up_and_raises_after_attempts(self, tmp_path, monkeypatch):
-        monkeypatch.setattr("claude_swap.fsutil.sys.platform", "win32")
+        monkeypatch.setattr("claude_rotater.fsutil.sys.platform", "win32")
         err = self._win_oserror(32)
 
         def always_fail(self, *a, **kw):
@@ -137,7 +137,7 @@ class TestReadTextWithRetry:
     def test_posix_eacces_surfaces_immediately(self, tmp_path, monkeypatch):
         """A POSIX EACCES is a real, persistent permission problem: raise at
         once rather than stalling ~0.75s on a condition that will not clear."""
-        monkeypatch.setattr("claude_swap.fsutil.sys.platform", "linux")
+        monkeypatch.setattr("claude_rotater.fsutil.sys.platform", "linux")
         calls = []
         err = self._win_oserror(5)
 
@@ -151,7 +151,7 @@ class TestReadTextWithRetry:
         assert len(calls) == 1
 
     def test_does_not_retry_a_non_contention_error(self, tmp_path, monkeypatch):
-        monkeypatch.setattr("claude_swap.fsutil.sys.platform", "win32")
+        monkeypatch.setattr("claude_rotater.fsutil.sys.platform", "win32")
         calls = []
         err = self._win_oserror(2)  # ERROR_FILE_NOT_FOUND
 
@@ -242,7 +242,7 @@ class TestStrictRosterReadBranches:
     def _switcher(self, tmp_path):
         import logging
 
-        from claude_swap.switcher import ClaudeAccountSwitcher
+        from claude_rotater.switcher import ClaudeAccountSwitcher
 
         s = ClaudeAccountSwitcher.__new__(ClaudeAccountSwitcher)
         s._logger = logging.getLogger("test")
@@ -252,7 +252,7 @@ class TestStrictRosterReadBranches:
         """Without the guard the caller gets AttributeError: 'list' object has
         no attribute 'get' — uncaught by cli.py's `except ClaudeSwitchError`,
         so `--json` emits no envelope at all."""
-        from claude_swap.exceptions import ConfigError
+        from claude_rotater.exceptions import ConfigError
 
         p = tmp_path / "sequence.json"
         p.write_text("[1, 2, 3]")
@@ -267,7 +267,7 @@ class TestStrictRosterReadBranches:
         """The distinction the strict reader exists for: `None` here would be
         spliced back as "no accounts" and destroy the roster on the next
         write."""
-        from claude_swap.exceptions import ConfigError
+        from claude_rotater.exceptions import ConfigError
 
         p = tmp_path / "sequence.json"
         p.write_text('{"sequence": [1], "accounts": {"1": {}}}')

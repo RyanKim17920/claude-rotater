@@ -8,8 +8,8 @@ from unittest.mock import patch
 
 import pytest
 
-from claude_swap import feed, oauth, poll_policy
-from claude_swap.feed_ingest import (
+from claude_rotater import feed, oauth, poll_policy
+from claude_rotater.feed_ingest import (
     ACCEPTED,
     ACCEPTED_SESSION,
     HISTORY_MIN_GAP_S,
@@ -211,13 +211,13 @@ ID1 = ("a@example.com", "")
 @pytest.fixture
 def h(temp_home, monkeypatch):
     monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
-    monkeypatch.setattr("claude_swap.switcher._FETCH_STAGGER_S", 0)
+    monkeypatch.setattr("claude_rotater.switcher._FETCH_STAGGER_S", 0)
     harness = EngineHarness(temp_home)
     harness.seed(1, "a@example.com")
     harness.seed(2, "b@example.com")
     harness.make_live("a@example.com", 1)
     monkeypatch.setattr(harness.switcher, "_live_session_pids", lambda *a: [])
-    with patch("claude_swap.oauth.fetch_oauth_profile", return_value=None):
+    with patch("claude_rotater.oauth.fetch_oauth_profile", return_value=None):
         yield harness
 
 
@@ -242,7 +242,7 @@ def collect(h, usage_by_num, fetch):
         fetched.append(num)
         return oauth.UsageOutcome(dict(usage_by_num[num]))
 
-    with patch("claude_swap.oauth.try_fetch_usage_for_account", side_effect=fake):
+    with patch("claude_rotater.oauth.try_fetch_usage_for_account", side_effect=fake):
         h.switcher.usage_entries_by_account(fetch=set(fetch), scheduled=True)
     return fetched
 
@@ -331,7 +331,7 @@ class TestIngest:
         assert entry(h).last_good is None
 
     def test_cswap_run_session_feeds_its_own_slot(self, h):
-        from claude_swap.session import session_dir_for
+        from claude_rotater.session import session_dir_for
 
         ing = FeedIngestor(h.switcher, clock=h.clock)
         session = session_dir_for(h.switcher.backup_dir, "2", "b@example.com")

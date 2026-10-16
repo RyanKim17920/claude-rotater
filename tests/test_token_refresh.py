@@ -7,9 +7,9 @@ import threading
 
 import pytest
 
-from claude_swap import oauth
-from claude_swap.oauth import RefreshOutcome
-from claude_swap.token_refresh import (
+from claude_rotater import oauth
+from claude_rotater.oauth import RefreshOutcome
+from claude_rotater.token_refresh import (
     BUSY_RETRY_S,
     HELD_RECHECK_S,
     LEAD_S,
@@ -18,7 +18,7 @@ from claude_swap.token_refresh import (
     TokenRefresher,
     due_at,
 )
-from claude_swap.usage_store import UsageStore
+from claude_rotater.usage_store import UsageStore
 
 NOW = 1_800_000_000.0
 
@@ -277,8 +277,8 @@ class TestRealSwitcher:
     def real(self, temp_home, mock_claude_config, tmp_path, monkeypatch):
         from unittest.mock import patch
 
-        from claude_swap.models import Platform
-        from claude_swap.switcher import ClaudeAccountSwitcher
+        from claude_rotater.models import Platform
+        from claude_rotater.switcher import ClaudeAccountSwitcher
 
         s = ClaudeAccountSwitcher()
         s._setup_directories()
@@ -291,7 +291,7 @@ class TestRealSwitcher:
         (stage / ".claude.json").write_text(json.dumps({"oauthAccount": {
             "emailAddress": "idle@x.com", "organizationUuid": "", "accountUuid": "u-idle"}}))
         (stage / (".credentials" + ".json")).write_text(real_creds("idle", -60))
-        monkeypatch.setattr("claude_swap.session.Platform.detect", lambda: Platform.LINUX)
+        monkeypatch.setattr("claude_rotater.session.Platform.detect", lambda: Platform.LINUX)
         s.add_account(source_dir=str(stage))
         return s, live
 
@@ -303,7 +303,7 @@ class TestRealSwitcher:
             posted.append(json.loads(c)["claudeAiOauth"]["refreshToken"])
             return RefreshOutcome(real_creds("idle-new", 8 * 3600), None)
 
-        monkeypatch.setattr("claude_swap.oauth.try_refresh_oauth_credentials", fake_post)
+        monkeypatch.setattr("claude_rotater.oauth.try_refresh_oauth_credentials", fake_post)
         TokenRefresher(s).tick()
         assert posted == ["rt-idle"]
         assert "at-idle-new" in s._read_account_credentials("2", "idle@x.com")
@@ -312,7 +312,7 @@ class TestRealSwitcher:
     def test_invalid_grant_marks_slot_dead(self, real, monkeypatch):
         s, _ = real
         monkeypatch.setattr(
-            "claude_swap.oauth.try_refresh_oauth_credentials",
+            "claude_rotater.oauth.try_refresh_oauth_credentials",
             lambda c, timeout_s=10.0: RefreshOutcome(None, "invalid_grant"),
         )
         TokenRefresher(s).tick()

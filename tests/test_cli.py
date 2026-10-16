@@ -12,14 +12,14 @@ from unittest.mock import patch
 
 import pytest
 
-from claude_swap import __version__
-from claude_swap import cli
+from claude_rotater import __version__
+from claude_rotater import cli
 
-# src layout: ensure subprocess can find claude_swap
+# src layout: ensure subprocess can find claude_rotater
 _SRC_DIR = str(Path(__file__).resolve().parent.parent / "src")
 
 # A throwaway HOME for subprocesses. The in-process autouse Keychain/HOME guards
-# do NOT reach child processes, so a spawned ``python -m claude_swap`` would
+# do NOT reach child processes, so a spawned ``python -m claude_rotater`` would
 # otherwise resolve to the developer's real ``~/.claude-swap-backup`` and run the
 # data migration against real accounts (touching the real Keychain on macOS). An empty,
 # isolated HOME has no ``sequence.json`` → the migration skips before any Keychain
@@ -67,7 +67,7 @@ class TestCLI:
 
     def test_version_flag(self):
         result = subprocess.run(
-            [sys.executable, "-m", "claude_swap", "--version"],
+            [sys.executable, "-m", "claude_rotater", "--version"],
             capture_output=True, text=True, env=_subprocess_env(),
         )
         assert result.returncode == 0
@@ -75,7 +75,7 @@ class TestCLI:
 
     def test_help_lists_exactly_the_public_commands(self):
         result = subprocess.run(
-            [sys.executable, "-m", "claude_swap", "--help"],
+            [sys.executable, "-m", "claude_rotater", "--help"],
             capture_output=True, text=True, env=_subprocess_env(),
         )
         assert result.returncode == 0
@@ -92,7 +92,7 @@ class TestCLI:
 
     def test_no_args_without_a_tty_is_a_clean_error(self):
         result = subprocess.run(
-            [sys.executable, "-m", "claude_swap"],
+            [sys.executable, "-m", "claude_rotater"],
             capture_output=True, text=True, env=_subprocess_env(),
         )
         assert result.returncode == 2
@@ -105,7 +105,7 @@ class TestCLI:
         "help", "--list", "--status", "--switch-to",
     ])
     def test_removed_verbs_are_rejected(self, verb, capsys):
-        with patch("claude_swap.cli.ClaudeAccountSwitcher") as switcher_cls, \
+        with patch("claude_rotater.cli.ClaudeAccountSwitcher") as switcher_cls, \
              patch.object(sys, "argv", ["claude-swap", verb]):
             with pytest.raises(SystemExit) as excinfo:
                 cli.main()
@@ -113,7 +113,7 @@ class TestCLI:
         switcher_cls.assert_not_called()
 
     def test_debug_flag_accepted_after_the_verb(self):
-        with patch("claude_swap.cli.ClaudeAccountSwitcher") as switcher_cls, \
+        with patch("claude_rotater.cli.ClaudeAccountSwitcher") as switcher_cls, \
              patch.object(sys, "argv", ["claude-swap", "status", "--debug"]), \
              patch("os.geteuid", return_value=1000, create=True):
             cli.main()
@@ -122,12 +122,12 @@ class TestCLI:
 
 def _main(argv: list[str], *, settings=None):
     """Run cli.main() with a mocked switcher; returns the switcher mock."""
-    from claude_swap.settings import AutoSwitchSettings
+    from claude_rotater.settings import AutoSwitchSettings
 
-    with patch("claude_swap.cli.ClaudeAccountSwitcher") as switcher_cls, \
+    with patch("claude_rotater.cli.ClaudeAccountSwitcher") as switcher_cls, \
          patch.object(sys, "argv", ["claude-swap", *argv]), \
          patch("os.geteuid", return_value=1000, create=True), \
-         patch("claude_swap.settings.load_settings",
+         patch("claude_rotater.settings.load_settings",
                return_value=settings or AutoSwitchSettings()):
         cli.main()
     return switcher_cls.return_value
@@ -163,7 +163,7 @@ class TestSwitchCommand:
         )
 
     def test_strategy_falls_back_to_configured_model(self):
-        from claude_swap.settings import AutoSwitchSettings
+        from claude_rotater.settings import AutoSwitchSettings
 
         switcher = _main(["switch", "--strategy", "best"],
                          settings=AutoSwitchSettings(model="Fable"))
@@ -173,7 +173,7 @@ class TestSwitchCommand:
         )
 
     def test_model_flag_overrides_setting(self):
-        from claude_swap.settings import AutoSwitchSettings
+        from claude_rotater.settings import AutoSwitchSettings
 
         switcher = _main(
             ["switch", "--strategy", "next-available", "--model", "Opus, opus,Fable"],
@@ -202,7 +202,7 @@ class TestSwitchCommand:
 class TestStatusCommand:
     def test_status_no_account(self, temp_home: Path):
         result = subprocess.run(
-            [sys.executable, "-m", "claude_swap", "status"],
+            [sys.executable, "-m", "claude_rotater", "status"],
             capture_output=True, text=True,
             env=_subprocess_env(HOME=str(temp_home)),
         )
@@ -217,7 +217,7 @@ class TestJsonOutputCli:
 
     def test_status_json_serialized_to_stdout(self, capsys):
         payload = {"schemaVersion": 1, "activeAccountNumber": None}
-        with patch("claude_swap.cli.ClaudeAccountSwitcher") as switcher_cls, \
+        with patch("claude_rotater.cli.ClaudeAccountSwitcher") as switcher_cls, \
              patch.object(sys, "argv", ["claude-swap", "status", "--json"]), \
              patch("os.geteuid", return_value=1000, create=True):
             switcher_cls.return_value.status.return_value = payload
@@ -227,7 +227,7 @@ class TestJsonOutputCli:
 
     def test_switch_json_forwarded_and_serialized(self, capsys):
         payload = {"schemaVersion": 1, "switched": True}
-        with patch("claude_swap.cli.ClaudeAccountSwitcher") as switcher_cls, \
+        with patch("claude_rotater.cli.ClaudeAccountSwitcher") as switcher_cls, \
              patch.object(sys, "argv", ["claude-swap", "switch", "--json"]), \
              patch("os.geteuid", return_value=1000, create=True):
             switcher_cls.return_value.switch.return_value = payload
@@ -239,7 +239,7 @@ class TestJsonOutputCli:
 
     def test_switch_json_carries_model_fields_when_in_effect(self, capsys):
         payload = {"schemaVersion": 1, "switched": True}
-        with patch("claude_swap.cli.ClaudeAccountSwitcher") as switcher_cls, \
+        with patch("claude_rotater.cli.ClaudeAccountSwitcher") as switcher_cls, \
              patch.object(sys, "argv", [
                  "claude-swap", "switch", "--strategy", "best", "--model", "Fable", "--json",
              ]), \
@@ -252,9 +252,9 @@ class TestJsonOutputCli:
         assert out["switched"] is True
 
     def test_error_envelope_on_stdout_with_exit_1(self, capsys):
-        from claude_swap.exceptions import ConfigError
+        from claude_rotater.exceptions import ConfigError
 
-        with patch("claude_swap.cli.ClaudeAccountSwitcher") as switcher_cls, \
+        with patch("claude_rotater.cli.ClaudeAccountSwitcher") as switcher_cls, \
              patch.object(sys, "argv", ["claude-swap", "status", "--json"]), \
              patch("os.geteuid", return_value=1000, create=True):
             switcher_cls.return_value.status.side_effect = ConfigError("nope")
@@ -267,9 +267,9 @@ class TestJsonOutputCli:
         assert captured.err == ""
 
     def test_human_error_goes_to_stderr(self, capsys):
-        from claude_swap.exceptions import ConfigError
+        from claude_rotater.exceptions import ConfigError
 
-        with patch("claude_swap.cli.ClaudeAccountSwitcher") as switcher_cls, \
+        with patch("claude_rotater.cli.ClaudeAccountSwitcher") as switcher_cls, \
              patch.object(sys, "argv", ["claude-swap", "switch", "9"]), \
              patch("os.geteuid", return_value=1000, create=True):
             switcher_cls.return_value.switch_to.side_effect = ConfigError("no such account")
@@ -303,8 +303,8 @@ class TestRunCommand:
                     require_session,
                 ))
 
-        with patch("claude_swap.session.SessionManager", FakeSessionManager), \
-             patch("claude_swap.cli.ClaudeAccountSwitcher"), \
+        with patch("claude_rotater.session.SessionManager", FakeSessionManager), \
+             patch("claude_rotater.cli.ClaudeAccountSwitcher"), \
              patch("os.geteuid", return_value=1000, create=True), \
              patch.object(sys, "argv", ["claude-swap", *argv]):
             cli.main()
@@ -367,7 +367,7 @@ class TestRunCommand:
 
     def test_main_help_mentions_run(self):
         result = subprocess.run(
-            [sys.executable, "-m", "claude_swap", "--help"],
+            [sys.executable, "-m", "claude_rotater", "--help"],
             capture_output=True,
             text=True,
             env=_subprocess_env(),
@@ -387,12 +387,12 @@ class TestRunCommand:
                 share_history=False,
                 require_session=False,
             ):
-                from claude_swap.exceptions import SessionError
+                from claude_rotater.exceptions import SessionError
 
                 raise SessionError("boom")
 
-        with patch("claude_swap.session.SessionManager", FailingSessionManager), \
-             patch("claude_swap.cli.ClaudeAccountSwitcher"), \
+        with patch("claude_rotater.session.SessionManager", FailingSessionManager), \
+             patch("claude_rotater.cli.ClaudeAccountSwitcher"), \
              patch("os.geteuid", return_value=1000, create=True), \
              patch.object(sys, "argv", ["claude-swap", "run", "2"]):
             with pytest.raises(SystemExit) as excinfo:
@@ -420,7 +420,7 @@ class TestAutoCommand:
             type(self).instances.append(self)
 
         def tick(self):
-            from claude_swap.autoswitch import TickOutcome
+            from claude_rotater.autoswitch import TickOutcome
 
             return type(self).tick_outcome or TickOutcome.NO_ACTION
 
@@ -460,8 +460,8 @@ class TestAutoCommand:
         self.FakeRefresher.events = []
 
     def _run(self, argv: list[str], temp_home):
-        with patch("claude_swap.autoswitch.AutoSwitchEngine", self.FakeEngine), \
-             patch("claude_swap.token_refresh.TokenRefresher", self.FakeRefresher), \
+        with patch("claude_rotater.autoswitch.AutoSwitchEngine", self.FakeEngine), \
+             patch("claude_rotater.token_refresh.TokenRefresher", self.FakeRefresher), \
              patch("os.geteuid", return_value=1000, create=True), \
              patch.object(sys, "argv", ["claude-swap", "auto", *argv]):
             with pytest.raises(SystemExit) as excinfo:
@@ -469,19 +469,19 @@ class TestAutoCommand:
         return excinfo.value.code
 
     def test_once_exit_code_switched(self, temp_home):
-        from claude_swap.autoswitch import TickOutcome
+        from claude_rotater.autoswitch import TickOutcome
 
         self.FakeEngine.tick_outcome = TickOutcome.SWITCHED
         assert self._run(["--once"], temp_home) == 0
 
     def test_once_exit_code_no_action(self, temp_home):
-        from claude_swap.autoswitch import TickOutcome
+        from claude_rotater.autoswitch import TickOutcome
 
         self.FakeEngine.tick_outcome = TickOutcome.NO_ACTION
         assert self._run(["--once"], temp_home) == 2
 
     def test_once_exit_code_blocked(self, temp_home):
-        from claude_swap.autoswitch import TickOutcome
+        from claude_rotater.autoswitch import TickOutcome
 
         self.FakeEngine.tick_outcome = TickOutcome.BLOCKED
         assert self._run(["--once"], temp_home) == 3
@@ -502,7 +502,7 @@ class TestAutoCommand:
         assert self.FakeRefresher.instances == []
 
     def _replay(self, argv, temp_home, capsys):
-        from claude_swap.token_refresh import RefreshEvent
+        from claude_rotater.token_refresh import RefreshEvent
 
         self.FakeRefresher.events = [
             RefreshEvent("refreshed", "2", "a@x.com"),
@@ -529,7 +529,7 @@ class TestAutoCommand:
         assert all(e["schemaVersion"] == 1 for e in events)
 
     def test_flags_override_settings_json(self, temp_home):
-        from claude_swap.paths import get_backup_root
+        from claude_rotater.paths import get_backup_root
 
         backup = get_backup_root()
         backup.mkdir(parents=True, exist_ok=True)
@@ -547,7 +547,7 @@ class TestAutoCommand:
         assert self.FakeEngine.instances[-1].dry_run is True
 
     def test_headless_engine_ingests_this_profiles_feed(self, temp_home):
-        from claude_swap.paths import get_backup_root
+        from claude_rotater.paths import get_backup_root
 
         self._run(["--once"], temp_home)
         feed = self.FakeEngine.instances[-1].feed
@@ -561,7 +561,7 @@ class TestAutoCommand:
         assert not hasattr(self.FakeEngine.instances[-1].settings, "interval_seconds")
 
     def test_json_stdout_is_pure_jsonl(self, temp_home, capsys):
-        from claude_swap.autoswitch import NoSwitchEvent, TickOutcome
+        from claude_rotater.autoswitch import NoSwitchEvent, TickOutcome
 
         class EmittingEngine(self.FakeEngine):
             def tick(self):
@@ -569,7 +569,7 @@ class TestAutoCommand:
                 self.on_event(NoSwitchEvent(reason="cooldown"))
                 return TickOutcome.NO_ACTION
 
-        with patch("claude_swap.autoswitch.AutoSwitchEngine", EmittingEngine), \
+        with patch("claude_rotater.autoswitch.AutoSwitchEngine", EmittingEngine), \
              patch("os.geteuid", return_value=1000, create=True), \
              patch.object(sys, "argv", ["claude-swap", "auto", "--once", "--json"]):
             with pytest.raises(SystemExit):
@@ -598,7 +598,7 @@ class TestAutoCommand:
 
     def test_main_help_mentions_auto(self):
         result = subprocess.run(
-            [sys.executable, "-m", "claude_swap", "--help"],
+            [sys.executable, "-m", "claude_rotater", "--help"],
             capture_output=True,
             text=True,
             env=_subprocess_env(),
@@ -606,9 +606,9 @@ class TestAutoCommand:
         assert "auto" in result.stdout
 
     def test_switcher_error_exits_1(self, temp_home, capsys):
-        from claude_swap.exceptions import ConfigError
+        from claude_rotater.exceptions import ConfigError
 
-        with patch("claude_swap.cli.ClaudeAccountSwitcher",
+        with patch("claude_rotater.cli.ClaudeAccountSwitcher",
                    side_effect=ConfigError("nope")), \
              patch.object(sys, "argv", ["claude-swap", "auto", "--once"]):
             with pytest.raises(SystemExit) as excinfo:
@@ -621,7 +621,7 @@ class TestTuiDispatch:
     """Bare `cswap` on a terminal is the one way into the TUI."""
 
     def _launch(self, *, tty: bool, result=0):
-        import claude_swap.tui as tui
+        import claude_rotater.tui as tui
 
         calls = []
 
@@ -629,7 +629,7 @@ class TestTuiDispatch:
             calls.append((args, kwargs))
             return result
 
-        with patch("claude_swap.cli.ClaudeAccountSwitcher") as switcher_cls, \
+        with patch("claude_rotater.cli.ClaudeAccountSwitcher") as switcher_cls, \
              patch.object(tui, "run", fake_run), \
              patch.object(sys, "argv", ["claude-swap"]), \
              patch.object(sys.stdout, "isatty", lambda: tty), \

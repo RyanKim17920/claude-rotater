@@ -15,8 +15,8 @@ import pytest
 from textual.app import App, ComposeResult
 from textual.widgets import Static
 
-from claude_swap.settings import SETTING_GROUPS, SETTING_SPECS, settings_path
-from claude_swap.tui.config import (
+from claude_rotater.settings import SETTING_GROUPS, SETTING_SPECS, settings_path
+from claude_rotater.tui.config import (
     ConfigScreen,
     SettingsList,
     clamp_typed,

@@ -19,12 +19,12 @@ from pathlib import Path
 
 import pytest
 
-from claude_swap.autoswitch import NoSwitchEvent, PollEvent, SleepEvent, SwitchEvent
-from claude_swap.json_output import USAGE_API_KEY, USAGE_TOKEN_EXPIRED
-from claude_swap.models import AccountSnapshot, AccountsSnapshot
-from claude_swap.switcher import ClaudeAccountSwitcher
-from claude_swap.tui import data as tui_data
-from claude_swap.usage_store import UsageEntry
+from claude_rotater.autoswitch import NoSwitchEvent, PollEvent, SleepEvent, SwitchEvent
+from claude_rotater.json_output import USAGE_API_KEY, USAGE_TOKEN_EXPIRED
+from claude_rotater.models import AccountSnapshot, AccountsSnapshot
+from claude_rotater.switcher import ClaudeAccountSwitcher
+from claude_rotater.tui import data as tui_data
+from claude_rotater.usage_store import UsageEntry
 
 sys.path.insert(0, str(Path(__file__).parent))
 from _fake_history import FakeHistory, linear_points  # noqa: E402
@@ -290,7 +290,7 @@ def fake_engine(monkeypatch):
     fetch and switch against the FakeSwitcher on its own schedule."""
     FakeEngine.instances = []
     FakeEngine.crash = False
-    monkeypatch.setattr("claude_swap.tui.app.default_engine_factory", FakeEngine)
+    monkeypatch.setattr("claude_rotater.tui.app.default_engine_factory", FakeEngine)
     return FakeEngine
 
 
@@ -322,12 +322,12 @@ class FakeRefresher:
 def fake_refresher(monkeypatch):
     """A real refresher would read credentials off the FakeSwitcher."""
     FakeRefresher.instances = []
-    monkeypatch.setattr("claude_swap.tui.app.default_refresher_factory", FakeRefresher)
+    monkeypatch.setattr("claude_rotater.tui.app.default_refresher_factory", FakeRefresher)
     return FakeRefresher
 
 
 def make_app(fake: FakeSwitcher):
-    from claude_swap.tui.app import CswapApp
+    from claude_rotater.tui.app import CswapApp
 
     return CswapApp(fake)
 
@@ -378,7 +378,7 @@ class TestFormatting:
             tui_data.sentinel_label(USAGE_TOKEN_EXPIRED)
             == "token expired — refresh deferred this pass; retries automatically"
         )
-        from claude_swap.switcher import SENTINEL_NOTES
+        from claude_rotater.switcher import SENTINEL_NOTES
 
         for sentinel, note in SENTINEL_NOTES.items():
             assert tui_data.sentinel_label(sentinel) == note
@@ -388,7 +388,7 @@ class TestFormatting:
         # A sentinel is a live overlay — the entry can still carry the last
         # good measurement, and `cswap list` prints it as a "last seen" line.
         # The card must too (except for API-key accounts, which have no quota).
-        from claude_swap.tui.widgets import account_card_text
+        from claude_rotater.tui.widgets import account_card_text
 
         entry = UsageEntry(
             sentinel=USAGE_TOKEN_EXPIRED,
@@ -416,8 +416,8 @@ class TestFormatting:
         assert "last seen" not in api_key
 
     def test_account_card_uses_light_palette_when_passed(self):
-        from claude_swap.tui.theme import ACCENT_LIGHT, CSWAP_LIGHT, Palette
-        from claude_swap.tui.widgets import account_card_text
+        from claude_rotater.tui.theme import ACCENT_LIGHT, CSWAP_LIGHT, Palette
+        from claude_rotater.tui.widgets import account_card_text
 
         acc = make_account(1, active=True, entry=make_entry(pct5=95.0))
         text = account_card_text(acc, 100, palette=Palette.from_theme(CSWAP_LIGHT))
@@ -566,14 +566,14 @@ class TestUsageRows:
     """The card's rows must mirror the CLI's _format_usage_lines semantics."""
 
     def test_absent_window_produces_no_row(self):
-        from claude_swap.tui.widgets import usage_rows
+        from claude_rotater.tui.widgets import usage_rows
 
         entry = make_entry(pct5=47.0, pct7=None)  # annual plan: no 7d window
         labels = [label for label, *_ in usage_rows(entry.last_good, time.time())]
         assert labels == ["5h"]
 
     def test_scoped_models_and_over_limit_marker(self):
-        from claude_swap.tui.widgets import usage_rows
+        from claude_rotater.tui.widgets import usage_rows
 
         entry = make_entry(scoped=[("Fable", 100.0), ("Opus", 12.0)])
         rows = usage_rows(entry.last_good, time.time())
@@ -585,7 +585,7 @@ class TestUsageRows:
         assert fable[3].endswith("(!)") and " · " in fable[3]
 
     def test_spend_row_first_with_amounts(self):
-        from claude_swap.tui.widgets import usage_rows
+        from claude_rotater.tui.widgets import usage_rows
 
         entry = make_entry(spend={"used": 12.5, "limit": 50.0, "pct": 25.0, "currency": "USD"})
         rows = usage_rows(entry.last_good, time.time())
@@ -593,7 +593,7 @@ class TestUsageRows:
         assert "$12.50 / $50.00" in rows[0][2]
 
     def test_suffix_full_extends_countdown_with_clock(self):
-        from claude_swap.tui.widgets import usage_rows
+        from claude_rotater.tui.widgets import usage_rows
 
         entry = make_entry(pct5=47.0)
         row5 = usage_rows(entry.last_good, time.time())[0]
@@ -601,7 +601,7 @@ class TestUsageRows:
         assert row5[3].startswith(row5[2] + " · ")
 
     def test_spend_clock_sits_with_reset_not_after_amounts(self):
-        from claude_swap.tui.widgets import usage_rows
+        from claude_rotater.tui.widgets import usage_rows
 
         entry = make_entry(
             spend={
@@ -618,14 +618,14 @@ class TestUsageRows:
         assert spend[3].index(" · ") < spend[3].index("$12.50")
 
     def test_no_data_no_rows(self):
-        from claude_swap.tui.widgets import usage_rows
+        from claude_rotater.tui.widgets import usage_rows
 
         assert usage_rows(None, time.time()) == []
         assert usage_rows({}, time.time()) == []
 
     def test_seven_day_ahead_of_pace_marker(self):
         # 1 day elapsed of the week, 50% used -> far ahead of the ~14% expected.
-        from claude_swap.tui.widgets import usage_rows
+        from claude_rotater.tui.widgets import usage_rows
 
         now = time.time()
         last_good = {"seven_day": {"pct": 50.0, "resets_at": _iso_in(86400 * 6)}}
@@ -634,7 +634,7 @@ class TestUsageRows:
         assert "(ahead of pace)" in row[3]
 
     def test_five_hour_never_shows_pace_marker(self):
-        from claude_swap.tui.widgets import usage_rows
+        from claude_rotater.tui.widgets import usage_rows
 
         now = time.time()
         last_good = {"five_hour": {"pct": 90.0, "resets_at": _iso_in(3600 * 4)}}
@@ -642,7 +642,7 @@ class TestUsageRows:
         assert "pace" not in row[2]
 
     def test_scoped_ahead_of_pace_marker(self):
-        from claude_swap.tui.widgets import usage_rows
+        from claude_rotater.tui.widgets import usage_rows
 
         now = time.time()
         last_good = {"scoped": [{"name": "Fable", "pct": 50.0, "resets_at": _iso_in(86400 * 6)}]}
@@ -650,7 +650,7 @@ class TestUsageRows:
         assert "(ahead of pace)" in row[2]
 
     def test_maxed_scoped_marker_wins_over_pace(self):
-        from claude_swap.tui.widgets import usage_rows
+        from claude_rotater.tui.widgets import usage_rows
 
         now = time.time()
         last_good = {"scoped": [{"name": "Fable", "pct": 100.0, "resets_at": _iso_in(86400 * 6)}]}
@@ -659,7 +659,7 @@ class TestUsageRows:
         assert "ahead of pace" not in row[2]
 
     def test_no_pace_marker_without_fetched_at(self):
-        from claude_swap.tui.widgets import usage_rows
+        from claude_rotater.tui.widgets import usage_rows
 
         now = time.time()
         last_good = {"seven_day": {"pct": 50.0, "resets_at": _iso_in(86400 * 6)}}
@@ -670,7 +670,7 @@ class TestUsageRows:
         # Per-row degradation: the wide card shows every clock, a mid width
         # keeps 5h/7d clocks while the longer spend row falls back to its
         # countdown, and a narrow card is exactly the old countdown-only look.
-        from claude_swap.tui.widgets import account_card_text
+        from claude_rotater.tui.widgets import account_card_text
 
         entry = make_entry(
             spend={
@@ -701,12 +701,12 @@ class TestAccountRowText:
     """The one-line account row and the column math it shares with the header."""
 
     def _layout(self, width: int = 120, windows=("5h", "7d")):
-        from claude_swap.tui.main import RowLayout
+        from claude_rotater.tui.main import RowLayout
 
         return RowLayout.for_width(width, windows)
 
     def _row(self, acc, est=None, *, width=120, threshold=90.0, now=None, models=()):
-        from claude_swap.tui.main import account_row_text
+        from claude_rotater.tui.main import account_row_text
 
         return account_row_text(
             acc,
@@ -751,7 +751,7 @@ class TestAccountRowText:
         assert "%/h" not in row
 
     def test_eta_burn_and_projection_from_estimate(self):
-        from claude_swap.estimator import WindowEstimate, AccountEstimate
+        from claude_rotater.estimator import WindowEstimate, AccountEstimate
 
         now = time.time()
         # measured 60% 30 min ago at 10%/h: 65% projected now, 90% in 2.5h
@@ -764,7 +764,7 @@ class TestAccountRowText:
         assert "2h 30m ~" in row
 
     def test_projection_hidden_below_one_point(self):
-        from claude_swap.estimator import WindowEstimate, AccountEstimate
+        from claude_rotater.estimator import WindowEstimate, AccountEstimate
 
         now = time.time()
         win = WindowEstimate("5h", 60.0, now - 60, now + 3600, 10.0, "high", ())
@@ -781,7 +781,7 @@ class TestAccountRowText:
 
     def test_scoped_window_column(self):
         entry = make_entry(10.0, 20.0, scoped=[("Fable", 55.0)])
-        from claude_swap.tui.main import RowLayout, account_row_text
+        from claude_rotater.tui.main import RowLayout, account_row_text
 
         layout = RowLayout.for_width(140, ("5h", "7d", "Fable"))
         row = account_row_text(
@@ -797,13 +797,13 @@ class TestAccountRowText:
 
 class TestRowLayout:
     def test_wide_gets_full_bars(self):
-        from claude_swap.tui.main import RowLayout
+        from claude_rotater.tui.main import RowLayout
 
         layout = RowLayout.for_width(120, ("5h", "7d"))
         assert layout.bar_w == 10 and layout.show_burn and layout.show_reset
 
     def test_degrades_in_order(self):
-        from claude_swap.tui.main import RowLayout
+        from claude_rotater.tui.main import RowLayout
 
         widths = [RowLayout.for_width(w, ("5h", "7d")) for w in (120, 95, 80, 66, 50)]
         bars = [lay.bar_w for lay in widths]
@@ -811,7 +811,7 @@ class TestRowLayout:
         assert not widths[-1].show_burn and not widths[-1].show_reset
 
     def test_header_matches_row_columns(self):
-        from claude_swap.tui.main import RowLayout, account_row_text, header_text
+        from claude_rotater.tui.main import RowLayout, account_row_text, header_text
 
         layout = RowLayout.for_width(120, ("5h", "7d"))
         header = header_text(layout, threshold=90.0).plain
@@ -827,12 +827,12 @@ class TestRowLayout:
 
 class TestStatusText:
     def _status(self, **kw):
-        from claude_swap.tui.main import AutoStatus
+        from claude_rotater.tui.main import AutoStatus
 
         return AutoStatus(**kw)
 
     def _text(self, status, now=None, width=120):
-        from claude_swap.tui.main import status_text
+        from claude_rotater.tui.main import status_text
 
         return status_text(status, now=now or time.time(), width=width).plain
 
@@ -866,7 +866,7 @@ class TestStatusText:
 
 class TestEtaCell:
     def _est(self, conf, rate=10.0, last=50.0, resets_in=5 * 3600):
-        from claude_swap.estimator import AccountEstimate, WindowEstimate
+        from claude_rotater.estimator import AccountEstimate, WindowEstimate
 
         now = time.time()
         win = WindowEstimate("5h", last, now, now + resets_in, rate, conf, ())
@@ -874,7 +874,7 @@ class TestEtaCell:
 
     @pytest.mark.parametrize("conf,glyph", [("high", ""), ("medium", "~"), ("low", "?")])
     def test_confidence_glyph(self, conf, glyph):
-        from claude_swap.tui.main import eta_cell
+        from claude_rotater.tui.main import eta_cell
 
         est, now = self._est(conf)
         text, _role = eta_cell(est, 90.0, now)
@@ -882,25 +882,25 @@ class TestEtaCell:
         assert text.endswith(glyph) if glyph else text[-1].isalnum()
 
     def test_none_confidence_is_dash(self):
-        from claude_swap.tui.main import eta_cell
+        from claude_rotater.tui.main import eta_cell
 
         est, now = self._est("none", rate=None)
         assert eta_cell(est, 90.0, now) == ("—", "muted")
 
     def test_over_threshold_is_now(self):
-        from claude_swap.tui.main import eta_cell
+        from claude_rotater.tui.main import eta_cell
 
         est, now = self._est("high", last=95.0)
         assert eta_cell(est, 90.0, now)[0] == "now"
 
     def test_crossing_after_reset(self):
-        from claude_swap.tui.main import eta_cell
+        from claude_rotater.tui.main import eta_cell
 
         est, now = self._est("high", rate=1.0, resets_in=600)
         assert eta_cell(est, 90.0, now)[0] == "≥reset"
 
     def test_burn_cell(self):
-        from claude_swap.tui.main import burn_cell
+        from claude_rotater.tui.main import burn_cell
 
         est, _now = self._est("high", rate=0.01)
         assert burn_cell(est) == "0"
@@ -920,7 +920,7 @@ class TestRunAction:
         assert "hello" in result.output
 
     def test_switch_error_is_captured_not_raised(self):
-        from claude_swap.exceptions import ClaudeSwitchError
+        from claude_rotater.exceptions import ClaudeSwitchError
 
         def fn():
             raise ClaudeSwitchError("boom")
@@ -987,7 +987,7 @@ def three_accounts(tmp_path) -> FakeSwitcher:
 
 
 def row_plain(app, number: str) -> str:
-    from claude_swap.tui.main import AccountRow
+    from claude_rotater.tui.main import AccountRow
 
     row = next(r for r in app.screen.query(AccountRow) if r.number == number)
     return row.children[0].render().plain
@@ -1076,7 +1076,7 @@ class TestMainPage:
             assert actions.region.bottom == size[1]
 
     async def test_event_log_appears_with_first_event(self, tmp_path, fake_engine):
-        from claude_swap.autoswitch import ErrorEvent
+        from claude_rotater.autoswitch import ErrorEvent
 
         app = make_app(three_accounts(tmp_path))
         async with app.run_test(size=(120, 40)) as pilot:
@@ -1225,7 +1225,7 @@ class TestMainPage:
             assert ("set_disabled", "1", False) in fake_calls(app)
 
     async def test_x_confirms_then_removes(self, tmp_path):
-        from claude_swap.tui.modals import ConfirmModal
+        from claude_rotater.tui.modals import ConfirmModal
 
         app = make_app(three_accounts(tmp_path))
         async with app.run_test(size=(120, 40)) as pilot:
@@ -1242,12 +1242,12 @@ class TestMainPage:
             await settle(pilot)
             assert ("remove", "2", True) in fake_calls(app)
             await settle(pilot)
-            from claude_swap.tui.main import AccountRow
+            from claude_rotater.tui.main import AccountRow
 
             assert [r.number for r in app.screen.query(AccountRow)] == ["1", "3"]
 
     async def test_a_adds_current_login_after_confirm(self, tmp_path):
-        from claude_swap.tui.modals import ConfirmModal, OutputModal
+        from claude_rotater.tui.modals import ConfirmModal, OutputModal
 
         app = make_app(three_accounts(tmp_path))
         async with app.run_test(size=(120, 40)) as pilot:
@@ -1263,7 +1263,7 @@ class TestMainPage:
     async def test_t_adds_token(self, tmp_path):
         from textual.widgets import Input
 
-        from claude_swap.tui.modals import AddTokenModal
+        from claude_rotater.tui.modals import AddTokenModal
 
         app = make_app(three_accounts(tmp_path))
         async with app.run_test(size=(120, 40)) as pilot:
@@ -1278,8 +1278,8 @@ class TestMainPage:
             assert ("add_token", "sk-ant-oat-x", None, 7, True) in fake_calls(app)
 
     async def test_c_opens_config_and_back(self, tmp_path):
-        from claude_swap.tui.config import ConfigScreen
-        from claude_swap.tui.main import MainScreen
+        from claude_rotater.tui.config import ConfigScreen
+        from claude_rotater.tui.main import MainScreen
 
         app = make_app(three_accounts(tmp_path))
         async with app.run_test(size=(120, 40)) as pilot:
@@ -1322,7 +1322,7 @@ class FakeStage:
 def login_app(fake, monkeypatch, *, fail=None, suspend_ok=True):
     import contextlib
 
-    from claude_swap.tui.app import CswapApp
+    from claude_rotater.tui.app import CswapApp
     from textual.app import SuspendNotSupported
 
     FakeStage.instances = []
@@ -1343,7 +1343,7 @@ def login_app(fake, monkeypatch, *, fail=None, suspend_ok=True):
 @pytest.mark.asyncio
 class TestLoginAction:
     async def test_l_logs_in_suspended_then_imports_and_cleans(self, tmp_path, monkeypatch):
-        from claude_swap.tui.modals import OutputModal
+        from claude_rotater.tui.modals import OutputModal
 
         app, suspended = login_app(three_accounts(tmp_path), monkeypatch)
         async with app.run_test(size=(120, 40)) as pilot:
@@ -1359,7 +1359,7 @@ class TestLoginAction:
             assert isinstance(app.screen, OutputModal)
 
     async def test_l_on_dead_row_prefills_its_email(self, tmp_path, monkeypatch):
-        from claude_swap.json_output import USAGE_RELOGIN_REQUIRED
+        from claude_rotater.json_output import USAGE_RELOGIN_REQUIRED
 
         fake = FakeSwitcher(
             [
@@ -1386,8 +1386,8 @@ class TestLoginAction:
 
     @pytest.mark.parametrize("cancelled", [True, False], ids=["cancel", "failure"])
     async def test_cancel_or_failure_cleans_up_and_imports_nothing(self, tmp_path, monkeypatch, cancelled):
-        from claude_swap.exceptions import LoginCancelled, LoginError
-        from claude_swap.tui.main import MainScreen
+        from claude_rotater.exceptions import LoginCancelled, LoginError
+        from claude_rotater.tui.main import MainScreen
 
         exc = LoginCancelled("Login cancelled") if cancelled else LoginError("no login")
         app, _ = login_app(three_accounts(tmp_path), monkeypatch, fail=exc)
@@ -1409,8 +1409,8 @@ class TestLoginAction:
             assert FakeStage.instances[0].events == [("cleanup",)]
 
     async def test_import_failure_still_cleans_up(self, tmp_path, monkeypatch):
-        from claude_swap.exceptions import ValidationError
-        from claude_swap.tui.modals import OutputModal
+        from claude_rotater.exceptions import ValidationError
+        from claude_rotater.tui.modals import OutputModal
 
         app, _ = login_app(three_accounts(tmp_path), monkeypatch)
 
@@ -1455,27 +1455,27 @@ class TestLoginWarning:
         ],
     )
     def test_tag(self, expires_in, days, expected):
-        from claude_swap.tui.main import login_warning
+        from claude_rotater.tui.main import login_warning
 
         assert login_warning(self._acc(expires_in), time.time(), days) == expected
 
     def test_row_shows_warning_in_tag_column(self):
-        from claude_swap.tui.main import RowLayout, account_row_text
+        from claude_rotater.tui.main import RowLayout, account_row_text
 
         acc = self._acc(86400 + 60)
         text = account_row_text(acc, None, RowLayout.for_width(120, ("5h", "7d")), now=time.time(), threshold=90)
         assert "login 1d" in text.plain and "[personal]" not in text.plain
 
     def test_row_without_warning_keeps_org_tag(self):
-        from claude_swap.tui.main import RowLayout, account_row_text
+        from claude_rotater.tui.main import RowLayout, account_row_text
 
         text = account_row_text(self._acc(30 * 86400), None, RowLayout.for_width(120, ("5h", "7d")),
                                 now=time.time(), threshold=90)
         assert "[personal]" in text.plain
 
     def test_detail_shows_login_end_and_dead_hint(self):
-        from claude_swap.json_output import USAGE_RELOGIN_REQUIRED
-        from claude_swap.tui.main import detail_lines
+        from claude_rotater.json_output import USAGE_RELOGIN_REQUIRED
+        from claude_rotater.tui.main import detail_lines
 
         far = detail_lines(self._acc(30 * 86400), None, {}, now=time.time(), threshold=90, width=100, height=10)
         assert "login ends" in far[1].plain and "press l" not in far[1].plain
@@ -1500,7 +1500,7 @@ class TestRefresherHosting:
     async def test_events_reach_the_log_and_refresh(self, tmp_path, fake_refresher):
         import asyncio
 
-        from claude_swap.token_refresh import RefreshEvent
+        from claude_rotater.token_refresh import RefreshEvent
 
         fake = three_accounts(tmp_path)
         app = make_app(fake)
@@ -1517,7 +1517,7 @@ class TestRefresherHosting:
             assert len(fake.fetch_sets) > before
 
     async def test_login_warn_days_setting_applies_live(self, tmp_path):
-        from claude_swap.settings import set_setting
+        from claude_rotater.settings import set_setting
 
         fake = FakeSwitcher(
             [
@@ -1540,9 +1540,9 @@ class TestRefresherHosting:
 def test_default_factory_builds_live_engine(monkeypatch, tmp_path):
     # Drop the autouse FakeEngine patch: this test checks the real factory.
     monkeypatch.undo()
-    import claude_swap.autoswitch as autoswitch
-    from claude_swap.tui.app import default_engine_factory
-    from claude_swap.settings import AutoSwitchSettings
+    import claude_rotater.autoswitch as autoswitch
+    from claude_rotater.tui.app import default_engine_factory
+    from claude_rotater.settings import AutoSwitchSettings
 
     built = {}
 
@@ -1616,7 +1616,7 @@ class TestEngineHosting:
             assert "last switch" in status
 
     async def test_settings_change_restarts_engine(self, tmp_path, fake_engine):
-        from claude_swap.settings import set_setting
+        from claude_rotater.settings import set_setting
 
         fake = three_accounts(tmp_path)
         app = make_app(fake)
@@ -1639,7 +1639,7 @@ class TestEngineHosting:
     ):
         """End to end: `c`, type a threshold, enter; the real ConfigScreen's
         SettingChanged message reaches the app and the engine restarts."""
-        from claude_swap.tui.config import ConfigScreen
+        from claude_rotater.tui.config import ConfigScreen
 
         app = make_app(three_accounts(tmp_path))
         async with app.run_test(size=(120, 40)) as pilot:
@@ -1659,8 +1659,8 @@ class TestEngineHosting:
 
     async def test_holding_right_on_config_restarts_engine_once(self, tmp_path, fake_engine):
         """Every step is written, but the engine restarts once the keys stop."""
-        from claude_swap.settings import load_settings
-        from claude_swap.tui.config import ConfigScreen
+        from claude_rotater.settings import load_settings
+        from claude_rotater.tui.config import ConfigScreen
 
         app = make_app(three_accounts(tmp_path))
         async with app.run_test(size=(120, 40)) as pilot:
@@ -1693,8 +1693,8 @@ class TestEngineHosting:
     async def test_cadence_change_restarts_engine(self, tmp_path, fake_engine, key):
         """A cadence edit restarts the engine so its next sleep is planned
         with the new value instead of waiting out the old one."""
-        from claude_swap.poll_policy import load_cadence
-        from claude_swap.settings import set_setting
+        from claude_rotater.poll_policy import load_cadence
+        from claude_rotater.settings import set_setting
 
         app = make_app(three_accounts(tmp_path))
         async with app.run_test(size=(120, 40)) as pilot:
@@ -1708,7 +1708,7 @@ class TestEngineHosting:
             assert 90 in (cadence.spare_s, cadence.hourly_budget, cadence.feed_stale_s)
 
     async def test_config_message_routes_to_settings_change(self, tmp_path, fake_engine):
-        from claude_swap.settings import set_setting
+        from claude_rotater.settings import set_setting
 
         app = make_app(three_accounts(tmp_path))
         async with app.run_test(size=(120, 40)) as pilot:
@@ -1759,13 +1759,13 @@ class TestEventText:
             from_ref={"number": 1, "email": "a@x.com"},
             to_ref={"number": 2, "email": "b@x.com"},
         )
-        from claude_swap.tui.main import event_text
+        from claude_rotater.tui.main import event_text
 
         assert event.human() in event_text(event).plain
 
     def test_event_text_uses_light_accent_for_switch(self):
-        from claude_swap.tui.main import event_text
-        from claude_swap.tui.theme import ACCENT_LIGHT, CSWAP_LIGHT, Palette
+        from claude_rotater.tui.main import event_text
+        from claude_rotater.tui.theme import ACCENT_LIGHT, CSWAP_LIGHT, Palette
 
         event = SwitchEvent(
             trigger="proactive",
@@ -1814,8 +1814,8 @@ class TestAccountsSnapshot:
 
 class TestBareInvocation:
     def test_bare_tty_launches_tui(self, monkeypatch, temp_home):
-        import claude_swap.cli as cli
-        import claude_swap.tui as tui
+        import claude_rotater.cli as cli
+        import claude_rotater.tui as tui
 
         launched = {}
 
@@ -1833,7 +1833,7 @@ class TestBareInvocation:
         assert "switcher" in launched
 
     def test_bare_non_tty_keeps_usage_error(self, monkeypatch, temp_home):
-        import claude_swap.cli as cli
+        import claude_rotater.cli as cli
 
         monkeypatch.setattr(sys, "argv", ["cswap"])
         monkeypatch.setattr(sys.stdout, "isatty", lambda: False)
@@ -1861,7 +1861,7 @@ class TestThemeWiring:
     async def test_auto_setting_uses_detected_light(self, tmp_path):
         (tmp_path / "settings.json").write_text(json.dumps({"ui": {"theme": "auto"}}))
         fake = FakeSwitcher([make_account("1", active=True)], tmp_path)
-        from claude_swap.tui.app import CswapApp
+        from claude_rotater.tui.app import CswapApp
         app = CswapApp(fake, detected="light")
         async with app.run_test() as pilot:
             await settle(pilot)
@@ -1870,7 +1870,7 @@ class TestThemeWiring:
     async def test_auto_setting_no_detection_falls_back_to_dark(self, tmp_path):
         (tmp_path / "settings.json").write_text(json.dumps({"ui": {"theme": "auto"}}))
         fake = FakeSwitcher([make_account("1", active=True)], tmp_path)
-        from claude_swap.tui.app import CswapApp
+        from claude_rotater.tui.app import CswapApp
         app = CswapApp(fake, detected=None)
         async with app.run_test() as pilot:
             await settle(pilot)
@@ -1879,7 +1879,7 @@ class TestThemeWiring:
     async def test_toggle_cycles_dark_light_auto(self, tmp_path):
         (tmp_path / "settings.json").write_text(json.dumps({"ui": {"theme": "dark"}}))
         fake = FakeSwitcher([make_account("1", active=True)], tmp_path)
-        from claude_swap.tui.app import CswapApp
+        from claude_rotater.tui.app import CswapApp
         app = CswapApp(fake, detected="light")
         async with app.run_test() as pilot:
             await settle(pilot)

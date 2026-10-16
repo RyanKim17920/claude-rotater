@@ -9,17 +9,17 @@ from unittest.mock import patch
 
 import pytest
 
-from claude_swap import oauth
-from claude_swap.exceptions import ConfigError, SwitchError
-from claude_swap.json_output import (
+from claude_rotater import oauth
+from claude_rotater.exceptions import ConfigError, SwitchError
+from claude_rotater.json_output import (
     SCHEMA_VERSION,
     error_envelope,
     usage_fields,
     usage_to_json,
 )
-from claude_swap.credentials import ActiveCredentials
-from claude_swap.models import Platform
-from claude_swap.switcher import ClaudeAccountSwitcher
+from claude_rotater.credentials import ActiveCredentials
+from claude_rotater.models import Platform
+from claude_rotater.switcher import ClaudeAccountSwitcher
 
 
 # --------------------------------------------------------------------------- #
@@ -137,7 +137,7 @@ class TestJsonHelpers:
         assert "aheadOfPace" not in out["sevenDay"]
 
     def test_usage_fields_variants(self):
-        from claude_swap.json_output import (
+        from claude_rotater.json_output import (
             USAGE_KEYCHAIN_UNAVAILABLE,
             USAGE_NO_CREDENTIALS,
             USAGE_RELOGIN_REQUIRED,
@@ -196,7 +196,7 @@ class TestStatusJson:
 
         with patch.object(switcher, "_read_active_credentials",
                           return_value=ActiveCredentials(active_creds, False)), \
-             patch("claude_swap.oauth.try_fetch_usage_for_account", return_value=oauth.UsageOutcome(usage)):
+             patch("claude_rotater.oauth.try_fetch_usage_for_account", return_value=oauth.UsageOutcome(usage)):
             payload = switcher.status(json_output=True)
 
         assert capsys.readouterr().out == ""
@@ -213,7 +213,7 @@ class TestStatusJson:
     ):
         import time as time_mod
 
-        from claude_swap.usage_store import UsageEntry
+        from claude_rotater.usage_store import UsageEntry
 
         sample_sequence_data["accounts"]["1"]["email"] = "test@example.com"
         active_creds = json.dumps({"claudeAiOauth": {"accessToken": "sk-active"}})
@@ -256,7 +256,7 @@ class TestStatusJson:
 
         with patch.object(switcher, "_read_active_credentials",
                           return_value=ActiveCredentials(active_creds, False)), \
-             patch("claude_swap.oauth.try_fetch_usage_for_account", return_value=oauth.UsageOutcome(None)):
+             patch("claude_rotater.oauth.try_fetch_usage_for_account", return_value=oauth.UsageOutcome(None)):
             payload = switcher.status(json_output=True)
 
         assert payload["active"]["alias"] == "dev"
@@ -313,7 +313,7 @@ def _install_patches(switcher, creds_store, configs_store, live_state):
         patch.object(switcher, "_write_credentials",
                      side_effect=lambda c: live_state.__setitem__("creds", c)),
         # Don't make network calls from the (suppressed) post-switch usage path.
-        patch("claude_swap.oauth.try_fetch_usage_for_account", return_value=oauth.UsageOutcome(None)),
+        patch("claude_rotater.oauth.try_fetch_usage_for_account", return_value=oauth.UsageOutcome(None)),
     ]
     for p in patches:
         p.start()

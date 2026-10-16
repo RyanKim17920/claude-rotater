@@ -13,8 +13,8 @@ import time
 
 import pytest
 
-from claude_swap import autoswitch
-from claude_swap.autoswitch import (
+from claude_rotater import autoswitch
+from claude_rotater.autoswitch import (
     NoSwitchEvent,
     SwitchEvent,
     TickOutcome,

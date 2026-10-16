@@ -10,9 +10,9 @@ from pathlib import Path
 
 import pytest
 
-from claude_swap.exceptions import ConfigError
-from claude_swap.poll_policy import CADENCE_SETTING_KEYS, PollCadence, load_cadence
-from claude_swap.settings import (
+from claude_rotater.exceptions import ConfigError
+from claude_rotater.poll_policy import CADENCE_SETTING_KEYS, PollCadence, load_cadence
+from claude_rotater.settings import (
     SETTING_GROUPS,
     SETTING_SPECS,
     atomic_write_json,
@@ -428,7 +428,7 @@ class TestAtomicWriteThroughSymlink:
         another mount — the write fails outright. Assert the placement
         directly; staging two filesystems in a unit test is not portable."""
         import tempfile
-        from claude_swap import settings as S
+        from claude_rotater import settings as S
         repo = tmp_path / "repo"; repo.mkdir()
         live = tmp_path / "live"; live.mkdir()
         tracked = repo / "settings.json"; tracked.write_text("{}")
@@ -465,7 +465,7 @@ class TestLoginWarnDays:
     def test_default_and_clamp(self, tmp_path):
         import json as _json
 
-        from claude_swap.settings import load_ui_settings, settings_path
+        from claude_rotater.settings import load_ui_settings, settings_path
 
         assert load_ui_settings(tmp_path).login_warn_days == 3
         for raw, expected in ((7, 7), (999, 60), (-4, 0), ("x", 3), (True, 3), (2.9, 2)):
@@ -475,15 +475,15 @@ class TestLoginWarnDays:
     def test_bad_theme_keeps_valid_days(self, tmp_path):
         import json as _json
 
-        from claude_swap.settings import load_ui_settings, settings_path
+        from claude_rotater.settings import load_ui_settings, settings_path
 
         settings_path(tmp_path).write_text(_json.dumps({"ui": {"theme": "neon", "loginWarnDays": 9}}))
         ui = load_ui_settings(tmp_path)
         assert (ui.theme, ui.login_warn_days) == ("auto", 9)
 
     def test_set_validates_range(self, tmp_path):
-        from claude_swap.exceptions import ConfigError
-        from claude_swap.settings import load_ui_settings, set_setting
+        from claude_rotater.exceptions import ConfigError
+        from claude_rotater.settings import load_ui_settings, set_setting
 
         set_setting(tmp_path, "ui.loginWarnDays", "10")
         assert load_ui_settings(tmp_path).login_warn_days == 10

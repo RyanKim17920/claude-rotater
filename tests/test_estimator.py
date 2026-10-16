@@ -7,9 +7,9 @@ import random
 
 import pytest
 
-from claude_swap import estimator as est
-from claude_swap.estimator import estimate_account, estimate_window
-from claude_swap.usage_history import Point
+from claude_rotater import estimator as est
+from claude_rotater.estimator import estimate_account, estimate_window
+from claude_rotater.usage_history import Point
 
 NOW = 1_800_000_000.0
 RESET = NOW + 2 * 3600  # 5h window resets two hours from now

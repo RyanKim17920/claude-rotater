@@ -1,4 +1,4 @@
-"""Unit tests for the pure plot renderers in ``claude_swap.tui.plot``."""
+"""Unit tests for the pure plot renderers in ``claude_rotater.tui.plot``."""
 
 from __future__ import annotations
 
@@ -7,8 +7,8 @@ import time
 
 import pytest
 
-from claude_swap.estimator import WindowEstimate, estimate_account
-from claude_swap.tui.plot import (
+from claude_rotater.estimator import WindowEstimate, estimate_account
+from claude_rotater.tui.plot import (
     GUTTER,
     RESET_GLYPH,
     SPARK_GLYPHS,
@@ -16,8 +16,8 @@ from claude_swap.tui.plot import (
     line_plot,
     sparkline,
 )
-from claude_swap.tui.theme import CSWAP_LIGHT, SEV_CRIT, Palette
-from claude_swap.usage_history import Point
+from claude_rotater.tui.theme import CSWAP_LIGHT, SEV_CRIT, Palette
+from claude_rotater.usage_history import Point
 
 NOW = 1_700_000_000.0
 BRAILLE = range(0x2800, 0x2900)

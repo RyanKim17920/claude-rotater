@@ -8,8 +8,8 @@ from datetime import datetime, timezone
 
 import pytest
 
-from claude_swap import usage_history
-from claude_swap.usage_history import Point, UsageHistory
+from claude_rotater import usage_history
+from claude_rotater.usage_history import Point, UsageHistory
 
 NOW = 1_800_000_000.0
 ID1 = ("a@x.com", "org-1")

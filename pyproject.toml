@@ -1,6 +1,6 @@
 [project]
-name = "claude-swap"
-version = "0.28.0b1"
+name = "claude-rotater"
+version = "0.1.0"
 description = "Multi-account switcher for Claude Code"
 readme = "README.md"
 requires-python = ">=3.12"
@@ -37,15 +37,14 @@ Repository = "https://github.com/realiti4/claude-swap"
 Issues = "https://github.com/realiti4/claude-swap/issues"
 
 [project.scripts]
-claude-swap = "claude_swap.entry:main"
-cswap = "claude_swap.entry:main"
+rota = "claude_rotater.entry:main"
 
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/claude_swap"]
+packages = ["src/claude_rotater"]
 
 [dependency-groups]
 dev = ["pytest>=8.0", "pytest-asyncio>=0.24", "pytest-xdist>=3.5"]

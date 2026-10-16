@@ -9,8 +9,8 @@ import time
 
 import pytest
 
-from claude_swap import feed
-from claude_swap.feed_watch import FeedWatcher, default_backend
+from claude_rotater import feed
+from claude_rotater.feed_watch import FeedWatcher, default_backend
 
 BACKENDS = [default_backend(), "poll"]
 if default_backend() == "poll":

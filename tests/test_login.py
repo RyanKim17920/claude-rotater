@@ -21,13 +21,13 @@ from unittest.mock import patch
 
 import pytest
 
-from claude_swap import login as login_mod
-from claude_swap.exceptions import LoginCancelled, LoginError, ValidationError
-from claude_swap.login import StagedLogin, login_env, sweep_stale_stages
-from claude_swap.macos_keychain import keychain_account_name
-from claude_swap.models import Platform
-from claude_swap.session import keychain_service_name
-from claude_swap.switcher import ClaudeAccountSwitcher
+from claude_rotater import login as login_mod
+from claude_rotater.exceptions import LoginCancelled, LoginError, ValidationError
+from claude_rotater.login import StagedLogin, login_env, sweep_stale_stages
+from claude_rotater.macos_keychain import keychain_account_name
+from claude_rotater.models import Platform
+from claude_rotater.session import keychain_service_name
+from claude_rotater.switcher import ClaudeAccountSwitcher
 
 PLAINTEXT = ".credentials" + ".json"  # spelled apart: a repo hook guards the literal
 
@@ -119,7 +119,7 @@ def switcher(temp_home: Path, mock_claude_config: Path) -> ClaudeAccountSwitcher
 
 @pytest.fixture(params=[Platform.LINUX, Platform.MACOS], ids=["plaintext", "keychain"])
 def platform(request, monkeypatch):
-    monkeypatch.setattr("claude_swap.session.Platform.detect", lambda: request.param)
+    monkeypatch.setattr("claude_rotater.session.Platform.detect", lambda: request.param)
     return request.param
 
 
@@ -155,12 +155,12 @@ class TestKeychainNaming:
         assert keychain_service_name("/x/y/") != keychain_service_name("/x/y")
 
     def test_stage_dir_string_hashes_to_what_claude_writes(self, switcher, block_real_keychain, monkeypatch):
-        monkeypatch.setattr("claude_swap.session.Platform.detect", lambda: Platform.MACOS)
+        monkeypatch.setattr("claude_rotater.session.Platform.detect", lambda: Platform.MACOS)
         fake = FakeClaude(platform=Platform.MACOS, keychain=block_real_keychain)
         deleted: list[str] = []
         real_delete = block_real_keychain.delete_password
         monkeypatch.setattr(
-            "claude_swap.macos_keychain.delete_password",
+            "claude_rotater.macos_keychain.delete_password",
             lambda service, account: (deleted.append(service), real_delete(service, account)),
         )
         login_account(switcher, runner=fake)
@@ -294,7 +294,7 @@ class TestLoginFailure:
 
     def test_foreign_credential_is_refused(self, switcher):
         fake = FakeClaude()
-        with patch("claude_swap.oauth.fetch_oauth_profile",
+        with patch("claude_rotater.oauth.fetch_oauth_profile",
                    return_value={"uuid": "someone-else", "email": "x@y", "organizationUuid": ""}):
             with pytest.raises(Exception, match="does not belong"):
                 login_account(switcher, runner=fake)
@@ -321,7 +321,7 @@ class TestLoginFailure:
 
 class TestSweep:
     def test_old_stages_are_swept_young_ones_kept(self, tmp_path, block_real_keychain, monkeypatch):
-        monkeypatch.setattr("claude_swap.session.Platform.detect", lambda: Platform.MACOS)
+        monkeypatch.setattr("claude_rotater.session.Platform.detect", lambda: Platform.MACOS)
         root = login_mod.stage_root(tmp_path)
         old, young = root / "login-old", root / "login-young"
         for d in (old, young):

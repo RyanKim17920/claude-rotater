@@ -8,7 +8,7 @@ from unittest.mock import patch
 
 import pytest
 
-from claude_swap import oauth, poll_policy
+from claude_rotater import oauth, poll_policy
 from tests.test_autoswitch import EngineHarness, _usage
 
 ID1 = ("a@example.com", "")
@@ -17,13 +17,13 @@ ID2 = ("b@example.com", "")
 
 @pytest.fixture
 def h(temp_home, monkeypatch):
-    monkeypatch.setattr("claude_swap.switcher._FETCH_STAGGER_S", 0)
+    monkeypatch.setattr("claude_rotater.switcher._FETCH_STAGGER_S", 0)
     harness = EngineHarness(temp_home)
     harness.seed(1, "a@example.com")
     harness.seed(2, "b@example.com")
     harness.make_live("a@example.com", 1)
     monkeypatch.setattr(harness.switcher, "_live_session_pids", lambda *a: [])
-    with patch("claude_swap.oauth.fetch_oauth_profile", return_value=None):
+    with patch("claude_rotater.oauth.fetch_oauth_profile", return_value=None):
         yield harness
 
 
@@ -39,7 +39,7 @@ def collect(h, usage_by_num, errors_by_num=None, fetch=None):
         value = usage_by_num.get(num)
         return oauth.UsageOutcome(dict(value) if value else None)
 
-    with patch("claude_swap.oauth.try_fetch_usage_for_account", side_effect=fake):
+    with patch("claude_rotater.oauth.try_fetch_usage_for_account", side_effect=fake):
         h.switcher.usage_entries_by_account(
             fetch=set(fetch or usage_by_num), scheduled=True
         )

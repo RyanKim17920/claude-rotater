@@ -12,8 +12,8 @@ from unittest.mock import patch
 
 import pytest
 
-from claude_swap import oauth, poll_policy
-from claude_swap.autoswitch import (
+from claude_rotater import oauth, poll_policy
+from claude_rotater.autoswitch import (
     IDLE_HOLD_MAX_S,
     MAX_SLEEP_S,
     MIN_TICK_S,
@@ -33,11 +33,11 @@ from claude_swap.autoswitch import (
     _recovery_is_useful,
     pct_label,
 )
-from claude_swap.json_output import USAGE_FOREIGN_CREDENTIAL, USAGE_TOKEN_EXPIRED
-from claude_swap.usage_store import FetchRecord, UsageEntry
-from claude_swap.models import Platform
-from claude_swap.settings import AutoSwitchSettings
-from claude_swap.switcher import ClaudeAccountSwitcher
+from claude_rotater.json_output import USAGE_FOREIGN_CREDENTIAL, USAGE_TOKEN_EXPIRED
+from claude_rotater.usage_store import FetchRecord, UsageEntry
+from claude_rotater.models import Platform
+from claude_rotater.settings import AutoSwitchSettings
+from claude_rotater.switcher import ClaudeAccountSwitcher
 from tests._stash import unclaimed_entries
 
 
@@ -692,12 +692,12 @@ class TestAdaptiveScheduler:
         HTTP call. "Probe failed" (resync skipped) is inert for scheduler
         behavior."""
         with patch(
-            "claude_swap.oauth.fetch_oauth_profile", return_value=None
+            "claude_rotater.oauth.fetch_oauth_profile", return_value=None
         ):
             yield
 
     def _harness(self, temp_home, monkeypatch, accounts=3, **settings_kwargs):
-        monkeypatch.setattr("claude_swap.switcher._FETCH_STAGGER_S", 0)
+        monkeypatch.setattr("claude_rotater.switcher._FETCH_STAGGER_S", 0)
         h = EngineHarness(temp_home, **settings_kwargs)
         emails = ["a@example.com", "b@example.com", "c@example.com"]
         for num in range(1, accounts + 1):
@@ -720,7 +720,7 @@ class TestAdaptiveScheduler:
 
     def _tick(self, h, counts, usage_by_num, errors_by_num=None):
         with patch(
-            "claude_swap.oauth.try_fetch_usage_for_account",
+            "claude_rotater.oauth.try_fetch_usage_for_account",
             side_effect=self._counting_fetch(counts, usage_by_num, errors_by_num),
         ):
             return h.engine.tick()
@@ -1018,7 +1018,7 @@ class TestAdaptiveScheduler:
         reintroduced blanket clamp to something shorter still fails this
         test.
         """
-        from claude_swap.usage_store import TRUST_MAX_AGE_S, _failure_backoff_s
+        from claude_rotater.usage_store import TRUST_MAX_AGE_S, _failure_backoff_s
 
         for ask in (601.0, 3600.0):
             other = _failure_backoff_s(1, ask, rate_limited=False)
@@ -1085,7 +1085,7 @@ class TestAdaptiveScheduler:
         """
         from datetime import datetime, timezone
 
-        from claude_swap.usage_store import FetchRecord
+        from claude_rotater.usage_store import FetchRecord
 
         def _at(base, seconds):
             return (
@@ -1147,7 +1147,7 @@ class TestAdaptiveScheduler:
         count, not an interval: each block costs exactly one poll, and four
         consecutive hour-long blocks cost four.
         """
-        from claude_swap.usage_store import FetchRecord
+        from claude_rotater.usage_store import FetchRecord
 
         h = EngineHarness(temp_home)
         h.seed(1, "a@example.com")
@@ -1190,7 +1190,7 @@ class TestAdaptiveScheduler:
         What the scoped window still decides is whether the row SERVES its
         last_good, which `entries(models=...)` answers.
         """
-        from claude_swap.usage_store import FetchRecord
+        from claude_rotater.usage_store import FetchRecord
 
         h = EngineHarness(temp_home)
         h.seed(1, "a@example.com")
@@ -1247,7 +1247,7 @@ class TestAdaptiveScheduler:
         trust_left` — a bound satisfied by retrying immediately cannot catch
         this.
         """
-        from claude_swap.usage_store import RETRY_AFTER_MARGIN_S, FetchRecord
+        from claude_rotater.usage_store import RETRY_AFTER_MARGIN_S, FetchRecord
 
         block_s = 3600.0
         h = EngineHarness(temp_home, model="Fable")
@@ -1299,7 +1299,7 @@ class TestAdaptiveScheduler:
         # exactly why this second assertion earns its keep). An ask
         # genuinely past the cap (4000s: 4000 + 900 = 4900, uncapped) is
         # needed to tell the two apart.
-        from claude_swap.usage_store import (
+        from claude_rotater.usage_store import (
             RETRY_AFTER_FLOOR_CAP_S,
             _failure_backoff_s,
         )
@@ -1351,7 +1351,7 @@ class TestAdaptiveScheduler:
         still produces the deadline+margin wait with a live scoped binding
         present, not to distinguish scoped values from each other.
         """
-        from claude_swap.usage_store import FetchRecord
+        from claude_rotater.usage_store import FetchRecord
 
         MEASURED_BAND_S = 900.0  # the measured re-block band; NOT RETRY_AFTER_MARGIN_S
 
@@ -1392,7 +1392,7 @@ class TestAdaptiveScheduler:
         at +16000 and the ceiling would bind at +7200, both well inside the
         chain: a wait that honors neither is the point.
         """
-        from claude_swap.usage_store import FetchRecord
+        from claude_rotater.usage_store import FetchRecord
 
         h = EngineHarness(temp_home)
         h.seed(1, "a@example.com")
@@ -1450,7 +1450,7 @@ class TestAdaptiveScheduler:
         Retry-After for ANY HTTPError code, so a 503 carrying this Retry-After
         is the reachable shape.
         """
-        from claude_swap.usage_store import (
+        from claude_rotater.usage_store import (
             RETRY_AFTER_FLOOR_CAP_S,
             TRUST_MAX_AGE_S,
             FetchRecord,
@@ -1521,7 +1521,7 @@ class TestAdaptiveScheduler:
     def test_poll_never_scheduled_past_a_window_reset(self, temp_home, monkeypatch):
         from datetime import datetime, timezone
 
-        from claude_swap.autoswitch import RESET_SLACK_S
+        from claude_rotater.autoswitch import RESET_SLACK_S
 
         # The candidate's default interval is 300s, but its 5h window resets
         # in 90s — its stored 40% is obsolete at the rollover, so the next
@@ -1589,7 +1589,7 @@ class TestAdaptiveScheduler:
         usage = {"2": _usage(10), "3": _usage(20)}
         counts: dict[str, int] = {}
         with patch(
-            "claude_swap.oauth.try_refresh_oauth_credentials",
+            "claude_rotater.oauth.try_refresh_oauth_credentials",
             return_value=oauth.RefreshOutcome(None, "network"),
         ):
             assert self._tick(h, counts, usage) is TickOutcome.NO_ACTION
@@ -1634,7 +1634,7 @@ class TestAdaptiveScheduler:
         """Finding-2 regression: the owned+expired sentinel must not be hidden
         by the active row's failure backoff (e.g. a Retry-After window), or
         the engine would count unhealthy ticks toward a spurious failover."""
-        from claude_swap.usage_store import FetchRecord
+        from claude_rotater.usage_store import FetchRecord
 
         h = self._harness(temp_home, monkeypatch)
         # Active token locally expired while an owner is present.
@@ -1793,10 +1793,10 @@ class TestAdaptiveScheduler:
 
         with (
             patch(
-                "claude_swap.session.read_session_credentials",
+                "claude_rotater.session.read_session_credentials",
                 side_effect=lambda d: session_creds if d == session_dir_2 else None,
             ),
-            patch("claude_swap.oauth.try_fetch_usage_for_account", side_effect=network),
+            patch("claude_rotater.oauth.try_fetch_usage_for_account", side_effect=network),
             patch.object(
                 h.switcher, "usage_entries_by_account", side_effect=spying_collect
             ),
@@ -1887,7 +1887,7 @@ class TestFreshening:
         live_creds_path = temp_home / ".claude" / ".credentials.json"
         live_before = live_creds_path.read_text()
         with patch(
-            "claude_swap.autoswitch.oauth.try_refresh_oauth_credentials",
+            "claude_rotater.autoswitch.oauth.try_refresh_oauth_credentials",
             return_value=oauth.RefreshOutcome(rotated, None),
         ) as mock_refresh:
             outcome = h.tick_with_usage({"1": _usage(95), "2": _usage(10)})
@@ -1906,7 +1906,7 @@ class TestFreshening:
         h.seed(2, "b@example.com", expires_at=int(h.clock() * 1000) + 3_600_000)
         h.make_live("a@example.com", 1)
         with patch(
-            "claude_swap.autoswitch.oauth.try_refresh_oauth_credentials"
+            "claude_rotater.autoswitch.oauth.try_refresh_oauth_credentials"
         ) as mock_refresh:
             outcome = h.tick_with_usage({"1": _usage(95), "2": _usage(10)})
         assert outcome is TickOutcome.SWITCHED
@@ -1919,7 +1919,7 @@ class TestFreshening:
         h.seed(3, "c@example.com")
         h.make_live("a@example.com", 1)
         with patch(
-            "claude_swap.autoswitch.oauth.try_refresh_oauth_credentials",
+            "claude_rotater.autoswitch.oauth.try_refresh_oauth_credentials",
             return_value=oauth.RefreshOutcome(None, "invalid_grant"),
         ):
             outcome = h.tick_with_usage({
@@ -1937,7 +1937,7 @@ class TestFreshening:
         h.seed(2, "b@example.com", expires_at=1)
         h.make_live("a@example.com", 1)
         with patch(
-            "claude_swap.autoswitch.oauth.try_refresh_oauth_credentials",
+            "claude_rotater.autoswitch.oauth.try_refresh_oauth_credentials",
             return_value=oauth.RefreshOutcome(None, "transient"),
         ):
             outcome = h.tick_with_usage({"1": _usage(95), "2": _usage(10)})
@@ -1956,7 +1956,7 @@ class TestFreshening:
         with patch.object(
             h.switcher, "live_session_pids_for", return_value=[4242]
         ), patch(
-            "claude_swap.autoswitch.oauth.try_refresh_oauth_credentials"
+            "claude_rotater.autoswitch.oauth.try_refresh_oauth_credentials"
         ) as mock_refresh:
             outcome = h.tick_with_usage({"1": _usage(95), "2": _usage(10)})
         assert outcome is TickOutcome.BLOCKED
@@ -1971,7 +1971,7 @@ class TestFreshening:
         with patch.object(
             h.switcher, "live_session_pids_for", return_value=[4242]
         ), patch(
-            "claude_swap.autoswitch.oauth.try_refresh_oauth_credentials"
+            "claude_rotater.autoswitch.oauth.try_refresh_oauth_credentials"
         ) as mock_refresh:
             outcome = h.tick_with_usage({"1": _usage(95), "2": _usage(10)})
         assert outcome is TickOutcome.BLOCKED
@@ -2062,7 +2062,7 @@ class TestDryRunAndNoOp:
         backup_before = h.switcher.read_account_credentials("2", "b@example.com")
 
         with patch(
-            "claude_swap.autoswitch.oauth.try_refresh_oauth_credentials"
+            "claude_rotater.autoswitch.oauth.try_refresh_oauth_credentials"
         ) as mock_refresh:
             outcome = h.tick_with_usage({"1": _usage(95), "2": _usage(10)})
 
@@ -2385,7 +2385,7 @@ class TestFeedInTheLoop:
             assert engine.tick() is TickOutcome.NO_ACTION
 
     def _run(self, engine, monkeypatch, *, min_tick):
-        from claude_swap import autoswitch
+        from claude_rotater import autoswitch
 
         monkeypatch.setattr(autoswitch, "MIN_TICK_S", min_tick)
         ticks: list[float] = []
@@ -2404,7 +2404,7 @@ class TestFeedInTheLoop:
         return worker, ticks, ticked
 
     def _write(self, feed_obj):
-        from claude_swap import feed
+        from claude_rotater import feed
 
         feed.append_record(
             os.path.join(feed_obj.watch_dir, feed.FEED_FILENAME),
@@ -2447,7 +2447,7 @@ class TestFeedInTheLoop:
     def test_watcher_stops_with_the_loop(self, harness, tmp_path, monkeypatch):
         engine, _ = self._engine(harness, tmp_path)
         watchers = []
-        from claude_swap import feed_watch
+        from claude_rotater import feed_watch
 
         real = feed_watch.FeedWatcher
 
@@ -2464,7 +2464,7 @@ class TestFeedInTheLoop:
         assert watchers and watchers[0]._thread is None
 
     def test_no_feed_no_watcher(self, harness, monkeypatch):
-        from claude_swap import feed_watch
+        from claude_rotater import feed_watch
 
         def explode(*a, **k):
             raise AssertionError("watcher started without a feed")
@@ -2587,7 +2587,7 @@ class TestTokenIdentity:
             "expiresAt": 99_999_999_999_000,
         }})
         with patch(
-            "claude_swap.autoswitch.oauth.try_refresh_oauth_credentials",
+            "claude_rotater.autoswitch.oauth.try_refresh_oauth_credentials",
             return_value=oauth.RefreshOutcome(
                 fresh, None,
                 {"uuid": "uuid-2-real", "email": "b@example.com",
@@ -2615,7 +2615,7 @@ class TestTokenIdentity:
             "expiresAt": 99_999_999_999_000,
         }})
         with patch(
-            "claude_swap.autoswitch.oauth.try_refresh_oauth_credentials",
+            "claude_rotater.autoswitch.oauth.try_refresh_oauth_credentials",
             return_value=oauth.RefreshOutcome(
                 fresh, None,
                 {"uuid": "uuid-somebody-else", "email": "z@example.com",
@@ -2654,7 +2654,7 @@ class TestTokenIdentity:
             return oauth.RefreshOutcome(creds, None)
 
         with patch(
-            "claude_swap.autoswitch.oauth.try_refresh_oauth_credentials",
+            "claude_rotater.autoswitch.oauth.try_refresh_oauth_credentials",
             side_effect=refresh,
         ):
             outcome = harness.tick_with_usage({
@@ -2698,7 +2698,7 @@ class TestTokenIdentity:
             return oauth.RefreshOutcome(creds, None)
 
         with patch(
-            "claude_swap.autoswitch.oauth.try_refresh_oauth_credentials",
+            "claude_rotater.autoswitch.oauth.try_refresh_oauth_credentials",
             side_effect=refresh,
         ):
             outcome = harness.tick_with_usage({
@@ -2729,7 +2729,7 @@ class TestTokenIdentity:
             "expiresAt": 99_999_999_999_000,
         }})
         with patch(
-            "claude_swap.autoswitch.oauth.try_refresh_oauth_credentials",
+            "claude_rotater.autoswitch.oauth.try_refresh_oauth_credentials",
             return_value=oauth.RefreshOutcome(
                 fresh, None,
                 {"uuid": "uuid-2", "email": "b@example.com",
@@ -2755,7 +2755,7 @@ class TestTokenIdentity:
             "expiresAt": 99_999_999_999_000,
         }})
         with patch(
-            "claude_swap.autoswitch.oauth.try_refresh_oauth_credentials",
+            "claude_rotater.autoswitch.oauth.try_refresh_oauth_credentials",
             return_value=oauth.RefreshOutcome(
                 fresh, None, {"uuid": 12345, "email": ["weird"]},
             ),
@@ -2790,7 +2790,7 @@ class TestTokenIdentity:
             "expiresAt": 99_999_999_999_000,
         }})
         with patch(
-            "claude_swap.autoswitch.oauth.try_refresh_oauth_credentials",
+            "claude_rotater.autoswitch.oauth.try_refresh_oauth_credentials",
             return_value=oauth.RefreshOutcome(
                 fresh, None,
                 {"uuid": "uuid-real", "email": "z@example.com",
@@ -2972,8 +2972,8 @@ class TestModelAwareSwitch:
         # Fable burning 84→88% projects a crossing within minutes: with the
         # model configured the approach cadence engages, while the flat
         # 5%-used 5h window alone keeps the baseline.
-        from claude_swap.estimator import estimate_account
-        from claude_swap.usage_history import Point
+        from claude_rotater.estimator import estimate_account
+        from claude_rotater.usage_history import Point
 
         now = 1000.0
         series = {
@@ -3485,8 +3485,8 @@ class TestConsumeFirstDepartureRecordsItsOwnTrigger:
     """
 
     def test_the_null_snapshot_answers_differently_by_recorded_trigger(self):
-        from claude_swap.autoswitch import AutoSwitchEngine
-        from claude_swap.settings import AutoSwitchSettings
+        from claude_rotater.autoswitch import AutoSwitchEngine
+        from claude_rotater.settings import AutoSwitchSettings
 
         class Fake(AutoSwitchEngine):
             def __init__(self):
@@ -3534,8 +3534,8 @@ class TestConsumeFirstDepartureRecordsItsOwnTrigger:
         """Backward compatibility: a record written before `leftTrigger`
         existed has no such key. Must fall back to the old two-null
         inference (failover) rather than crash or silently misclassify."""
-        from claude_swap.autoswitch import AutoSwitchEngine
-        from claude_swap.settings import AutoSwitchSettings
+        from claude_rotater.autoswitch import AutoSwitchEngine
+        from claude_rotater.settings import AutoSwitchSettings
 
         class Fake(AutoSwitchEngine):
             def __init__(self):
@@ -3570,8 +3570,8 @@ class TestConsumeFirstDepartureRecordsItsOwnTrigger:
         leaves both null) -- and must still take the ordinary legs, not the
         more permissive failover landing floor, regardless of whether some
         future change makes the failover branch unconditional."""
-        from claude_swap.autoswitch import AutoSwitchEngine
-        from claude_swap.settings import AutoSwitchSettings
+        from claude_rotater.autoswitch import AutoSwitchEngine
+        from claude_rotater.settings import AutoSwitchSettings
 
         class Fake(AutoSwitchEngine):
             def __init__(self):
@@ -4905,7 +4905,7 @@ class TestHorizonAxisDoesNotFlap:
         combinations, every one identical. The ranking is the only place the
         bar's effect is observable in isolation.
         """
-        from claude_swap.settings import AutoSwitchSettings
+        from claude_rotater.settings import AutoSwitchSettings
 
         args = dict(
             trigger="proactive",
@@ -6948,7 +6948,7 @@ class TestReviewFindings202:
         """Filtering unusable resets BEFORE taking the max let a lower window
         answer for the account: 7d at 95% with no reset and 5h at 40% resetting
         in an hour reported 'back in an hour', which is not what binds."""
-        from claude_swap.autoswitch import _binding_recovery_ts
+        from claude_rotater.autoswitch import _binding_recovery_ts
 
         now = harness.clock()
         usage = {
@@ -6990,7 +6990,7 @@ class TestFreshenRoutesThroughGate:
         freshen any candidate (network?)" sends the user to check a connection
         that is fine, for a condition no network change can affect.
         """
-        from claude_swap import oauth as oauth_mod
+        from claude_rotater import oauth as oauth_mod
 
         harness = EngineHarness(temp_home)
         harness.seed(2, "b@example.com", expires_at=1)
@@ -7019,7 +7019,7 @@ class TestFreshenRoutesThroughGate:
         naming the real cause — the same trap ``store-unmirrored`` was given
         its own kind to escape.
         """
-        from claude_swap import oauth as oauth_mod
+        from claude_rotater import oauth as oauth_mod
 
         harness = EngineHarness(temp_home)
         harness.seed(2, "b@example.com", expires_at=1)
@@ -7045,7 +7045,7 @@ class TestFreshenRoutesThroughGate:
         "could not freshen any candidate (network?)" forever, on a condition
         no network change can affect and only the operator can clear.
         """
-        from claude_swap import oauth as oauth_mod
+        from claude_rotater import oauth as oauth_mod
 
         harness = EngineHarness(temp_home)
         harness.seed(2, "b@example.com", expires_at=1)
@@ -7061,7 +7061,7 @@ class TestFreshenRoutesThroughGate:
 
     def test_store_unmirrored_keeps_its_own_kind(self, temp_home):
         """The precedent this mirrors, pinned so the two stay symmetric."""
-        from claude_swap import oauth as oauth_mod
+        from claude_rotater import oauth as oauth_mod
 
         harness = EngineHarness(temp_home)
         harness.seed(2, "b@example.com", expires_at=1)
@@ -7111,7 +7111,7 @@ class TestFreshenRoutesThroughGate:
         )
 
     def test_a_real_transient_still_reads_transient(self, temp_home):
-        from claude_swap import oauth as oauth_mod
+        from claude_rotater import oauth as oauth_mod
 
         harness = EngineHarness(temp_home)
         harness.seed(2, "b@example.com", expires_at=1)
@@ -7123,7 +7123,7 @@ class TestFreshenRoutesThroughGate:
         assert status == "transient"
 
     def test_freshen_calls_consume_gate(self, temp_home, monkeypatch):
-        from claude_swap import oauth as oauth_mod
+        from claude_rotater import oauth as oauth_mod
         harness = EngineHarness(temp_home)
         harness.seed(2, "b@example.com", expires_at=1)  # near-expiry
         eng = harness.engine

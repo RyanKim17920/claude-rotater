@@ -7,7 +7,7 @@ from io import StringIO
 
 import pytest
 
-from claude_swap import printer
+from claude_rotater import printer
 from tests.conftest import _deterministic_colour
 
 
@@ -162,7 +162,7 @@ class TestLinePrinters:
 
 
 def test_force_color_overrides_and_restores():
-    from claude_swap import printer
+    from claude_rotater import printer
     saved = printer._colors_enabled
     try:
         printer._colors_enabled = False

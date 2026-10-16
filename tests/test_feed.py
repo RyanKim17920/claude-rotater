@@ -12,7 +12,7 @@ from pathlib import Path
 
 import pytest
 
-from claude_swap import feed
+from claude_rotater import feed
 
 
 NOW = 1_760_000_000.0
@@ -247,7 +247,7 @@ class TestMain:
     def backup(self, tmp_path, monkeypatch):
         root = tmp_path / "backup"
         root.mkdir()
-        from claude_swap import paths
+        from claude_rotater import paths
 
         monkeypatch.setattr(paths, "get_backup_root", lambda: root)
         return root
@@ -288,7 +288,7 @@ class TestMain:
         assert self.lines(backup) == []
 
     def test_missing_backup_root_writes_nothing(self, tmp_path, monkeypatch):
-        from claude_swap import paths
+        from claude_rotater import paths
 
         root = tmp_path / "absent"
         monkeypatch.setattr(paths, "get_backup_root", lambda: root)
@@ -304,7 +304,7 @@ class TestMain:
         assert rc == 0 and out == raw()
 
     def test_backup_root_failure_is_swallowed(self, monkeypatch):
-        from claude_swap import paths
+        from claude_rotater import paths
 
         def boom():
             raise RuntimeError("no home")
@@ -332,17 +332,17 @@ class TestEntryPoint:
         backup.mkdir()
         code = (
             "import sys, io\n"
-            "from claude_swap import paths\n"
+            "from claude_rotater import paths\n"
             f"paths.get_backup_root = lambda: {str(backup)!r}\n"
             "sys.argv = ['cswap', 'feed']\n"
             f"sys.stdin = io.TextIOWrapper(io.BytesIO({raw()!r}))\n"
-            "from claude_swap import entry\n"
+            "from claude_rotater import entry\n"
             "try:\n"
             "    entry.main()\n"
             "except SystemExit as e:\n"
             "    assert e.code == 0, e.code\n"
-            "heavy = [m for m in ('claude_swap.cli', 'claude_swap.switcher',"
-            " 'claude_swap.oauth', 'urllib.request') if m in sys.modules]\n"
+            "heavy = [m for m in ('claude_rotater.cli', 'claude_rotater.switcher',"
+            " 'claude_rotater.oauth', 'urllib.request') if m in sys.modules]\n"
             "assert not heavy, heavy\n"
         )
         result = subprocess.run(
@@ -354,7 +354,7 @@ class TestEntryPoint:
     def test_cli_main_dispatches_feed_for_wrappers(self, monkeypatch, tmp_path):
         """Wrappers (a second-profile launcher) call cli.main directly after
         patching paths.get_backup_root; the feed must land in that root."""
-        from claude_swap import cli, paths
+        from claude_rotater import cli, paths
 
         backup = tmp_path / "work"
         backup.mkdir()
@@ -367,7 +367,7 @@ class TestEntryPoint:
         assert len(open(feed.feed_path(backup)).readlines()) == 1
 
     def test_feed_is_hidden_from_help(self, monkeypatch, capsys):
-        from claude_swap import cli
+        from claude_rotater import cli
 
         monkeypatch.setattr(sys, "argv", ["cswap", "--help"])
         with pytest.raises(SystemExit):

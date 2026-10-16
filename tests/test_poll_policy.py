@@ -7,10 +7,10 @@ from datetime import datetime, timezone
 
 import pytest
 
-from claude_swap import poll_policy
-from claude_swap.estimator import AccountEstimate, WindowEstimate, estimate_account
-from claude_swap.poll_policy import PollCadence
-from claude_swap.usage_history import UsageHistory
+from claude_rotater import poll_policy
+from claude_rotater.estimator import AccountEstimate, WindowEstimate, estimate_account
+from claude_rotater.poll_policy import PollCadence
+from claude_rotater.usage_history import UsageHistory
 
 NOW = 1_000_000.0
 HALF = lambda: 0.5  # noqa: E731 — rng midpoint: jitter factor exactly 1.0
@@ -303,7 +303,7 @@ class TestResetCapping:
 @pytest.fixture
 def real_jitter(monkeypatch):
     # conftest zeroes jitter suite-wide; these tests exercise it.
-    monkeypatch.setattr("claude_swap.poll_policy.JITTER_FRAC", 0.1)
+    monkeypatch.setattr("claude_rotater.poll_policy.JITTER_FRAC", 0.1)
 
 
 @pytest.mark.usefixtures("real_jitter")

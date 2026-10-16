@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from claude_swap import pace
+from claude_rotater import pace
 
 NOW = 1_700_000_000.0  # a realistic epoch; keeps NOW-minus-several-weeks positive
                         # (datetime.fromtimestamp rejects negative timestamps on Windows)

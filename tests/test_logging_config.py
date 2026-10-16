@@ -1,11 +1,11 @@
-"""Tests for claude_swap.logging_config."""
+"""Tests for claude_rotater.logging_config."""
 
 from __future__ import annotations
 
 import logging
 from pathlib import Path
 
-from claude_swap.logging_config import setup_logging
+from claude_rotater.logging_config import setup_logging
 
 
 def test_setup_does_not_create_dir(tmp_path: Path):
