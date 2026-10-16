@@ -31,9 +31,6 @@ classifiers = [
     "Topic :: Utilities",
 ]
 
-[project.optional-dependencies]
-menubar = ["rumps>=0.4.0"]
-
 [project.urls]
 Homepage = "https://github.com/realiti4/claude-swap"
 Repository = "https://github.com/realiti4/claude-swap"

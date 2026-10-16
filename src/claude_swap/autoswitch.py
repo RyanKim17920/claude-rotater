@@ -4,7 +4,7 @@
 imports. It composes a :class:`ClaudeAccountSwitcher`, evaluates a threshold
 policy each :meth:`~AutoSwitchEngine.tick`, and reports everything through
 typed events handed to an ``on_event`` callback; the CLI renders them as
-human lines or JSONL, and any future frontend (TUI dashboard, menubar) can
+human lines or JSONL, and any other frontend (the TUI) can
 consume the same stream.
 
 Policy in one paragraph: when the active account's *binding window* (the
