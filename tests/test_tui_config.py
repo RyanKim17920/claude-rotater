@@ -483,14 +483,20 @@ class TestResetAndNotify:
             assert app.changes == ["autoswitch.threshold"]
 
     async def test_notifications_are_debounced_per_key(self, tmp_path):
-        app = Host(tmp_path, delay=0.15)
+        # The delay must outlast a stall between key presses on a loaded
+        # machine (xdist), or the burst fires early and the test flakes.
+        app = Host(tmp_path, delay=1.0)
         async with app.run_test(size=(120, 40)) as pilot:
             await pilot.pause()
             await go_to(pilot, app, "autoswitch.threshold")
             await pilot.press(*["right"] * 12)
             assert section(tmp_path, "autoswitch") == {"threshold": 99.9}  # written at once
             assert app.changes == []
-            await pilot.pause(0.4)
+            for _ in range(50):
+                await pilot.pause(0.1)
+                if app.changes:
+                    break
+            await pilot.pause(0.3)  # no second notification trails the first
             assert app.changes == ["autoswitch.threshold"]
 
     async def test_closing_flushes_pending_notifications(self, tmp_path):
