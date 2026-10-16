@@ -94,3 +94,15 @@ class MigrationIncomplete(ClaudeSwitchError):
     """
 
     pass
+
+
+class LoginError(ClaudeSwitchError):
+    """An in-app (TUI) login failed; nothing was stored."""
+
+    pass
+
+
+class LoginCancelled(LoginError):
+    """The user cancelled an in-app login; nothing was stored."""
+
+    pass
