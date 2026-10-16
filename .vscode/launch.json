@@ -2,11 +2,10 @@
     "version": "0.2.0",
     "configurations": [
         {
-            "name": "cswap --list",
+            "name": "rota (TUI)",
             "type": "debugpy",
             "request": "launch",
-            "module": "claude_rotater.cli",
-            "args": ["--list"],
+            "module": "claude_rotater",
             "cwd": "${workspaceFolder}",
             "env": {
                 "PYTHONPATH": "${workspaceFolder}/src"
@@ -14,34 +13,10 @@
             "console": "integratedTerminal"
         },
         {
-            "name": "cswap --switch",
+            "name": "rota (custom args)",
             "type": "debugpy",
             "request": "launch",
-            "module": "claude_rotater.cli",
-            "args": ["--switch"],
-            "cwd": "${workspaceFolder}",
-            "env": {
-                "PYTHONPATH": "${workspaceFolder}/src"
-            },
-            "console": "integratedTerminal"
-        },
-        {
-            "name": "cswap --purge",
-            "type": "debugpy",
-            "request": "launch",
-            "module": "claude_rotater.cli",
-            "args": ["--purge"],
-            "cwd": "${workspaceFolder}",
-            "env": {
-                "PYTHONPATH": "${workspaceFolder}/src"
-            },
-            "console": "integratedTerminal"
-        },
-        {
-            "name": "cswap (custom args)",
-            "type": "debugpy",
-            "request": "launch",
-            "module": "claude_rotater.cli",
+            "module": "claude_rotater",
             "args": ["${input:cliArgs}"],
             "cwd": "${workspaceFolder}",
             "env": {
@@ -54,7 +29,7 @@
         {
             "id": "cliArgs",
             "type": "promptString",
-            "description": "CLI arguments (e.g., --list, --status, --switch)"
+            "description": "CLI arguments (e.g., status, switch 2)"
         }
     ]
 }
