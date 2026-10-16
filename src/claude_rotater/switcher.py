@@ -43,7 +43,7 @@ from claude_rotater.json_output import (
     usage_fields,
     usage_freshness_fields,
 )
-from claude_rotater.credentials import (  # noqa: F401  (constants re-exported for migrations/tests)
+from claude_rotater.credentials import (  # noqa: F401  (constants re-exported for tests)
     CLAUDE_CODE_KEYCHAIN_SERVICE,
     ActiveCredentials,
     CredentialStore,
@@ -94,13 +94,8 @@ from claude_rotater.usage_store import (
     with_sentinel,
 )
 
-# Service name under which the legacy ``keyring`` backend stored per-account
-# backup credentials on macOS (kept for the one-time keyring → security migration
-# and for the Windows Credential Manager migration).
-KEYRING_SERVICE = "claude-code"
-
 # CLAUDE_CODE_KEYCHAIN_SERVICE now lives in credentials.py
-# (storage concerns); re-exported above for migrations.py and the test suite.
+# (storage concerns); re-exported above for the test suite.
 
 # Setup-tokens are inference-only server-side; wider scopes trigger 403s
 # on profile endpoints. Matches Claude Code's CLAUDE_CODE_OAUTH_TOKEN path.
@@ -311,7 +306,6 @@ class ClaudeAccountSwitcher:
         # The credential storage layer (active + per-account backup stores, macOS
         # Keychain-vs-file routing, the per-process capability cache). Reads its
         # live config (platform, _logger, credentials_dir) back off this switcher.
-        # Constructed BEFORE run_migrations(), which performs storage ops on macOS.
         # One store per switcher: the capability cache is per-process.
         self._store = CredentialStore(self)
 
@@ -351,14 +345,6 @@ class ClaudeAccountSwitcher:
         self._probe_verdicts: dict[
             tuple[str, str, str, str, str, str], bool
         ] = {}
-
-        # Run any pending one-time data migrations (e.g. relocating Windows
-        # backup credentials out of Credential Manager into files). Imported
-        # lazily to avoid a circular import, and self-contained so it never
-        # aborts construction. No-op on fresh installs / once recorded.
-        from claude_rotater.migrations import run_migrations
-
-        run_migrations(self)
 
     def _is_running_in_container(self) -> bool:
         """Check if running inside a container."""
