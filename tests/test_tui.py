@@ -1232,6 +1232,150 @@ class TestMainPage:
             assert isinstance(app.screen, MainScreen)
 
 
+class FakeStage:
+    """Stands in for login.StagedLogin; records the TUI's calls."""
+
+    instances: list["FakeStage"] = []
+
+    def __init__(self, backup_dir, *, fail=None):
+        self.backup_dir = backup_dir
+        self.fail = fail
+        self.events: list = []
+        FakeStage.instances.append(self)
+
+    def authenticate(self, *, method="claudeai", email=None):
+        self.events.append(("authenticate", email))
+        if self.fail is not None:
+            raise self.fail
+        return {"loggedIn": True}
+
+    def import_into(self, switcher, **_kw):
+        self.events.append(("import",))
+        switcher.calls.append(("login_import",))
+        print("Added Account 4: new@example.com")
+
+    def cleanup(self):
+        self.events.append(("cleanup",))
+
+
+def login_app(fake, monkeypatch, *, fail=None, suspend_ok=True):
+    import contextlib
+
+    from claude_swap.tui.app import CswapApp
+    from textual.app import SuspendNotSupported
+
+    FakeStage.instances = []
+    app = CswapApp(fake, login_factory=lambda d: FakeStage(d, fail=fail))
+    suspended: list[bool] = []
+
+    @contextlib.contextmanager
+    def suspend():
+        if not suspend_ok:
+            raise SuspendNotSupported("headless")
+        suspended.append(True)
+        yield
+
+    monkeypatch.setattr(app, "suspend", suspend)
+    return app, suspended
+
+
+@pytest.mark.asyncio
+class TestLoginAction:
+    async def test_l_logs_in_suspended_then_imports_and_cleans(self, tmp_path, monkeypatch):
+        from claude_swap.tui.modals import OutputModal
+
+        app, suspended = login_app(three_accounts(tmp_path), monkeypatch)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await settle(pilot)
+            await pilot.press("l")
+            await settle(pilot)
+            stage, = FakeStage.instances
+            assert suspended == [True]
+            assert stage.backup_dir == tmp_path
+            # a healthy row: no address pre-filled
+            assert stage.events == [("authenticate", None), ("import",), ("cleanup",)]
+            assert ("login_import",) in fake_calls(app)
+            assert isinstance(app.screen, OutputModal)
+
+    async def test_l_on_dead_row_prefills_its_email(self, tmp_path, monkeypatch):
+        from claude_swap.json_output import USAGE_RELOGIN_REQUIRED
+
+        fake = FakeSwitcher(
+            [
+                make_account(1, active=True, entry=make_entry(10.0, 10.0), email="me@x.com"),
+                make_account(2, entry=UsageEntry(sentinel=USAGE_RELOGIN_REQUIRED), email="dead@y.com"),
+            ],
+            tmp_path,
+        )
+        app, _ = login_app(fake, monkeypatch)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await settle(pilot)
+            assert "press l" in row_plain(app, "2")
+            await pilot.press("down", "l")
+            await settle(pilot)
+            assert FakeStage.instances[0].events[0] == ("authenticate", "dead@y.com")
+
+    async def test_login_button(self, tmp_path, monkeypatch):
+        app, _ = login_app(three_accounts(tmp_path), monkeypatch)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await settle(pilot)
+            await pilot.click("#act-login")
+            await settle(pilot)
+            assert FakeStage.instances and ("login_import",) in fake_calls(app)
+
+    @pytest.mark.parametrize("cancelled", [True, False], ids=["cancel", "failure"])
+    async def test_cancel_or_failure_cleans_up_and_imports_nothing(self, tmp_path, monkeypatch, cancelled):
+        from claude_swap.exceptions import LoginCancelled, LoginError
+        from claude_swap.tui.main import MainScreen
+
+        exc = LoginCancelled("Login cancelled") if cancelled else LoginError("no login")
+        app, _ = login_app(three_accounts(tmp_path), monkeypatch, fail=exc)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await settle(pilot)
+            await pilot.press("l")
+            await settle(pilot)
+            assert FakeStage.instances[0].events == [("authenticate", None), ("cleanup",)]
+            assert ("login_import",) not in fake_calls(app)
+            assert isinstance(app.screen, MainScreen)
+            assert not app.busy
+
+    async def test_no_terminal_cleans_up(self, tmp_path, monkeypatch):
+        app, _ = login_app(three_accounts(tmp_path), monkeypatch, suspend_ok=False)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await settle(pilot)
+            await pilot.press("l")
+            await settle(pilot)
+            assert FakeStage.instances[0].events == [("cleanup",)]
+
+    async def test_import_failure_still_cleans_up(self, tmp_path, monkeypatch):
+        from claude_swap.exceptions import ValidationError
+        from claude_swap.tui.modals import OutputModal
+
+        app, _ = login_app(three_accounts(tmp_path), monkeypatch)
+
+        def boom(self, switcher, **_kw):
+            self.events.append(("import",))
+            raise ValidationError("is the active account")
+
+        monkeypatch.setattr(FakeStage, "import_into", boom)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await settle(pilot)
+            await pilot.press("l")
+            await settle(pilot)
+            assert FakeStage.instances[0].events[-1] == ("cleanup",)
+            assert isinstance(app.screen, OutputModal)
+            assert "failed" in str(app.screen.query_one(".modal-title").render())
+
+    async def test_busy_app_does_not_start_a_login(self, tmp_path, monkeypatch):
+        app, _ = login_app(three_accounts(tmp_path), monkeypatch)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await settle(pilot)
+            app.busy = True
+            await pilot.press("l")
+            await pilot.pause()
+            assert FakeStage.instances == []
+
+
 def test_default_factory_builds_live_engine(monkeypatch, tmp_path):
     # Drop the autouse FakeEngine patch: this test checks the real factory.
     monkeypatch.undo()

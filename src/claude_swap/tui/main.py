@@ -35,7 +35,7 @@ from textual.widgets import Button, ListItem, ListView, RichLog, Static
 from claude_swap import oauth
 from claude_swap.autoswitch import AutoSwitchEvent, pct_label
 from claude_swap.estimator import AccountEstimate, WindowEstimate
-from claude_swap.json_output import USAGE_API_KEY
+from claude_swap.json_output import USAGE_API_KEY, USAGE_RELOGIN_REQUIRED
 from claude_swap.models import AccountSnapshot, AccountsSnapshot
 from claude_swap.tui import data
 from claude_swap.tui.plot import line_plot, sparkline
@@ -141,6 +141,8 @@ def status_text(
 # Account rows
 # ---------------------------------------------------------------------------
 
+# The CLI's note names `cswap add`; in the TUI the fix is one key away.
+RELOGIN_ROW_LABEL = "re-login needed — press l to log in again"
 _CONFIDENCE_GLYPH = {"high": " ", "medium": "~", "low": "?"}
 _PREFIX_W = 4  # "▸ 1 "
 _TAG_W = 12  # " [personal] "
@@ -282,7 +284,8 @@ def account_row_text(
     sentinel = acc.usage.sentinel
     if sentinel is not None:
         style = palette.muted if sentinel == USAGE_API_KEY else palette.sev_warn
-        text.append(data.sentinel_label(sentinel), style=style)
+        label = RELOGIN_ROW_LABEL if sentinel == USAGE_RELOGIN_REQUIRED else data.sentinel_label(sentinel)
+        text.append(label, style=style)
         return text
     pcts = window_pcts(acc, models)
     if not pcts:
@@ -472,6 +475,7 @@ class ActionButton(Button):
 ACTIONS: tuple[tuple[str, str, str], ...] = (
     # (button id, label, screen action)
     ("act-switch", "⏎ switch", "switch_selected"),
+    ("act-login", "l login", "login_selected"),
     ("act-add", "a add", "app.add_current"),
     ("act-token", "t token", "app.add_token"),
     ("act-disable", "d disable", "toggle_selected"),
@@ -481,14 +485,34 @@ ACTIONS: tuple[tuple[str, str, str], ...] = (
 )
 
 
-NARROW_ACTIONS_W = 76
-OPTIONAL_ACTIONS = ("act-switch", "act-quit")
+# Chips hidden first when the bar does not fit: their keys need no reminder
+# (enter, q) or are rare (t). Every key still works with its chip hidden.
+OPTIONAL_ACTIONS = ("act-switch", "act-quit", "act-token")
+_ACTIONS_PAD = 2  # #actions horizontal padding
+
+
+def chip_width(label: str) -> int:
+    """Cells one chip takes: label + Button's 1-cell pad each side + margin."""
+    return len(label) + 3
+
+
+def hidden_actions(width: int) -> set[str]:
+    """Button ids to hide so the action bar fits in ``width`` cells."""
+    used = _ACTIONS_PAD + sum(chip_width(label) for _id, label, _a in ACTIONS)
+    hidden: set[str] = set()
+    for button_id in OPTIONAL_ACTIONS:
+        if used <= width:
+            break
+        hidden.add(button_id)
+        used -= chip_width(next(label for bid, label, _a in ACTIONS if bid == button_id))
+    return hidden
 
 
 class MainScreen(Screen):
     """The only page besides Config: accounts, detail, auto status, actions."""
 
     BINDINGS = [
+        Binding("l", "login_selected", "Log in", show=False),
         Binding("a", "app.add_current", "Add login", show=False),
         Binding("t", "app.add_token", "Add token", show=False),
         Binding("d", "toggle_selected", "Disable/enable", show=False),
@@ -623,11 +647,9 @@ class MainScreen(Screen):
         self.repaint()
 
     def on_resize(self, event) -> None:
-        # The full bar needs ~74 cells. Below that, drop the two chips whose
-        # keys need no reminder (enter, q) so the rest stay on screen.
-        wide = event.size.width >= NARROW_ACTIONS_W
+        hidden = hidden_actions(event.size.width)
         for button_id in OPTIONAL_ACTIONS:
-            self.query_one(f"#{button_id}").display = wide
+            self.query_one(f"#{button_id}").display = button_id not in hidden
 
     def on_list_view_highlighted(self, _event: ListView.Highlighted) -> None:
         self.query_one("#detail").refresh()
@@ -658,6 +680,13 @@ class MainScreen(Screen):
         number = self.selected_number
         if number is not None:
             self.app.do_switch(number)
+
+    def action_login_selected(self) -> None:
+        """Log in: on a row whose login is dead, re-login that account (its
+        address pre-filled); anywhere else, log in any account."""
+        acc = self.account(self.selected_number)
+        dead = acc is not None and acc.usage.sentinel == USAGE_RELOGIN_REQUIRED
+        self.app.start_login(acc.email if dead else None)
 
     def action_toggle_selected(self) -> None:
         number = self.selected_number

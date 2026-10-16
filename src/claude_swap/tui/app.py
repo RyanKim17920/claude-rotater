@@ -21,7 +21,7 @@ from dataclasses import replace
 from functools import partial
 from typing import Callable, Protocol
 
-from textual.app import App
+from textual.app import App, SuspendNotSupported
 from textual.binding import Binding
 from textual.reactive import reactive
 from textual.worker import WorkerState
@@ -29,6 +29,8 @@ from textual.worker import WorkerState
 from claude_swap import printer
 from claude_swap.autoswitch import STATE_FILENAME, AutoSwitchEvent
 from claude_swap.estimator import AccountEstimate, estimate_account
+from claude_swap.exceptions import LoginError
+from claude_swap.login import StagedLogin
 from claude_swap.models import AccountsSnapshot
 from claude_swap.settings import (
     AutoSwitchSettings,
@@ -99,11 +101,13 @@ class CswapApp(App):
         *,
         detected: str | None = None,
         engine_factory: EngineFactory | None = None,
+        login_factory: Callable[..., StagedLogin] | None = None,
     ) -> None:
         super().__init__()
         self.switcher = switcher
         self._detected = detected  # terminal background sensed pre-driver, or None
         self._engine_factory = engine_factory or default_engine_factory
+        self._login_factory = login_factory or StagedLogin
         self.engine: EngineLike | None = None
         self.source = SnapshotSource(switcher)
         self._normal_refreshing = False
@@ -533,6 +537,47 @@ class CswapApp(App):
                 partial(self.switcher.add_account),
                 show_output=True,
             )
+
+    LOGIN_BANNER = (
+        "\nclaude-swap: logging in {who} in a separate profile.\n"
+        "Your active account is not touched. Ctrl+C cancels.\n"
+    )
+
+    def start_login(self, email: str | None = None) -> None:
+        """Log an account in (or re-login a dead one) without touching the
+        active login. The interactive ``claude auth login`` runs with the app
+        suspended so its browser / paste-code flow owns the terminal; the
+        capture runs in a worker. The stage is removed on every path."""
+        if self.busy:
+            self.notify("Another action is still running", severity="warning")
+            return
+        stage = self._login_factory(self.switcher.backup_dir)
+        try:
+            with self.suspend():
+                print(self.LOGIN_BANNER.format(who=email or "an account"), flush=True)
+                stage.authenticate(email=email)
+        except SuspendNotSupported:
+            stage.cleanup()
+            self.notify(
+                "Logging in needs a real terminal (the app could not suspend).",
+                severity="error",
+            )
+            return
+        except LoginError as e:
+            stage.cleanup()
+            self.notify(str(e), title="Log in", severity="warning")
+            return
+        except BaseException:
+            stage.cleanup()
+            raise
+        self._start_action("Log in", partial(self._import_login, stage), show_output=True)
+
+    def _import_login(self, stage: StagedLogin) -> None:
+        """Worker thread: store the staged login, then always drop the stage."""
+        try:
+            stage.import_into(self.switcher)
+        finally:
+            stage.cleanup()
 
     def action_add_token(self) -> None:
         self.push_screen(AddTokenModal(), self._on_token_form)
