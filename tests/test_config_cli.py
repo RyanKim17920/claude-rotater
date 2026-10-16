@@ -49,10 +49,9 @@ class TestConfigList:
             "autoswitch.includeApiKeyAccounts",
             "autoswitch.unhealthyTicks",
             "autoswitch.model",
-            "autoswitch.pollActiveSeconds",
             "autoswitch.pollSpareSeconds",
-            "autoswitch.pollUrgentSeconds",
             "autoswitch.pollHourlyBudget",
+            "autoswitch.feedStaleSeconds",
             "ui.theme",
         ):
             assert key in out

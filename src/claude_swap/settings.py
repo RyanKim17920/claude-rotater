@@ -118,21 +118,18 @@ class SettingSpec:
 # poll_policy.CADENCE_SETTING_KEYS (the lenient loader's table), so the strict
 # `config set` validation and the clamp on load share one range.
 _CADENCE_TEXT: dict[str, tuple[str, str]] = {
-    "pollActiveSeconds": (
-        "Active poll (s)",
-        "Seconds between usage polls of the active account, away from the threshold",
-    ),
     "pollSpareSeconds": (
-        "Spare poll (s)",
-        "Seconds between usage polls of each spare account",
-    ),
-    "pollUrgentSeconds": (
-        "Urgent poll (s)",
-        "Seconds between active-account polls once it nears the threshold",
+        "Poll interval (s)",
+        "Seconds between usage polls of each account; the active one is "
+        "skipped while its statusline feed is fresh",
     ),
     "pollHourlyBudget": (
         "Hourly poll budget",
         "Most usage polls per account in any trailing hour (hard cap)",
+    ),
+    "feedStaleSeconds": (
+        "Feed stale after (s)",
+        "Poll the active account again once cswap feed has been quiet this long",
     ),
 }
 

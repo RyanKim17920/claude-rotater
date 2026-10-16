@@ -31,7 +31,7 @@ any day — so the constants below lean only on the robust parts: a sustained
 rate safely under the cap, and an ~hour recovery horizon. The budget target
 is an **average of at most ~1 request / 3 minutes** (20/hour vs the ~28-30/
 hour cap), leaving ~8-10 requests/hour of headroom for manual commands,
-wake-from-sleep catch-up, and the bounded urgent mode below.
+and wake-from-sleep catch-up.
 
 Health invariant to watch in the logs: steady state shows zero http-429.
 A post-burst 429 does NOT reliably clear at its stated horizon — measured
@@ -82,20 +82,21 @@ if TYPE_CHECKING:
 SERVE_TTL_S = 180.0
 
 # Approach floor: an account the estimator projects to cross the threshold
-# soon is sampled down to this cadence, never below (unless urgent).
+# soon is sampled down to this cadence, never below.
 MIN_INTERVAL_S = 180.0
 
-# Baselines, unless something below tightens or widens them. The active
-# account (the one whose usage moves) polls at the floor, 20 requests/hour;
-# an idle spare drifts at ten minutes, 6/hour. DEFAULTS; the effective values
-# come from settings (see PollCadence).
-ACTIVE_INTERVAL_S = MIN_INTERVAL_S
+# The one baseline, for every account: ten minutes, 6 requests/hour. The
+# active account's live usage comes from Claude Code's statusline
+# (``cswap feed``) at no request cost, and while that feed is fresh the
+# account is held off polling entirely (see FEED_STALE_S); it is polled like
+# a spare only once the feed goes quiet. A DEFAULT; the effective value comes
+# from settings (see PollCadence).
 SPARE_INTERVAL_S = 600.0
 
-# Urgent floor: only the ACTIVE account, only while no 429 was seen recently,
-# and only while its trailing-hour attempts are under the urgent budget. The
-# hourly budget below bounds it by construction.
-URGENT_INTERVAL_S = 60.0
+# How long a statusline feed record keeps the active account off polling. No
+# Claude Code session reporting for this long usually means nothing is
+# burning, so spare cadence is enough. A DEFAULT, see PollCadence.
+FEED_STALE_S = 600.0
 
 # Aim to sample about this many times before the projected threshold
 # crossing, so the switch decision sees the crossing at most one poll late.
@@ -103,17 +104,10 @@ POLLS_BEFORE_CROSSING = 3
 
 # Planned requests per token per trailing hour (the measured cap is ~28-30),
 # enforced last from the on-disk attempt ledger (usage_history), so nothing
-# schedules above it. Urgent polls stop once the trailing hour holds
-# URGENT_BUDGET_FRAC of the budget, leaving room for manual refreshes and
-# other machines. Defaults; the effective values come from settings.
+# schedules above it. A default; the effective value comes from settings.
 HOURLY_BUDGET = 20
-URGENT_BUDGET_FRAC = 0.75
-URGENT_BUDGET = round(HOURLY_BUDGET * URGENT_BUDGET_FRAC)  # 15
 
-# Kept for readers outside this module: the engine's age cap on the active
-# row (a plan written while it was a spare must not gate it longer than
-# this), and the candidate names for the spare baseline.
-ACTIVE_MAX_INTERVAL_S = 300.0
+# Kept for readers outside this module: the candidate names for the baseline.
 CANDIDATE_DEFAULT_INTERVAL_S = SPARE_INTERVAL_S
 CANDIDATE_MAX_INTERVAL_S = SPARE_INTERVAL_S
 
@@ -172,32 +166,25 @@ TRAILING_HOUR_S = 3600.0
 class PollCadence:
     """The user-tunable cadence knobs; defaults are the constants above.
 
-    Read from ``settings.json`` (``autoswitch.pollActiveSeconds``,
-    ``pollSpareSeconds``, ``pollUrgentSeconds``, ``pollHourlyBudget``) by
-    :func:`load_cadence`. The post-429 AIMD is not tunable: it is the
-    safety net that converges whatever these are set to."""
+    Read from ``settings.json`` (``autoswitch.pollSpareSeconds``,
+    ``pollHourlyBudget``, ``feedStaleSeconds``) by :func:`load_cadence`.
+    Other keys in the section (such as the retired ``pollActiveSeconds``,
+    ``pollUrgentSeconds`` and ``intervalSeconds``) are ignored. The post-429
+    AIMD is not tunable: it is the safety net that converges whatever these
+    are set to."""
 
-    active_s: float = ACTIVE_INTERVAL_S
     spare_s: float = SPARE_INTERVAL_S
-    urgent_s: float = URGENT_INTERVAL_S
     hourly_budget: int = HOURLY_BUDGET
-
-    def baseline_for(self, is_active: bool) -> float:
-        return self.active_s if is_active else self.spare_s
-
-    @property
-    def urgent_budget(self) -> int:
-        return round(self.hourly_budget * URGENT_BUDGET_FRAC)
+    feed_stale_s: float = FEED_STALE_S
 
 
 DEFAULT_CADENCE = PollCadence()
 
 # settings.json key (autoswitch section) -> (field, kind, lo, hi)
 CADENCE_SETTING_KEYS: dict[str, tuple[str, str, float, float]] = {
-    "pollActiveSeconds": ("active_s", "float", 10.0, 3600.0),
     "pollSpareSeconds": ("spare_s", "float", 10.0, 3600.0),
-    "pollUrgentSeconds": ("urgent_s", "float", 5.0, 3600.0),
     "pollHourlyBudget": ("hourly_budget", "int", 1.0, 3600.0),
+    "feedStaleSeconds": ("feed_stale_s", "float", 60.0, 3600.0),
 }
 
 
@@ -313,15 +300,15 @@ def plan_after_fetch(
 
     In order:
 
-    1. Start from the account's baseline (``cadence.active_s`` for the
-       active account, ``cadence.spare_s`` for a spare).
+    1. Start from the baseline, ``cadence.spare_s``, for every account: the
+       active account's live usage comes from the statusline feed, which
+       holds it off polling while fresh (``UsageStore.adopt``), so a plan
+       here only runs once the feed has gone quiet.
     2. An exhausted account polls no faster than ``EXHAUSTED_INTERVAL_S``
        (bounded, so an early quota grant is still observed).
     3. Otherwise, when the estimator projects a threshold crossing, shrink
        the interval to ``eta / POLLS_BEFORE_CROSSING``, floored at
-       ``MIN_INTERVAL_S`` — or at the urgent interval for the active account
-       with no recent 429 and fewer than ``cadence.urgent_budget`` attempts
-       in the trailing hour. Never above the account's baseline.
+       ``MIN_INTERVAL_S``. Never above the baseline.
     4. A recent 429 widens the interval multiplicatively (AIMD) toward
        ``POST_429_MAX_INTERVAL_S``.
     5. Jitter by ``JITTER_FRAC``.
@@ -330,11 +317,12 @@ def plan_after_fetch(
        token's ledger, including the fetch just made). Last, so nothing —
        not even the reset pull-in — schedules above budget.
 
-    ``prev_usage`` is accepted for signature compatibility; burn is now read
-    from ``estimate`` rather than from a two-point movement delta.
+    ``prev_usage`` and ``is_active`` are accepted for signature
+    compatibility: burn is read from ``estimate``, and the active account no
+    longer has a cadence of its own.
     """
-    del prev_usage
-    baseline = cadence.baseline_for(is_active)
+    del prev_usage, is_active
+    baseline = cadence.spare_s
     interval = baseline
     headroom = oauth.account_headroom(new_usage, models)
     exhausted = headroom is not None and headroom <= 0
@@ -346,14 +334,9 @@ def plan_after_fetch(
     elif estimate is not None and estimate.confidence != "none":
         eta = estimate.eta_threshold_s
         if eta is not None:
-            urgent_ok = (
-                is_active
-                and not recent_429
-                and len(trailing_attempts(attempts, now)) < cadence.urgent_budget
-            )
             # A floor is never above the baseline: a user who asked for a
             # faster baseline must not be slowed down near the threshold.
-            floor = min(cadence.urgent_s if urgent_ok else MIN_INTERVAL_S, baseline)
+            floor = min(MIN_INTERVAL_S, baseline)
             interval = min(max(eta / POLLS_BEFORE_CROSSING, floor), baseline)
         else:
             binding = estimate.binding

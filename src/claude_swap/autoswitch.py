@@ -2085,20 +2085,12 @@ class AutoSwitchEngine:
         active_pre = pre.get(current)
         # The active account is nominated when never fetched, poll-due per its
         # persisted plan, or (no plan yet) past the normal cadence floor. The
-        # collector's reserve() honors due-ness even inside the serve TTL, so
-        # an urgent plan (60s while burning near the band) actually fetches.
-        # A candidate-style plan (slower than any active plan can be) left
-        # over from a role change the switcher never saw (e.g. a manual
-        # login) is overridden past the active age cap. Exhausted accounts
+        # collector's reserve() honors due-ness even inside the serve TTL.
+        # Active and spare rows share one cadence, so a plan written while
+        # this account was a spare is still the right one. While the
+        # statusline feed is fresh the row is held (UsageStore.adopt) and the
+        # collector skips it whatever this nominates. Exhausted accounts
         # carry their own bounded plan and become due normally.
-        stale_candidate_plan = (
-            active_pre is not None
-            and active_pre.age_s is not None
-            and active_pre.age_s >= poll_policy.ACTIVE_MAX_INTERVAL_S
-            and (active_pre.poll_interval_s or 0.0)
-            > poll_policy.ACTIVE_MAX_INTERVAL_S
-            and (binding_pct(active_pre.last_good, self._models) or 0.0) < 100.0
-        )
         overslept_plan = (
             active_pre is not None
             and plan_oversleeps_interval(active_pre, now)
@@ -2106,7 +2098,6 @@ class AutoSwitchEngine:
         if (
             active_pre is None
             or active_pre.age_s is None
-            or stale_candidate_plan
             or overslept_plan
             or (
                 active_pre.next_poll_at is not None
@@ -2123,11 +2114,10 @@ class AutoSwitchEngine:
             if pick is not None:
                 plan.add(pick)
         entries = self.switcher.usage_entries_by_account(
+            # Every baseline nomination preserves a valid future plan under
+            # the store lock.
             fetch=plan,
-            # A candidate-style plan on the active slot is deliberately
-            # overridden after the active age cap; every other baseline
-            # nomination preserves a valid future plan under the store lock.
-            scheduled=not stale_candidate_plan,
+            scheduled=True,
         )
         usage = {num: entry.decision_value() for num, entry in entries.items()}
 
@@ -2410,7 +2400,7 @@ class AutoSwitchEngine:
             # Bounding due_in instead keeps "only ever shortens" true at every
             # configured interval, and still refuses to poll faster than the
             # planner's own floor when the row is overdue.
-            return min(delay, max(due_in, poll_policy.URGENT_INTERVAL_S))
+            return min(delay, max(due_in, poll_policy.MIN_INTERVAL_S))
         except Exception:
             return delay
 

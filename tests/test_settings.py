@@ -222,19 +222,20 @@ class TestSettingSpecs:
             assert (spec.field, spec.kind, spec.lo, spec.hi) == (field, kind, lo, hi)
             assert spec.group == "polling"
             assert spec.label
-        assert SETTING_SPECS["autoswitch.pollActiveSeconds"].default == 180.0
         assert SETTING_SPECS["autoswitch.pollSpareSeconds"].default == 600.0
-        assert SETTING_SPECS["autoswitch.pollUrgentSeconds"].default == 60.0
         assert SETTING_SPECS["autoswitch.pollHourlyBudget"].default == 20
+        assert SETTING_SPECS["autoswitch.feedStaleSeconds"].default == 600.0
+        for retired in ("pollActiveSeconds", "pollUrgentSeconds"):
+            assert f"autoswitch.{retired}" not in SETTING_SPECS
 
     def test_cadence_keys_do_not_leak_into_autoswitch_settings(self, tmp_path: Path):
-        set_setting(tmp_path, "autoswitch.pollActiveSeconds", "120")
+        set_setting(tmp_path, "autoswitch.feedStaleSeconds", "120")
         settings = load_settings(tmp_path)
         assert settings == AutoSwitchSettings()
         save_settings(tmp_path, settings)
         raw = json.loads(settings_path(tmp_path).read_text())
-        assert raw["autoswitch"]["pollActiveSeconds"] == 120.0
-        assert load_cadence(tmp_path).active_s == 120.0
+        assert raw["autoswitch"]["feedStaleSeconds"] == 120.0
+        assert load_cadence(tmp_path).feed_stale_s == 120.0
 
     def test_effective_settings_reports_cadence(self, tmp_path: Path):
         set_setting(tmp_path, "autoswitch.pollHourlyBudget", "12")
@@ -243,8 +244,7 @@ class TestSettingSpecs:
         assert rows["autoswitch.pollSpareSeconds"] == (600.0, False)
 
     @pytest.mark.parametrize("key, bad", [
-        ("autoswitch.pollActiveSeconds", "5"),
-        ("autoswitch.pollUrgentSeconds", "4"),
+        ("autoswitch.feedStaleSeconds", "59"),
         ("autoswitch.pollHourlyBudget", "0"),
         ("autoswitch.pollHourlyBudget", "2.5"),
         ("autoswitch.pollSpareSeconds", "3601"),

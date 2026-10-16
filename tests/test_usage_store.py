@@ -1533,9 +1533,10 @@ class TestHourScale429FloorEngagesThroughStore:
             prev_interval_s=before.poll_interval_s,
             prev_usage=before.last_good,
             new_usage=after.last_good,
-            # The active account: its 180s baseline sits under the 360s floor,
-            # so the floor (or its absence) is observable.
+            # A 180s baseline sits under the 360s floor, so the floor (or its
+            # absence) is observable.
             is_active=True,
+            cadence=poll_policy.PollCadence(spare_s=180.0),
             threshold=90.0,
             models=(),
             recent_429=recent,
@@ -1591,8 +1592,9 @@ class TestHourScale429FloorEngagesThroughStore:
                 prev_interval_s=before.poll_interval_s,
                 prev_usage=before.last_good,
                 new_usage=after.last_good,
-                # Active: grows from its 180s baseline, so the climb is visible.
+                # Grows from a 180s baseline, so the climb is visible.
                 is_active=True,
+                cadence=poll_policy.PollCadence(spare_s=180.0),
                 threshold=90.0,
                 models=(),
                 recent_429=before.recent_429(clock.now),

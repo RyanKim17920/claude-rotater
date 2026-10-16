@@ -726,19 +726,20 @@ class TestAdaptiveScheduler:
         # t0: active (never fetched) + the stalest candidate.
         self._tick(h, counts, usage)
         assert counts == {"1": 1, "2": 1}
-        # t60: active planned ACTIVE_INTERVAL_S out; the never-fetched
+        # t60: active planned SPARE_INTERVAL_S out; the never-fetched
         # candidate is the due one.
         h.clock.advance(60)
         self._tick(h, counts, usage)
         assert counts == {"1": 1, "2": 1, "3": 1}
-        # t120: nobody due — everyone served from the store.
-        h.clock.advance(60)
+        # t180: nobody due. The active account shares the spares' baseline
+        # (its live usage comes from the statusline feed, not polling).
+        h.clock.advance(120)
         self._tick(h, counts, usage)
         assert counts == {"1": 1, "2": 1, "3": 1}
-        # t180: the active account's plan comes due; spares wait 600s.
-        h.clock.advance(60)
+        # t600: the active plan and the stalest spare come due together.
+        h.clock.advance(420)
         self._tick(h, counts, usage)
-        assert counts == {"1": 2, "2": 1, "3": 1}
+        assert counts == {"1": 2, "2": 2, "3": 1}
 
     def test_near_threshold_escalates_to_full_refresh(self, temp_home, monkeypatch):
         # threshold 90, margin 15 → active at 80% is within the escalation band.
@@ -764,91 +765,89 @@ class TestAdaptiveScheduler:
         assert h.active_number() == 2
 
     def test_active_polls_at_the_baseline(self, temp_home, monkeypatch):
-        # Far from the threshold, the active account polls every
-        # ACTIVE_INTERVAL_S, steadily (no decay, no estimate-driven shrink).
+        # Far from the threshold (and with no statusline feed), the active
+        # account polls every SPARE_INTERVAL_S, steadily (no decay, no
+        # estimate-driven shrink).
         h = self._harness(temp_home, monkeypatch, accounts=2)
         usage = {"1": _usage(10), "2": _usage(20)}
         counts: dict[str, int] = {}
         self._tick(h, counts, usage)  # never-fetched → fetched
         assert counts["1"] == 1
         for expected in (2, 3):
-            for _ in range(2):  # ages 60..120s — inside the 180s baseline
-                h.clock.advance(60)
-                self._tick(h, counts, usage)
+            h.clock.advance(300)  # inside the 600s baseline
+            self._tick(h, counts, usage)
             assert counts["1"] == expected - 1
-            h.clock.advance(60)  # age 180s → due again
+            h.clock.advance(300)  # age 600s → due again
             self._tick(h, counts, usage)
             assert counts["1"] == expected
 
-    def test_urgent_cadence_when_burning_near_the_band(self, temp_home, monkeypatch):
+    def test_approach_cadence_when_burning_toward_the_band(self, temp_home, monkeypatch):
         # The history-fed estimate projects the crossing; the active account
-        # tightens to ETA/POLLS_BEFORE_CROSSING, down to the 60s urgent
-        # floor, so the crossing is seen within a minute of happening.
+        # tightens to ETA/POLLS_BEFORE_CROSSING (never below MIN_INTERVAL_S;
+        # there is no faster urgent mode, the statusline feed is what watches
+        # a burning account).
         h = self._harness(temp_home, monkeypatch, accounts=2)
-        usage = {"1": _usage(70), "2": _usage(10)}
+        usage = {"1": _usage(62), "2": _usage(10)}
         counts: dict[str, int] = {}
         self._tick(h, counts, usage)
-        usage["1"] = _usage(80)  # +10 pts in 300s: 120%/h, crossing in 300s
-        h.clock.advance(300)
+        usage["1"] = _usage(72)  # +10 pts in 600s: 60%/h, crossing in 1080s
+        h.clock.advance(600)
         self._tick(h, counts, usage)
         assert counts["1"] == 2
-        usage["1"] = _usage(84)
-        h.clock.advance(99)
-        self._tick(h, counts, usage)  # planned 300/3 = 100s out: not yet
+        e = h.switcher._usage_store.entries({"1": ("a@example.com", "")})["1"]
+        assert e.poll_interval_s == pytest.approx(360.0)  # 1080 / 3
+        h.clock.advance(359)
+        self._tick(h, counts, usage)
         assert counts["1"] == 2
         h.clock.advance(1)
         self._tick(h, counts, usage)
         assert counts["1"] == 3
-        usage["1"] = _usage(88)
-        h.clock.advance(60)
-        self._tick(h, counts, usage)  # crossing ~3 min out → 60s urgent floor
-        assert counts["1"] == 4
 
     def test_in_band_without_movement_keeps_the_baseline(self, temp_home, monkeypatch):
-        # In the escalation band but not burning: no ETA, so no tightening —
-        # the 180s active baseline applies (escalation keeps candidates fresh;
-        # it must not re-fetch a fresh, unmoving active every tick).
+        # In the escalation band but not burning: no ETA, so the plan keeps
+        # the baseline. Escalation still refreshes the row once it is past
+        # the serve TTL (a switch could be near), but it must not re-fetch a
+        # fresh, unmoving active every tick.
         h = self._harness(temp_home, monkeypatch, accounts=2)
         usage = {"1": _usage(80), "2": _usage(10)}
         counts: dict[str, int] = {}
-        for expected in (1, 2):
-            self._tick(h, counts, usage)
-            assert counts["1"] == expected
-            for _ in range(2):
-                h.clock.advance(60)
-                self._tick(h, counts, usage)
-            assert counts["1"] == expected  # not due inside the baseline
-            e = h.switcher._usage_store.entries({"1": ("a@example.com", "")})["1"]
-            assert e.poll_interval_s == poll_policy.ACTIVE_INTERVAL_S
-            h.clock.advance(60)
         self._tick(h, counts, usage)
-        assert counts["1"] == 3
+        assert counts["1"] == 1
+        e = h.switcher._usage_store.entries({"1": ("a@example.com", "")})["1"]
+        assert e.poll_interval_s == poll_policy.SPARE_INTERVAL_S
+        for _ in range(3):  # ages 60..180s: fresh
+            h.clock.advance(60)
+            self._tick(h, counts, usage)
+        assert counts["1"] == 1
+        h.clock.advance(1)  # past the serve TTL: escalation refreshes it
+        self._tick(h, counts, usage)
+        assert counts["1"] == 2
 
     @pytest.mark.parametrize("threshold,tightened", [(50, True), (90, False)])
     def test_approach_follows_the_threshold(
         self, temp_home, monkeypatch, threshold, tightened
     ):
         # The ETA is to the configured threshold, not an absolute pct: the
-        # same 30→40% burn (120%/h) crosses 50% in 300s (→ 100s polls) but
-        # 90% only after 25 min (→ baseline).
+        # same 30→40% burn (60%/h) crosses 50% in 600s (→ 200s polls) but
+        # 90% only after 50 min (→ the 600s baseline).
         h = self._harness(temp_home, monkeypatch, accounts=2, threshold=threshold)
         usage = {"1": _usage(30), "2": _usage(10)}
         counts: dict[str, int] = {}
         self._tick(h, counts, usage)
         usage["1"] = _usage(40)
-        h.clock.advance(300)
+        h.clock.advance(600)
         self._tick(h, counts, usage)
         assert counts["1"] == 2
-        h.clock.advance(100)
+        h.clock.advance(200)
         self._tick(h, counts, usage)
         assert counts["1"] == (3 if tightened else 2)
 
-    def test_stale_candidate_plan_never_gates_the_active(
+    def test_plan_written_as_a_spare_still_governs_the_active(
         self, temp_home, monkeypatch
     ):
         # Role change outside a cswap switch (e.g. manual login): the active
-        # slot can carry a plan written while it was an idle candidate, up to
-        # 600s out. The ACTIVE_MAX_INTERVAL_S age cap overrides it.
+        # slot carries a plan written while it was a spare. Active and spare
+        # share one cadence now, so that plan is honored as is.
         h = self._harness(temp_home, monkeypatch, accounts=2)
         usage = {"1": _usage(50), "2": _usage(20)}
         counts: dict[str, int] = {}
@@ -856,10 +855,10 @@ class TestAdaptiveScheduler:
         h.switcher._usage_store.set_poll_plan(
             {"1": (h.clock.now + 600.0, 600.0)}, {"1": ("a@example.com", "")}
         )
-        h.clock.advance(240)  # inside the bogus plan, under the age cap
+        h.clock.advance(360)
         self._tick(h, counts, usage)
         assert counts["1"] == 1
-        h.clock.advance(120)  # age 360 ≥ ACTIVE_MAX_INTERVAL_S
+        h.clock.advance(240)  # the plan comes due
         self._tick(h, counts, usage)
         assert counts["1"] == 2
 
@@ -917,7 +916,7 @@ class TestAdaptiveScheduler:
     ):
         # Active at 40% jumps into the band between polls: the jump is picked
         # up on the next planned poll, escalates the same tick, and the
-        # projected crossing flips the active onto the urgent cadence.
+        # projected crossing tightens the active onto the approach floor.
         h = self._harness(temp_home, monkeypatch, accounts=2)
         usage = {"1": _usage(40), "2": _usage(20)}
         counts: dict[str, int] = {}
@@ -926,12 +925,15 @@ class TestAdaptiveScheduler:
         h.clock.advance(60)
         self._tick(h, counts, usage)  # plan-skipped: still believed at 40%
         assert counts["1"] == 1
-        h.clock.advance(240)
+        h.clock.advance(540)
         self._tick(h, counts, usage)  # planned poll sees 80% → escalate-all
         assert counts["1"] == 2
         assert counts["2"] == 2  # stale past the TTL → refreshed with it
         h.clock.advance(60)
-        self._tick(h, counts, usage)  # crossing projected → urgent cadence
+        self._tick(h, counts, usage)
+        assert counts["1"] == 2
+        h.clock.advance(120)
+        self._tick(h, counts, usage)  # crossing projected → 180s floor
         assert counts["1"] == 3
 
     def test_active_in_backoff_keeps_trusted_headroom(self, temp_home, monkeypatch):
@@ -1653,12 +1655,12 @@ class TestAdaptiveScheduler:
         with patch.object(
             h.switcher, "usage_entries_by_account", side_effect=spying_collect
         ):
-            for _ in range(4):  # t0, t60, t120, t180
+            for _ in range(11):  # t0, t60, ... t600
                 outcome = self._tick(h, counts, usage)
                 assert outcome is TickOutcome.NO_ACTION
                 h.clock.advance(60)
         # (a) HTTP volume identical to the baseline cadence under `best`.
-        assert counts == {"1": 2, "2": 1, "3": 1}
+        assert counts == {"1": 2, "2": 2, "3": 1}
         # (b) no collection ever requested the all-candidates escalation set.
         assert {"1", "2", "3"} not in fetch_sets
 
@@ -1688,6 +1690,11 @@ class TestAdaptiveScheduler:
             {"2": ("b@example.com", "")},
         )
         h.clock.advance(181)                   # t241
+        # The active row comes due (as a fading statusline feed would leave
+        # it) so this tick refetches it.
+        h.switcher._usage_store.set_poll_plan(
+            {"1": (h.clock.now, 600.0)}, {"1": ("a@example.com", "")}
+        )
         h.events.clear()
         # The active refetch now reports the LATEST reset, so stored #2
         # (age 241: decision-trusted, no longer fresh) is the provisional
@@ -2253,9 +2260,9 @@ class TestLoopObeysThePollPlan:
         harness.engine.settings = replace(
             harness.engine.settings, interval_seconds=360.0
         )
-        self._plan(harness, due_in=60.0)
-        # Pre-fix this returned ~360s and the 60s plan silently ran late.
-        assert harness.engine._next_delay(TickOutcome.NO_ACTION) == 60.0
+        self._plan(harness, due_in=200.0)
+        # Pre-fix this returned ~360s and the 200s plan silently ran late.
+        assert harness.engine._next_delay(TickOutcome.NO_ACTION) == 200.0
 
     def test_never_sleeps_below_the_planners_own_floor(self, harness):
         """A row already overdue must not spin: the floor is the rate budget."""
@@ -2265,7 +2272,7 @@ class TestLoopObeysThePollPlan:
         self._plan(harness, due_in=-500.0)
         assert (
             harness.engine._next_delay(TickOutcome.NO_ACTION)
-            == poll_policy.URGENT_INTERVAL_S
+            == poll_policy.MIN_INTERVAL_S
         )
 
     def test_a_relaxed_plan_never_lengthens_the_sleep(self, harness):
@@ -2782,7 +2789,7 @@ class TestModelAwareSwitch:
 
     def test_scoped_binding_window_keeps_active_cadence_tight(self, temp_home):
         # Fable burning 84→88% projects a crossing within minutes: with the
-        # model configured the urgent cadence engages, while the flat
+        # model configured the approach cadence engages, while the flat
         # 5%-used 5h window alone keeps the baseline.
         from claude_swap.estimator import estimate_account
         from claude_swap.usage_history import Point
@@ -2809,10 +2816,10 @@ class TestModelAwareSwitch:
                 estimate=est,
             )[1]
 
-        # 24%/h, 2 pts to go: crossing in 300s → 300/3 = 100s, under the
-        # 180s floor only an active account may use.
-        assert plan(("Fable",)) == pytest.approx(100.0)
-        assert plan(()) == poll_policy.ACTIVE_INTERVAL_S
+        # 24%/h, 2 pts to go: crossing in 300s → 300/3 = 100s, floored at
+        # MIN_INTERVAL_S.
+        assert plan(("Fable",)) == poll_policy.MIN_INTERVAL_S
+        assert plan(()) == poll_policy.SPARE_INTERVAL_S
 
     def test_unmatched_model_name_warns_once(self, temp_home):
         h = self._seed(temp_home, model="Fabel")  # deliberate typo

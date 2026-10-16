@@ -14,8 +14,7 @@ from claude_swap.usage_history import UsageHistory
 
 NOW = 1_000_000.0
 HALF = lambda: 0.5  # noqa: E731 — rng midpoint: jitter factor exactly 1.0
-ACTIVE = poll_policy.ACTIVE_INTERVAL_S
-BASE = poll_policy.SPARE_INTERVAL_S  # _plan() defaults to a spare account
+BASE = poll_policy.SPARE_INTERVAL_S  # the one baseline, active or spare
 
 
 def _iso(ts: float) -> str:
@@ -56,9 +55,11 @@ def _estimate(eta_s: float | None, *, confidence="high", last_pct=80.0,
 
 
 class TestBaseline:
-    def test_each_role_starts_at_its_baseline(self):
-        assert _plan(is_active=True)[1] == ACTIVE == 180.0
-        assert _plan(is_active=False)[1] == BASE == 600.0
+    def test_every_role_starts_at_the_one_baseline(self):
+        # The active account's live usage comes from the statusline feed;
+        # once that goes quiet it polls like a spare.
+        assert _plan(is_active=True)[1] == BASE == 600.0
+        assert _plan(is_active=False)[1] == BASE
 
     def test_previous_interval_and_usage_do_not_matter_without_429(self):
         _, interval = _plan(prev_interval_s=60.0, prev_usage=_usage(5),
@@ -69,13 +70,13 @@ class TestBaseline:
         assert _plan(prev_interval_s=600.0, new_usage=None)[1] == BASE
 
     def test_kept_constant_aliases(self):
-        assert poll_policy.ACTIVE_MAX_INTERVAL_S == 300.0
         assert poll_policy.CANDIDATE_DEFAULT_INTERVAL_S == BASE
         assert poll_policy.CANDIDATE_MAX_INTERVAL_S == 600.0
-        assert ACTIVE == poll_policy.MIN_INTERVAL_S
-        assert not hasattr(poll_policy, "MOVEMENT_DELTA_PCT")
-        assert poll_policy.URGENT_BUDGET == 15
+        assert poll_policy.FEED_STALE_S == 600.0
         assert poll_policy.HOURLY_BUDGET == 20
+        for retired in ("MOVEMENT_DELTA_PCT", "ACTIVE_INTERVAL_S", "URGENT_INTERVAL_S",
+                        "URGENT_BUDGET", "ACTIVE_MAX_INTERVAL_S"):
+            assert not hasattr(poll_policy, retired), retired
 
 
 class TestApproach:
@@ -86,49 +87,36 @@ class TestApproach:
     def test_far_eta_is_capped_at_baseline(self):
         assert _plan(estimate=_estimate(10_000.0))[1] == BASE
 
-    def test_candidate_floor_is_min_interval(self):
-        _, interval = _plan(estimate=_estimate(30.0), is_active=False)
+    @pytest.mark.parametrize("is_active", [True, False])
+    def test_floor_is_min_interval_for_every_role(self, is_active):
+        # No urgent mode: below MIN_INTERVAL_S the feed, not polling, is
+        # what sees the active account burn.
+        _, interval = _plan(estimate=_estimate(30.0), is_active=is_active)
         assert interval == poll_policy.MIN_INTERVAL_S
 
-    def test_active_may_go_urgent(self):
-        _, interval = _plan(estimate=_estimate(30.0), is_active=True)
-        assert interval == poll_policy.URGENT_INTERVAL_S
+    def test_between_floor_and_baseline(self):
+        _, interval = _plan(estimate=_estimate(900.0), is_active=True)
+        assert interval == pytest.approx(300.0)
 
-    def test_active_between_floors(self):
-        _, interval = _plan(estimate=_estimate(300.0), is_active=True)
-        assert interval == pytest.approx(100.0)
-
-    def test_urgent_only_under_urgent_budget(self):
-        attempts = [NOW - 3500 + i * 100 for i in range(poll_policy.URGENT_BUDGET)]
-        _, interval = _plan(estimate=_estimate(30.0), is_active=True, attempts=attempts)
-        assert interval == poll_policy.MIN_INTERVAL_S
-        _, under = _plan(estimate=_estimate(30.0), is_active=True, attempts=attempts[1:])
-        assert under == poll_policy.URGENT_INTERVAL_S
-
-    def test_attempts_older_than_an_hour_do_not_count(self):
-        attempts = [NOW - 7200 + i for i in range(40)]
-        _, interval = _plan(estimate=_estimate(30.0), is_active=True, attempts=attempts)
-        assert interval == poll_policy.URGENT_INTERVAL_S
-
-    def test_recent_429_suppresses_urgency_and_floors(self):
+    def test_recent_429_floors(self):
         _, interval = _plan(estimate=_estimate(30.0), is_active=True, recent_429=True)
-        # No urgent 60 s; AIMD from the 180 s active baseline floors at 360.
-        assert interval == poll_policy.POST_429_MIN_INTERVAL_S
+        # AIMD from the 600 s baseline: 600 * 1.5.
+        assert interval == 600.0 * poll_policy.POST_429_BACKOFF_MULT
 
     def test_confidence_none_is_ignored(self):
-        assert _plan(estimate=_estimate(30.0, confidence="none"), is_active=True)[1] == ACTIVE
+        assert _plan(estimate=_estimate(30.0, confidence="none"), is_active=True)[1] == BASE
 
     def test_low_confidence_still_tightens(self):
-        _, interval = _plan(estimate=_estimate(300.0, confidence="low"), is_active=True)
-        assert interval == pytest.approx(100.0)
+        _, interval = _plan(estimate=_estimate(900.0, confidence="low"), is_active=True)
+        assert interval == pytest.approx(300.0)
 
     def test_eta_none_keeps_baseline(self):
-        assert _plan(estimate=_estimate(None), is_active=True)[1] == ACTIVE
+        assert _plan(estimate=_estimate(None), is_active=True)[1] == BASE
 
     def test_eta_zero_below_limit_goes_to_floor(self):
         _, interval = _plan(estimate=_estimate(0.0), is_active=True,
                             new_usage=_usage(92))
-        assert interval == poll_policy.URGENT_INTERVAL_S
+        assert interval == poll_policy.MIN_INTERVAL_S
 
     def test_exhausted_ignores_the_approach(self):
         _, interval = _plan(estimate=_estimate(0.0, last_pct=100.0), is_active=True,
@@ -138,17 +126,12 @@ class TestApproach:
 
 class TestCadenceSettings:
     def test_fast_baseline(self):
-        assert _plan(cadence=PollCadence(active_s=15.0, spare_s=15.0))[1] == 15.0
+        assert _plan(cadence=PollCadence(spare_s=15.0))[1] == 15.0
 
     def test_floors_never_exceed_the_baseline(self):
-        cadence = PollCadence(active_s=15.0, spare_s=15.0)
+        cadence = PollCadence(spare_s=15.0)
         assert _plan(cadence=cadence, estimate=_estimate(30.0))[1] == 15.0
         assert _plan(cadence=cadence, estimate=_estimate(30.0), is_active=True)[1] == 15.0
-
-    def test_custom_urgent_interval(self):
-        cadence = PollCadence(urgent_s=20.0)
-        _, interval = _plan(cadence=cadence, estimate=_estimate(30.0), is_active=True)
-        assert interval == 20.0
 
     def test_custom_hourly_budget_caps(self):
         cadence = PollCadence(spare_s=15.0, hourly_budget=4)
@@ -156,34 +139,36 @@ class TestCadenceSettings:
         next_poll, _ = _plan(cadence=cadence, attempts=attempts)
         assert next_poll == pytest.approx(NOW - 3000 + 3600)
 
-    def test_urgent_budget_scales_with_hourly_budget(self):
-        assert PollCadence(hourly_budget=40).urgent_budget == 30
-        assert PollCadence().urgent_budget == poll_policy.URGENT_BUDGET
-
     def test_from_section_defaults(self):
         assert poll_policy.cadence_from_section(None) == poll_policy.DEFAULT_CADENCE
         assert poll_policy.cadence_from_section({}) == poll_policy.DEFAULT_CADENCE
 
     def test_from_section_values_and_clamps(self):
         c = poll_policy.cadence_from_section({
-            "pollActiveSeconds": 15, "pollSpareSeconds": 120,
-            "pollUrgentSeconds": 1, "pollHourlyBudget": 40.7,
+            "pollSpareSeconds": 120, "pollHourlyBudget": 40.7, "feedStaleSeconds": 1,
         })
-        assert c == PollCadence(active_s=15.0, spare_s=120.0, urgent_s=5.0,
-                                hourly_budget=40)
+        assert c == PollCadence(spare_s=120.0, hourly_budget=40, feed_stale_s=60.0)
         c = poll_policy.cadence_from_section({"pollSpareSeconds": 99999})
         assert c.spare_s == 3600.0
 
+    def test_retired_keys_are_ignored(self):
+        """settings.json written by an older version keeps loading: the
+        retired active/urgent/loop knobs are simply not read."""
+        c = poll_policy.cadence_from_section({
+            "pollActiveSeconds": 15, "pollUrgentSeconds": 5, "intervalSeconds": 20,
+        })
+        assert c == poll_policy.DEFAULT_CADENCE
+
     @pytest.mark.parametrize("bad", ["15", True, None, float("nan"), float("inf"), [1]])
     def test_from_section_bad_values_take_default(self, bad):
-        c = poll_policy.cadence_from_section({"pollActiveSeconds": bad})
-        assert c.active_s == ACTIVE
+        c = poll_policy.cadence_from_section({"pollSpareSeconds": bad, "feedStaleSeconds": bad})
+        assert c == poll_policy.DEFAULT_CADENCE
 
     def test_load_cadence_from_settings_file(self, tmp_path):
         (tmp_path / "settings.json").write_text(
-            json.dumps({"autoswitch": {"pollActiveSeconds": 30, "threshold": 80}})
+            json.dumps({"autoswitch": {"feedStaleSeconds": 300, "threshold": 80}})
         )
-        assert poll_policy.load_cadence(tmp_path).active_s == 30.0
+        assert poll_policy.load_cadence(tmp_path).feed_stale_s == 300.0
 
     def test_load_cadence_missing_or_corrupt_file(self, tmp_path):
         assert poll_policy.load_cadence(tmp_path) == poll_policy.DEFAULT_CADENCE
@@ -216,7 +201,7 @@ class TestBudgetRelease:
         assert next_poll == pytest.approx(NOW - 1000 + 3600)
         assert next_poll > reset_ts + poll_policy.RESET_SLACK_S
 
-    def test_release_overrides_urgent(self):
+    def test_release_overrides_the_approach_floor(self):
         attempts = [NOW - 600 + i * 30 for i in range(20)]
         next_poll, _ = _plan(estimate=_estimate(30.0), is_active=True, attempts=attempts)
         assert next_poll >= NOW - 600 + 3600
@@ -232,7 +217,7 @@ class TestPost429Floor:
         assert interval == pytest.approx(590.0 * poll_policy.POST_429_BACKOFF_MULT)
 
     def test_429_beats_a_fast_custom_baseline(self):
-        _, interval = _plan(recent_429=True, cadence=PollCadence(active_s=15.0, spare_s=15.0))
+        _, interval = _plan(recent_429=True, cadence=PollCadence(spare_s=15.0))
         assert interval == poll_policy.POST_429_MIN_INTERVAL_S
 
     def test_429_base_defaults_to_the_cadence_baseline(self):
@@ -247,11 +232,8 @@ class TestPost429Aimd:
     rate converges under the endpoint budget (no cross-machine coordination)."""
 
     def test_recent_429_multiplicatively_increases_from_prev(self):
-        _, interval = _plan(recent_429=True, is_active=True,
-                            prev_interval_s=poll_policy.POST_429_MIN_INTERVAL_S)
-        assert interval == pytest.approx(
-            poll_policy.POST_429_MIN_INTERVAL_S * poll_policy.POST_429_BACKOFF_MULT
-        )
+        _, interval = _plan(recent_429=True, is_active=True, prev_interval_s=700.0)
+        assert interval == pytest.approx(700.0 * poll_policy.POST_429_BACKOFF_MULT)
 
     def test_recent_429_ceiling(self):
         assert poll_policy.POST_429_MAX_INTERVAL_S > poll_policy.CANDIDATE_MAX_INTERVAL_S
@@ -342,12 +324,11 @@ class TestBudgetInvariants:
     hour per identity) demands of the default constants."""
 
     def test_baselines_fit_the_hourly_budget(self):
-        assert 3600 / ACTIVE <= poll_policy.HOURLY_BUDGET
         assert 3600 / BASE <= poll_policy.HOURLY_BUDGET
+        assert 3600 / poll_policy.MIN_INTERVAL_S <= poll_policy.HOURLY_BUDGET
 
     def test_hourly_budget_leaves_headroom_under_the_cap(self):
         assert poll_policy.HOURLY_BUDGET <= 20
-        assert poll_policy.URGENT_BUDGET < poll_policy.HOURLY_BUDGET
 
     def test_edge_backoff_probes_slower_than_capacity_frees(self):
         assert poll_policy.EDGE_BACKOFF_S >= 300.0
@@ -423,8 +404,7 @@ class TestSimulation:
 
     def test_fast_custom_cadence_still_capped_by_its_budget(self, tmp_path):
         # A 20 s baseline wants 180/h; the budget of 60 must hold anyway.
-        cadence = PollCadence(active_s=20.0, spare_s=20.0, urgent_s=10.0,
-                              hourly_budget=60)
+        cadence = PollCadence(spare_s=20.0, hourly_budget=60)
         polls = self._run(tmp_path, cadence=cadence)
         for times in polls.values():
             assert self._max_in_any_hour(times) <= 60
