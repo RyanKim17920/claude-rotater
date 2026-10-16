@@ -84,7 +84,7 @@ class RefreshEvent:
         if self.kind == "refreshed":
             return f"refreshed {who}'s token ahead of expiry"
         if self.kind == "dead":
-            return f"{who} needs a re-login: its refresh token is dead (press l)"
+            return f"{who} needs a re-login: its refresh token is dead (press l in cswap)"
         if self.kind == "held":
             return f"left {who} alone: a cswap run session is using it"
         return f"could not refresh {who} ({self.detail}); will retry"
