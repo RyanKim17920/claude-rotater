@@ -43,6 +43,14 @@ def _iso_in(seconds: float) -> str:
     )
 
 
+def has_bar(row: str) -> bool:
+    """A usage meter is drawn: eighth-block fill or the threshold tick
+    (past the "▌ 1 " prefix, whose on-duty bar is also an eighth block)."""
+    from claude_rotater.tui.widgets import BAR_EIGHTHS, BAR_TICK
+
+    return any(ch in BAR_EIGHTHS[1:] + BAR_TICK for ch in row[4:])
+
+
 def make_entry(
     pct5: float | None = 25.0,
     pct7: float | None = 10.0,
@@ -719,9 +727,9 @@ class TestAccountRowText:
 
     def test_active_marker_and_pcts(self):
         row = self._row(make_account(1, active=True, entry=make_entry(62.0, 31.0)))
-        assert row.startswith("▸ 1 ")
+        assert row.startswith("▌ 1 ")
         assert "62%" in row and "31%" in row
-        assert "━" in row  # wide layout carries bars
+        assert has_bar(row)  # wide layout carries meters
 
     def test_inactive_has_no_marker(self):
         row = self._row(make_account(2, entry=make_entry(12.0, 44.0)))
@@ -776,7 +784,7 @@ class TestAccountRowText:
         acc = make_account(1, active=True, entry=make_entry(62.0, 31.0), email="me@x.com")
         row = self._row(acc, width=70)
         assert "me@x.com" in row and "62%" in row
-        assert "━" not in row
+        assert not has_bar(row)
         assert len(row) <= 70
 
     def test_scoped_window_column(self):
@@ -820,8 +828,8 @@ class TestRowLayout:
             now=time.time(), threshold=90.0,
         ).plain
         col = header.index("7d")
-        # the 7d bar starts exactly under its header label
-        assert row[col] in "━╸─┃"
+        # the 7d meter (31%: three full cells) starts exactly under its label
+        assert row[col : col + 3] == "███"
         assert "ETA→90%" in header
 
 
@@ -841,10 +849,47 @@ class TestStatusText:
         text = self._text(
             self._status(running=True, threshold=90.0, next_check_at=now + 80), now
         )
-        assert "AUTO ●" in text and "thr 90%" in text and "next 1m" in text
+        assert "auto on" in text and "switch at 90%" in text and "next 1m" in text
+        assert text.startswith(" rota ")
 
-    def test_stopped_engine_is_hollow(self):
-        assert "AUTO ○" in self._text(self._status(running=False))
+    def test_stopped_engine_says_off(self):
+        assert "auto off" in self._text(self._status(running=False))
+
+    def test_roster_pips_mark_duty_and_disabled(self):
+        from claude_rotater.tui.main import RosterPip, status_text
+
+        roster = [RosterPip(True, False, 62.0), RosterPip(False, False, 95.0), RosterPip(False, True, None)]
+        text = status_text(self._status(running=True), now=time.time(), width=120, roster=roster)
+        assert "◉●◌" in text.plain
+        pip_style = next(str(sp.style) for sp in text.spans if text.plain[sp.start:sp.end] == "●")
+        from claude_rotater.tui.theme import SEV_CRIT
+
+        assert SEV_CRIT in pip_style  # the 95% account glows red in the roster
+
+    @pytest.mark.parametrize("state,words", [("live", "● feed live"), ("stale", "◐ feed stale"), ("off", "○ feed off")])
+    def test_feed_indicator(self, state, words):
+        from claude_rotater.tui.main import status_text
+
+        text = status_text(self._status(running=True), now=time.time(), width=120, feed=state).plain
+        assert words in text
+
+    def test_no_feed_state_no_indicator(self):
+        assert "feed" not in self._text(self._status(running=True))
+
+    def test_low_priority_parts_drop_first_when_narrow(self):
+        from claude_rotater.tui.main import status_text
+
+        now = time.time()
+        status = self._status(
+            running=True, threshold=90.0, next_check_at=now + 80, last_check_at=now - 30,
+            last_outcome="no switch: cooldown",
+        )
+        wide = status_text(status, now=now, width=160, feed="live").plain
+        assert "checked" in wide and "no switch" in wide
+        narrow = status_text(status, now=now, width=60, feed="live").plain
+        assert "switch at 90%" in narrow and "feed live" in narrow
+        assert "checked" not in narrow and "no switch" not in narrow
+        assert len(narrow) <= 60
 
     def test_cooldown_counts_down_then_disappears(self):
         now = time.time()
@@ -1019,7 +1064,7 @@ class TestMainPage:
             assert "account" in header and "5h" in header and "7d" in header
             assert "ETA→90%" in header
             first = row_plain(app, "1")
-            assert first.startswith("▸") and "me@x.com" in first and "62%" in first
+            assert first.startswith("▌") and "me@x.com" in first and "62%" in first
             assert "\n" not in first
             assert "work@y.com" in row_plain(app, "2")
             assert "disabled" in row_plain(app, "3")
@@ -1040,10 +1085,11 @@ class TestMainPage:
         async with app.run_test(size=(120, 40)) as pilot:
             await settle(pilot)
             status = painted(app, "#status")
-            assert "rota" in status and "AUTO ●" in status
-            assert "thr 90%" in status
+            assert "rota" in status and "auto on" in status
+            assert "switch at 90%" in status
+            assert "◉●◌" in status  # roster: on duty, enabled, disabled
             labels = [str(b.label) for b in app.screen.query(Button)]
-            for word in ("switch", "add", "token", "disable", "remove", "config", "quit"):
+            for word in ("switch", "add", "token", "disable", "remove", "history", "statusline", "config", "quit"):
                 assert any(word in label for label in labels)
             # chips never steal the keyboard from the list
             assert all(not b.can_focus for b in app.screen.query(Button))
@@ -1096,7 +1142,7 @@ class TestMainPage:
             await settle(pilot)
             first = row_plain(app, "1")
             assert "me@x" in first and "62%" in first
-            assert "━" not in first  # bars dropped before names
+            assert not has_bar(first)  # meters dropped before names
             # every action chip stays on screen
             from textual.widgets import Button
 
@@ -1111,8 +1157,10 @@ class TestMainPage:
             await settle(pilot)
             assert "—" in row_plain(app, "1")
             detail = painted(app, "#detail")
-            assert "no usage history yet" in detail
-            assert "resets" in detail  # the full card stands in for the plot
+            # measured pcts still get both graphs, flagged as having no trend
+            assert detail.count("no trend yet") == 2
+            assert "5h  62%" in detail and "7d  31%" in detail
+            assert "resets" in detail
 
     async def test_synthetic_history_gives_eta_and_plot(self, tmp_path):
         import re
@@ -1127,9 +1175,10 @@ class TestMainPage:
             assert re.search(r"2h 1\dm|2h 20m", first), first
             assert "+12.0%/h" in first
             detail = painted(app, "#detail")
-            assert "me@x.com · 5h" in detail
-            assert any(0x2800 <= ord(ch) <= 0x28FF for ch in detail)  # braille plot
-            assert " 7d " in detail and "resets" in detail  # other-window sparkline
+            assert "me@x.com" in detail and "on duty" in detail
+            assert "5h  62%  +12.0%/h  90% in 2h" in detail
+            assert "7d  31%  +0.4%/h" in detail
+            assert any(0x2800 <= ord(ch) <= 0x28FF for ch in detail)  # braille plots
             # account 2 has no history: its ETA is a dash
             assert "—" in row_plain(app, "2")
 
@@ -1202,7 +1251,7 @@ class TestMainPage:
             assert ("switch_to", "2") in fake_calls(app)
             assert fake_engine.instances[-1].wakes == 1
             await settle(pilot)
-            assert row_plain(app, "2").startswith("▸")
+            assert row_plain(app, "2").startswith("▌")
 
     async def test_switch_button(self, tmp_path):
         app = make_app(three_accounts(tmp_path))
@@ -1464,26 +1513,29 @@ class TestLoginWarning:
 
         acc = self._acc(86400 + 60)
         text = account_row_text(acc, None, RowLayout.for_width(120, ("5h", "7d")), now=time.time(), threshold=90)
-        assert "login 1d" in text.plain and "[personal]" not in text.plain
+        assert "login 1d" in text.plain and "personal" not in text.plain
 
     def test_row_without_warning_keeps_org_tag(self):
         from claude_rotater.tui.main import RowLayout, account_row_text
 
         text = account_row_text(self._acc(30 * 86400), None, RowLayout.for_width(120, ("5h", "7d")),
                                 now=time.time(), threshold=90)
-        assert "[personal]" in text.plain
+        assert "personal" in text.plain
 
     def test_detail_shows_login_end_and_dead_hint(self):
         from claude_rotater.json_output import USAGE_RELOGIN_REQUIRED
         from claude_rotater.tui.main import detail_lines
 
-        far = detail_lines(self._acc(30 * 86400), None, {}, now=time.time(), threshold=90, width=100, height=10)
-        assert "login ends" in far[1].plain and "press l" not in far[1].plain
-        soon = detail_lines(self._acc(3600), None, {}, now=time.time(), threshold=90, width=200, height=10)
-        assert "press l" in soon[1].plain
+        def login_text(acc, width):
+            lines = detail_lines(acc, None, {}, now=time.time(), threshold=90, width=width, height=20)
+            return next(line.plain for line in lines if "login" in line.plain)
+
+        far = login_text(self._acc(30 * 86400), 100)
+        assert "login ends" in far and "press l" not in far
+        assert "press l" in login_text(self._acc(3600), 200)
         dead = dataclasses.replace(self._acc(None), usage=UsageEntry(sentinel=USAGE_RELOGIN_REQUIRED))
-        lines = detail_lines(dead, None, {}, now=time.time(), threshold=90, width=200, height=10)
-        assert "re-login needed: press l" in lines[1].plain and dead.email in lines[1].plain
+        text = login_text(dead, 200)
+        assert "re-login needed: press l" in text and dead.email in text
 
 
 @pytest.mark.asyncio
@@ -1631,7 +1683,7 @@ class TestEngineHosting:
             assert fake_engine.instances[1].settings.threshold == 80.0
             assert app.threshold_pct == 80.0
             assert fake._poll_inputs_override == (80.0, ())
-            assert "thr 80%" in painted(app, "#status")
+            assert "switch at 80%" in painted(app, "#status")
             assert "ETA→80%" in painted(app, "#columns")
 
     async def test_threshold_edited_on_config_page_restarts_engine(
@@ -1749,7 +1801,7 @@ class TestEngineHosting:
         async with app.run_test(size=(120, 40)) as pilot:
             await settle(pilot)
             await pilot.pause(0.1)
-            assert "AUTO ○" in painted(app, "#status")
+            assert "auto off" in painted(app, "#status")
 
 
 class TestEventText:

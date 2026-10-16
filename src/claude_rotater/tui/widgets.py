@@ -20,10 +20,12 @@ from claude_rotater.usage_store import STALE_OK_S
 from claude_rotater.tui import data
 from claude_rotater.tui.theme import Palette
 
-_BAR_FILLED = "━"
-_BAR_HALF = "╸"
-_BAR_EMPTY = "─"
-_BAR_TICK = "┃"
+# A solid meter: the track is a background color, the fill is drawn with
+# eighth blocks so a 10-cell meter still resolves 1.25% steps. The threshold
+# shows as a thin rule on the unfilled track.
+BAR_EIGHTHS = " ▏▎▍▌▋▊▉█"
+BAR_FULL = BAR_EIGHTHS[-1]
+BAR_TICK = "▕"
 
 
 def bar_cells(
@@ -34,29 +36,28 @@ def bar_cells(
     threshold: float | None = None,
     palette: Palette = Palette.DARK,
 ) -> Text:
-    """Just the bar glyphs: severity-colored fill, track, optional tick."""
+    """Just the meter: severity-colored fill on a track, optional threshold tick."""
     text = Text()
+    track = f"on {palette.track}"
     if pct is None:
-        text.append(_BAR_EMPTY * width, style=palette.track)
+        text.append(" " * width, style=track)
         return text
-    frac = min(max(pct, 0.0), 100.0) / 100.0
-    cells = frac * width
-    full = int(cells)
-    half = (cells - full) >= 0.5 and full < width
+    eighths = round(min(max(pct, 0.0), 100.0) / 100.0 * width * 8)
+    full, part = divmod(eighths, 8)
     tick_at: int | None = None
-    if threshold is not None:
-        tick_at = min(width - 1, max(0, round(threshold / 100.0 * width)))
+    if threshold is not None and width > 0:
+        tick_at = min(width - 1, max(0, round(threshold / 100.0 * width) - 1))
     color = palette.severity(pct)
-    fill_style = f"{color} dim" if stale else color
+    fill = f"{color} dim {track}" if stale else f"{color} {track}"
     for i in range(width):
-        if tick_at is not None and i == tick_at:
-            text.append(_BAR_TICK, style=palette.sev_warn)
-        elif i < full:
-            text.append(_BAR_FILLED, style=fill_style)
-        elif i == full and half:
-            text.append(_BAR_HALF, style=fill_style)
+        if i < full:
+            text.append(BAR_FULL, style=fill)
+        elif i == full and part:
+            text.append(BAR_EIGHTHS[part], style=fill)
+        elif i == tick_at:
+            text.append(BAR_TICK, style=f"{palette.sev_warn} {track}")
         else:
-            text.append(_BAR_EMPTY, style=palette.track)
+            text.append(" ", style=track)
     return text
 
 

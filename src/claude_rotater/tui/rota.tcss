@@ -1,6 +1,7 @@
-/* rota TUI — flat, low-chrome dark layout.
-   Colors come from the registered "rota-dark" theme (theme.py); this file
-   only handles layout, spacing, and the few component states. */
+/* rota TUI: a quiet roster. One solid band on top (the header), open space
+   below, and a key strip at the bottom with no chip backgrounds.
+   Colors come from the registered rota-dark / rota-light themes (theme.py);
+   this file only handles layout, spacing, and the few component states. */
 
 Screen {
     background: $background;
@@ -61,8 +62,11 @@ Screen {
 #actions {
     height: 1;
     padding: 0 1;
+    background: $background;
 }
 
+/* Key strip: "l login  a add …", the key in the accent (markup in main.py),
+   no chip fill so the bar reads as a legend, not a toolbar. */
 #actions Button {
     border: none;
     height: 1;
@@ -70,13 +74,13 @@ Screen {
     width: auto;
     padding: 0;  /* Button's own line-pad leaves one cell each side */
     margin-right: 1;
-    background: $panel;
+    background: $background;
     color: $foreground;
     text-style: none;
 }
 
 #actions Button:hover {
-    background: $panel-lighten-1;
+    background: $surface;
 }
 
 /* -- modals ----------------------------------------------------------------- */

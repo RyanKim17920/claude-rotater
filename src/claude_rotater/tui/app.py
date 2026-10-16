@@ -45,7 +45,14 @@ from claude_rotater.snapshot_source import account_identity
 from claude_rotater.switcher import ClaudeAccountSwitcher
 from claude_rotater.tui.config import ConfigScreen
 from claude_rotater.tui.data import ActionResult, SnapshotSource, format_duration, run_action
-from claude_rotater.tui.main import AutoStatus, MainScreen
+from claude_rotater.tui import _shim  # INTEGRATION SHIM: see tui/_shim.py
+from claude_rotater.tui.main import (
+    LONG_5H_SPAN_S,
+    LONG_7D_SPAN_S,
+    AutoStatus,
+    LongTerm,
+    MainScreen,
+)
 from claude_rotater.tui.modals import AddTokenModal, ConfirmModal, OutputModal, TokenForm
 from claude_rotater.tui.theme import ROTA_DARK, ROTA_LIGHT
 from claude_rotater.usage_history import Point
@@ -101,6 +108,12 @@ class RotaApp(App):
     estimates: reactive[dict[str, AccountEstimate]] = reactive(dict, always_update=True)
     series: dict[str, dict[str, list[Point]]]
     auto_status: reactive[AutoStatus] = reactive(AutoStatus, always_update=True)
+    # "live" / "stale" / "off" for the statusline feed; "" until first read.
+    feed_state: reactive[str] = reactive("")
+    feed_installed = False
+    # The long-term view (``h``): past windows instead of the current ones.
+    long_view: reactive[bool] = reactive(False)
+    long_term: reactive[dict[str, LongTerm]] = reactive(dict, always_update=True)
 
     def __init__(
         self,
@@ -158,8 +171,9 @@ class RotaApp(App):
         self.push_screen(self.main_screen)
         self._start_engine()
         self._start_refresher()
+        # The only timer: the store read. Status text is recomputed whenever
+        # a refresh starts or lands, so it needs no clock of its own.
         self.set_interval(self.POLL_INTERVAL_S, self._tick)
-        self.set_interval(1.0, self._update_refresh_status)
         self._tick()
 
     def on_unmount(self) -> None:
@@ -333,13 +347,18 @@ class RotaApp(App):
         snap = self.source.take(full=full, store_only=store_only)
         estimates = self._estimates_for(snap)
         last_switch_at = self._read_last_switch_at()
+        feed = _shim.feed_status(self.switcher.backup_dir)
         self.call_from_thread(
-            self._apply_snapshot, generation, lane, snap, estimates, last_switch_at
+            self._apply_snapshot, generation, lane, snap, estimates, last_switch_at, feed
         )
 
     def _estimates_for(
         self, snap: AccountsSnapshot
-    ) -> tuple[dict[str, AccountEstimate], dict[str, dict[str, list[Point]]]] | None:
+    ) -> tuple[
+        dict[str, AccountEstimate],
+        dict[str, dict[str, list[Point]]],
+        dict[str, LongTerm] | None,
+    ] | None:
         """Re-read history and re-estimate, only when a fetch stamp advanced.
 
         Worker thread only. None means "unchanged, keep the cached ones".
@@ -352,7 +371,7 @@ class RotaApp(App):
             self._estimate_stamps = stamps
         history = getattr(self.switcher, "usage_history", None)
         if history is None:
-            return {}, {}
+            return {}, {}, ({} if self.long_view else None)
         identities = {acc.number: (acc.email, acc.org_uuid) for acc in snap.accounts}
         now = time.time()
         threshold = self.settings.threshold
@@ -364,10 +383,33 @@ class RotaApp(App):
                 )
                 for num in identities
             }
+            long_term = self._long_term_for(history, identities, now) if self.long_view else None
         except Exception as exc:
             self.log.warning(f"usage history unavailable: {exc}")
-            return {}, {}
-        return estimates, series
+            return {}, {}, ({} if self.long_view else None)
+        return estimates, series, long_term
+
+    @staticmethod
+    def _long_term_for(history, identities, now: float) -> dict[str, LongTerm]:
+        """Past windows per account for the long-term view. Worker thread only."""
+        out: dict[str, LongTerm] = {}
+        for num, identity in identities.items():
+            peaks = _shim.windows(history, num, identity, "5h", now - LONG_5H_SPAN_S)
+            curve = _shim.long_series(history, num, identity, "7d", now - LONG_7D_SPAN_S)
+            out[num] = LongTerm(
+                peaks_5h=tuple((w.resets_at, w.peak_pct) for w in peaks),
+                series_7d=tuple(curve),
+            )
+        return out
+
+    def toggle_long_view(self) -> None:
+        """``h``: swap the graphs between the current windows and history.
+        History is read once on the way in, then again only as polls land."""
+        self.long_view = not self.long_view
+        if self.long_view:
+            with self._estimate_lock:
+                self._estimate_stamps = None
+            self.request_refresh()
 
     def _read_last_switch_at(self) -> float | None:
         """The engine's shared ``lastSwitchAt``: covers switches made by
@@ -388,10 +430,16 @@ class RotaApp(App):
         snap: AccountsSnapshot,
         estimates=None,
         last_switch_at: float | None = None,
+        feed: "_shim.FeedStatus | None" = None,
     ) -> None:
         if estimates is not None:
             self.series = estimates[1]
             self.estimates = estimates[0]
+            if estimates[2] is not None:
+                self.long_term = estimates[2]
+        if feed is not None:
+            self.feed_installed = feed.installed
+            self.feed_state = feed.state
         status = self.auto_status
         if last_switch_at is not None and (
             status.last_switch_at is None or last_switch_at > status.last_switch_at + 1
@@ -674,6 +722,31 @@ class RotaApp(App):
     def action_refresh_full(self) -> None:
         self.request_refresh(full=True)
         self.notify("Refreshing usage…", timeout=2)
+
+    # -- statusline feed -----------------------------------------------------
+
+    def action_statusline(self) -> None:
+        """``s``: set up the statusline feed, or remove it if it is set up.
+        Always behind a confirm: it edits Claude Code's settings."""
+        if self.feed_installed:
+            message = (
+                "Remove rota from Claude Code's statusline?\n\n"
+                "rota stops receiving live usage from your sessions and polls "
+                "the active account instead. Your previous statusline is restored."
+            )
+            title, yes, fn, label = "Statusline", "Remove", _shim.uninstall_statusline, "Remove statusline feed"
+        else:
+            message = (
+                "Add rota to Claude Code's statusline?\n\n"
+                "Each response then reports the active account's usage to rota "
+                "at no API cost, so it polls less. Your current statusline keeps "
+                "showing; rota only reads what it is sent."
+            )
+            title, yes, fn, label = "Statusline", "Set up", _shim.install_statusline, "Set up statusline feed"
+        self.push_screen(
+            ConfirmModal(message, title=title, yes_label=yes),
+            lambda confirmed: self._start_action(label, fn) if confirmed else None,
+        )
 
     # -- theme --------------------------------------------------------------
 

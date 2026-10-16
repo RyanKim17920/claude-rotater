@@ -359,10 +359,15 @@ def peak_columns(
             # Inset both edges so back-to-back windows keep a blank column.
             c0, c1 = c0 + 1, c1 - 1
         eighths = round(_clamp(peak, 0.0, 100.0) / 100.0 * rows * 8)
+        # Windows that stayed under the threshold recede; the ones that
+        # crossed it (the ones that forced a switch) keep full color.
+        color = palette.severity(peak)
+        if threshold is None or peak < threshold:
+            color = f"{color} dim"
         for c in range(c0, c1 + 1):
             if eighths >= heights[c]:
                 heights[c] = eighths
-                colors[c] = palette.severity(peak)
+                colors[c] = color
 
     thr_row = None
     if threshold is not None:
