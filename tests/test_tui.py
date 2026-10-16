@@ -294,6 +294,38 @@ def fake_engine(monkeypatch):
     return FakeEngine
 
 
+class FakeRefresher:
+    """Stands in for TokenRefresher: blocks until stopped, emits on demand."""
+
+    instances: list["FakeRefresher"] = []
+
+    def __init__(self, switcher, on_event):
+        self.switcher = switcher
+        self.on_event = on_event
+        self.stopped = False
+        self._stop = threading.Event()
+        FakeRefresher.instances.append(self)
+
+    def run_loop(self) -> int:
+        self._stop.wait(30)
+        return 0
+
+    def stop(self) -> None:
+        self.stopped = True
+        self._stop.set()
+
+    def wake(self) -> None:
+        pass
+
+
+@pytest.fixture(autouse=True)
+def fake_refresher(monkeypatch):
+    """A real refresher would read credentials off the FakeSwitcher."""
+    FakeRefresher.instances = []
+    monkeypatch.setattr("claude_swap.tui.app.default_refresher_factory", FakeRefresher)
+    return FakeRefresher
+
+
 def make_app(fake: FakeSwitcher):
     from claude_swap.tui.app import CswapApp
 
@@ -307,7 +339,7 @@ async def settle(pilot) -> None:
     so waiting on it would block; wait on everything else.
     """
     app = pilot.app
-    pending = [w for w in app.workers if w.group != "engine"]
+    pending = [w for w in app.workers if w.group not in ("engine", "refresher")]
     if pending:
         await app.workers.wait_for_complete(pending)
     await pilot.pause()
@@ -1374,6 +1406,106 @@ class TestLoginAction:
             await pilot.press("l")
             await pilot.pause()
             assert FakeStage.instances == []
+
+
+class TestLoginWarning:
+    def _acc(self, expires_in, **kw):
+        return dataclasses.replace(
+            make_account(2, **kw), login_expires_at=None if expires_in is None else time.time() + expires_in
+        )
+
+    @pytest.mark.parametrize(
+        "expires_in, days, expected",
+        [
+            (None, 3, None),
+            (10 * 86400, 3, None),
+            (2.5 * 86400, 3, "login 2d"),
+            (5 * 3600 + 330, 3, "login 5h 5m"),
+            (-10, 3, "login ended"),
+            (86400, 0, None),  # warnings off
+        ],
+    )
+    def test_tag(self, expires_in, days, expected):
+        from claude_swap.tui.main import login_warning
+
+        assert login_warning(self._acc(expires_in), time.time(), days) == expected
+
+    def test_row_shows_warning_in_tag_column(self):
+        from claude_swap.tui.main import RowLayout, account_row_text
+
+        acc = self._acc(86400 + 60)
+        text = account_row_text(acc, None, RowLayout.for_width(120, ("5h", "7d")), now=time.time(), threshold=90)
+        assert "login 1d" in text.plain and "[personal]" not in text.plain
+
+    def test_row_without_warning_keeps_org_tag(self):
+        from claude_swap.tui.main import RowLayout, account_row_text
+
+        text = account_row_text(self._acc(30 * 86400), None, RowLayout.for_width(120, ("5h", "7d")),
+                                now=time.time(), threshold=90)
+        assert "[personal]" in text.plain
+
+    def test_detail_shows_login_end_and_dead_hint(self):
+        from claude_swap.json_output import USAGE_RELOGIN_REQUIRED
+        from claude_swap.tui.main import detail_lines
+
+        far = detail_lines(self._acc(30 * 86400), None, {}, now=time.time(), threshold=90, width=100, height=10)
+        assert "login ends" in far[1].plain and "press l" not in far[1].plain
+        soon = detail_lines(self._acc(3600), None, {}, now=time.time(), threshold=90, width=200, height=10)
+        assert "press l" in soon[1].plain
+        dead = dataclasses.replace(self._acc(None), usage=UsageEntry(sentinel=USAGE_RELOGIN_REQUIRED))
+        lines = detail_lines(dead, None, {}, now=time.time(), threshold=90, width=200, height=10)
+        assert "re-login needed: press l" in lines[1].plain and dead.email in lines[1].plain
+
+
+@pytest.mark.asyncio
+class TestRefresherHosting:
+    async def test_started_at_mount_stopped_at_unmount(self, tmp_path, fake_refresher):
+        fake = three_accounts(tmp_path)
+        app = make_app(fake)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await settle(pilot)
+            refresher, = fake_refresher.instances
+            assert refresher.switcher is fake and not refresher.stopped
+        assert refresher.stopped
+
+    async def test_events_reach_the_log_and_refresh(self, tmp_path, fake_refresher):
+        import asyncio
+
+        from claude_swap.token_refresh import RefreshEvent
+
+        fake = three_accounts(tmp_path)
+        app = make_app(fake)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await settle(pilot)
+            refresher, = fake_refresher.instances
+            before = len(fake.fetch_sets)
+            await asyncio.to_thread(refresher.on_event, RefreshEvent("dead", "2", "work@y.com", "invalid_grant"))
+            await asyncio.to_thread(refresher.on_event, RefreshEvent("held", "3", "old@z.com"))
+            await settle(pilot)
+            log = log_plain(app)
+            assert "account 2 (work@y.com) needs a re-login" in log
+            assert "old@z.com" not in log  # held is routine
+            assert len(fake.fetch_sets) > before
+
+    async def test_login_warn_days_setting_applies_live(self, tmp_path):
+        from claude_swap.settings import set_setting
+
+        fake = FakeSwitcher(
+            [
+                make_account(1, active=True, email="me@x.com"),
+                dataclasses.replace(make_account(2, email="w@y.com"), login_expires_at=time.time() + 5 * 86400),
+            ],
+            tmp_path,
+        )
+        app = make_app(fake)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await settle(pilot)
+            assert "login 5d" not in row_plain(app, "2")
+            set_setting(tmp_path, "ui.loginWarnDays", "7")
+            app.on_settings_changed("ui.loginWarnDays")
+            await pilot.pause()
+            assert app.login_warn_days == 7
+            assert "login 4d" in row_plain(app, "2") or "login 5d" in row_plain(app, "2")
 
 
 def test_default_factory_builds_live_engine(monkeypatch, tmp_path):

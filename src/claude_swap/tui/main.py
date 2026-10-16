@@ -53,12 +53,13 @@ if TYPE_CHECKING:
 
 _EVENT_ROLES = {
     "switch": "accent",
+    "dead": "sev_warn",  # token refresher: a login came back dead
     "error": "sev_warn",
     "account-quarantined": "sev_warn",
     "all-exhausted": "sev_crit",
 }
 # Routine engine chatter: summarized by the status line, kept out of the log.
-QUIET_KINDS = frozenset({"poll", "no-switch", "sleep", "account-unquarantined"})
+QUIET_KINDS = frozenset({"poll", "no-switch", "sleep", "account-unquarantined", "held"})
 
 
 def event_text(event: AutoSwitchEvent, *, palette: Palette = Palette.DARK) -> Text:
@@ -220,6 +221,49 @@ def header_text(layout: RowLayout, *, threshold: float | None, palette: Palette 
     return text
 
 
+def login_warning(acc: AccountSnapshot, now: float, warn_days: int) -> str | None:
+    """Short tag when the stored login lapses within ``warn_days`` (or has).
+
+    ``login 2d`` / ``login 5h 3m`` / ``login ended``; None when the end is
+    unknown, far off, or warnings are off (0 days).
+    """
+    if acc.login_expires_at is None or warn_days <= 0:
+        return None
+    remaining = acc.login_expires_at - now
+    if remaining <= 0:
+        return "login ended"
+    if remaining > warn_days * 86400:
+        return None
+    if remaining >= 86400:
+        return f"login {int(remaining // 86400)}d"
+    return f"login {data.format_duration(remaining)}"
+
+
+def login_line(
+    acc: AccountSnapshot, now: float, warn_days: int, palette: Palette
+) -> Text | None:
+    """Detail-pane line about the login itself: dead, ending soon, or its end."""
+    if acc.usage.sentinel == USAGE_RELOGIN_REQUIRED:
+        return Text(
+            f"re-login needed: press l and log in as {acc.email} "
+            "(the login page opens pre-filled; the active account is untouched)",
+            style=palette.sev_warn, no_wrap=True, overflow="ellipsis",
+        )
+    if acc.login_expires_at is None:
+        return None
+    remaining = acc.login_expires_at - now
+    clock = time.strftime("%a %d %b %H:%M", time.localtime(acc.login_expires_at))
+    if remaining <= 0:
+        msg, style = f"login ended {clock}: press l to log in again", palette.sev_warn
+    else:
+        msg = f"login ends {clock} (in {data.format_duration(remaining)})"
+        warn = login_warning(acc, now, warn_days) is not None
+        if warn:
+            msg += ": press l to log in again ahead of time"
+        style = palette.sev_warn if warn else palette.muted
+    return Text(msg, style=style, no_wrap=True, overflow="ellipsis")
+
+
 def window_pcts(acc: AccountSnapshot, models: Sequence[str]) -> dict[str, tuple[float, float | None]]:
     """label → (measured pct, resets_at epoch) for every window that gates the account."""
     return {
@@ -269,6 +313,7 @@ def account_row_text(
     threshold: float | None,
     models: Sequence[str] = (),
     palette: Palette = Palette.DARK,
+    login_warn_days: int = 3,
 ) -> Text:
     """One account on one line, laid out by ``layout``."""
     text = Text(no_wrap=True, overflow="ellipsis")
@@ -278,8 +323,12 @@ def account_row_text(
     name = f"{acc.alias} ({acc.email})" if acc.alias else acc.email
     name_style = palette.muted if acc.disabled else palette.foreground
     text.append(_fit(name, layout.name_w), style=f"bold {name_style}" if acc.is_active else name_style)
-    tag = "disabled" if acc.disabled else f"[{acc.display_tag}]"
-    text.append(" " + _fit(tag, _TAG_W - 1), style=palette.muted)
+    warning = login_warning(acc, now, login_warn_days)
+    if warning is not None and not acc.disabled:
+        text.append(" " + _fit(warning, _TAG_W - 1), style=palette.sev_warn)
+    else:
+        tag = "disabled" if acc.disabled else f"[{acc.display_tag}]"
+        text.append(" " + _fit(tag, _TAG_W - 1), style=palette.muted)
 
     sentinel = acc.usage.sentinel
     if sentinel is not None:
@@ -376,6 +425,7 @@ def detail_lines(
     height: int,
     models: Sequence[str] = (),
     palette: Palette = Palette.DARK,
+    login_warn_days: int = 3,
 ) -> list[Text]:
     """The detail pane for one account, at most ``height`` lines."""
     if acc is None or height <= 0:
@@ -385,6 +435,9 @@ def detail_lines(
     title = f"─ {acc.number} · {name}" + (f" · {binding.window} " if binding else " ")
     rule = title + "─" * max(0, width - len(title))
     lines = [Text(rule, style=palette.muted, no_wrap=True, overflow="ellipsis")]
+    login = login_line(acc, now, login_warn_days, palette)
+    if login is not None:
+        lines.append(login)
     if binding is None:
         # No history yet: the full card (bars, resets, sentinel notes) carries
         # the same facts the plot would, so the pane is never empty.
@@ -396,7 +449,7 @@ def detail_lines(
     pcts = window_pcts(acc, models)
     others = [label for label in pcts if label != binding.window]
     others += [label for label in est.windows if label != binding.window and label not in others]
-    plot_h = max(0, min(MAX_PLOT_LINES, height - 1 - len(others)))
+    plot_h = max(0, min(MAX_PLOT_LINES, height - len(lines) - len(others)))
     window_points = [p for p in series.get(binding.window, ()) if p.t <= now]
     lines.extend(
         line_plot(
@@ -603,6 +656,7 @@ class MainScreen(Screen):
             threshold=self.app.threshold_pct,
             models=self.app.models,
             palette=self.palette,
+            login_warn_days=self.app.login_warn_days,
         )
 
     def detail_text(self, width: int, height: int) -> Text:
@@ -618,6 +672,7 @@ class MainScreen(Screen):
             height=height,
             models=self.app.models,
             palette=self.palette,
+            login_warn_days=self.app.login_warn_days,
         )
         return Text("\n").join(lines)
 

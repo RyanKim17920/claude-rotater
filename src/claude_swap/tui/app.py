@@ -31,9 +31,11 @@ from claude_swap.autoswitch import STATE_FILENAME, AutoSwitchEvent
 from claude_swap.estimator import AccountEstimate, estimate_account
 from claude_swap.exceptions import LoginError
 from claude_swap.login import StagedLogin
+from claude_swap.token_refresh import RefreshEvent, TokenRefresher
 from claude_swap.models import AccountsSnapshot
 from claude_swap.settings import (
     AutoSwitchSettings,
+    UiSettings,
     load_settings,
     load_ui_settings,
     parse_model_names,
@@ -73,6 +75,11 @@ def default_engine_factory(switcher, settings, on_event) -> EngineLike:
     return AutoSwitchEngine(switcher, settings, on_event, feed=FeedIngestor(switcher))
 
 
+def default_refresher_factory(switcher, on_event) -> TokenRefresher:
+    """Keeps idle accounts' tokens fresh for as long as the app runs."""
+    return TokenRefresher(switcher, on_event=on_event)
+
+
 class CswapApp(App):
     """claude-swap interactive TUI: one main page plus the config page."""
 
@@ -102,12 +109,15 @@ class CswapApp(App):
         detected: str | None = None,
         engine_factory: EngineFactory | None = None,
         login_factory: Callable[..., StagedLogin] | None = None,
+        refresher_factory: Callable[..., TokenRefresher] | None = None,
     ) -> None:
         super().__init__()
         self.switcher = switcher
         self._detected = detected  # terminal background sensed pre-driver, or None
         self._engine_factory = engine_factory or default_engine_factory
         self._login_factory = login_factory or StagedLogin
+        self._refresher_factory = refresher_factory or default_refresher_factory
+        self.refresher: TokenRefresher | None = None
         self.engine: EngineLike | None = None
         self.source = SnapshotSource(switcher)
         self._normal_refreshing = False
@@ -123,9 +133,11 @@ class CswapApp(App):
         self._estimate_lock = threading.Lock()
         self._load_settings()
         try:
-            self._theme_name = load_ui_settings(switcher.backup_dir).theme
+            ui = load_ui_settings(switcher.backup_dir)
         except Exception:
-            self._theme_name = "auto"
+            ui = UiSettings()
+        self._theme_name = ui.theme
+        self.login_warn_days = ui.login_warn_days
         self.main_screen = MainScreen()
 
     def _load_settings(self) -> None:
@@ -145,12 +157,16 @@ class CswapApp(App):
         printer.set_theme(resolved)
         self.push_screen(self.main_screen)
         self._start_engine()
+        self._start_refresher()
         self.set_interval(self.POLL_INTERVAL_S, self._tick)
         self.set_interval(1.0, self._update_refresh_status)
         self._tick()
 
     def on_unmount(self) -> None:
         self._stop_engine()
+        refresher, self.refresher = self.refresher, None
+        if refresher is not None:
+            refresher.stop()
         try:
             self.switcher.clear_poll_policy_inputs()
         except Exception:
@@ -210,8 +226,39 @@ class CswapApp(App):
         if kind == "switch":
             self.request_refresh()
 
+    # -- proactive token refresh ----------------------------------------------
+
+    def _start_refresher(self) -> None:
+        self.refresher = self._refresher_factory(self.switcher, self._refresh_event_from_thread)
+        self.run_worker(
+            self.refresher.run_loop,
+            thread=True,
+            group="refresher",
+            exit_on_error=False,
+            name="token-refresher",
+        )
+
+    def _refresh_event_from_thread(self, event: RefreshEvent) -> None:
+        try:
+            self.call_from_thread(self._on_refresh_event, event)
+        except Exception:
+            pass  # app tearing down
+
+    def _on_refresh_event(self, event: RefreshEvent) -> None:
+        if self.main_screen.is_attached:
+            self.main_screen.write_event(event)
+        if event.kind in ("refreshed", "dead"):
+            self.request_refresh()  # login end / re-login state changed
+
     def on_settings_changed(self, dotted_key: str) -> None:
         """A setting changed on the Config page: apply it live."""
+        if dotted_key == "ui.loginWarnDays":
+            try:
+                self.login_warn_days = load_ui_settings(self.switcher.backup_dir).login_warn_days
+            except Exception:
+                return
+            self.main_screen.repaint()
+            return
         if dotted_key == "ui.theme":
             try:
                 theme = load_ui_settings(self.switcher.backup_dir).theme
@@ -423,6 +470,10 @@ class CswapApp(App):
         elif event.worker.group == "action":
             self.busy = False
             self.notify(f"Action failed: {event.worker.error}", severity="error")
+        elif event.worker.group == "refresher":
+            self.notify(
+                f"Token refresher stopped: {event.worker.error}", severity="error"
+            )
         elif event.worker.group == "engine":
             self.auto_status = replace(self.auto_status, running=False)
             self.notify(
