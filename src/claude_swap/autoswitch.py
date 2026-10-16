@@ -630,6 +630,86 @@ def _headroom_by_account(
     }
 
 
+# State-lock paths the current thread holds. A manual switch notes itself in
+# the engine state under that lock; when the "manual" switch is in fact the
+# engine's own (``_perform`` holds the lock across ``switch_to``), retaking
+# it from the same thread would self-deadlock on flock, and the engine is
+# about to stamp the switch itself anyway.
+_held_state_locks = threading.local()
+
+
+def _held_paths() -> set[str]:
+    paths = getattr(_held_state_locks, "paths", None)
+    if paths is None:
+        paths = _held_state_locks.paths = set()
+    return paths
+
+
+def _lock_key(lock_path: Path) -> str:
+    return str(Path(lock_path).resolve())
+
+
+class _StateLock(FileLock):
+    """The engine-state file lock, recording that this thread holds it."""
+
+    def acquire(self, timeout: float | None = None) -> bool:
+        acquired = super().acquire(timeout)
+        if acquired:
+            _held_paths().add(_lock_key(self.lock_path))
+        return acquired
+
+    def release(self) -> None:
+        _held_paths().discard(_lock_key(self.lock_path))
+        super().release()
+
+
+def state_lock_for(state_path: Path) -> FileLock:
+    return _StateLock(state_path.parent / ".autoswitch_state.lock")
+
+
+def note_manual_switch(
+    backup_dir: Path,
+    to_number: str,
+    *,
+    clock: Callable[[], float] = time.time,
+) -> bool:
+    """Stamp a user-initiated switch into the shared engine state.
+
+    Sets ``lastSwitchAt`` so every engine sharing the state file (TUI,
+    ``cswap auto``, menu bar) holds off proactive switching for its cooldown
+    instead of bouncing straight back off the account the user just chose.
+    Failover still ignores the cooldown, as it does after an engine switch.
+    ``lastSwitchTo`` becomes the chosen slot and the engine's no-return
+    memory (``lastSwitchFrom`` and its departure snapshot) is dropped: it
+    described a move the user has now overridden.
+
+    Returns False without writing when this thread already holds the state
+    lock (the switch is the engine's own, which records itself), or when the
+    lock cannot be taken. Never raises.
+    """
+    state_path = backup_dir / STATE_FILENAME
+    lock = state_lock_for(state_path)
+    if _lock_key(lock.lock_path) in _held_paths():
+        return False
+    try:
+        with lock:
+            try:
+                raw = json.loads(state_path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+                raw = {}
+            state = raw if isinstance(raw, dict) else {}
+            state["schemaVersion"] = STATE_SCHEMA_VERSION
+            state["lastSwitchAt"] = clock()
+            state["lastSwitchTo"] = str(to_number)
+            for key in ("lastSwitchFrom", "leftHeadroom", "leftRecoveryAt", "leftTrigger"):
+                state.pop(key, None)
+            atomic_write_json(state_path, state)
+        return True
+    except Exception as e:
+        _logger.warning(f"Could not record manual switch for the auto engine: {e!r}")
+        return False
+
+
 class AutoSwitchEngine:
     """Threshold-policy auto-switcher over a :class:`ClaudeAccountSwitcher`.
 
@@ -688,7 +768,7 @@ class AutoSwitchEngine:
     # -- state file ---------------------------------------------------------
 
     def _state_lock(self) -> FileLock:
-        return FileLock(self.state_path.parent / ".autoswitch_state.lock")
+        return state_lock_for(self.state_path)
 
     def _read_state(self) -> dict:
         try:

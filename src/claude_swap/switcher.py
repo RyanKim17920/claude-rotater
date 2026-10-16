@@ -5362,6 +5362,23 @@ class ClaudeAccountSwitcher:
             )
         return plans
 
+    def _note_manual_switch(self, number: str, from_ref: dict | None) -> None:
+        """Start the auto engine's cooldown after a user-initiated switch.
+
+        Every switch reaches here through ``_perform_switch``; the engine's
+        own switches are recognized inside ``note_manual_switch`` (it holds
+        the state lock across them) and recorded by the engine instead. A
+        self-reactivation (same slot) is not a switch and stamps nothing.
+        Best effort: the switch has already committed."""
+        if from_ref is not None and str(from_ref.get("number")) == str(number):
+            return
+        try:
+            from claude_swap.autoswitch import note_manual_switch
+
+            note_manual_switch(self.backup_dir, number, clock=self._usage_store.clock)
+        except Exception as e:
+            self._logger.warning(f"Manual switch cooldown note failed: {e!r}")
+
     def _replan_new_active(self, number: str, email: str, org_uuid: str) -> None:
         """Pull the just-activated account's poll plan to the active floor.
 
@@ -7163,6 +7180,7 @@ class ClaudeAccountSwitcher:
                     target_email,
                     data["accounts"][target_account].get("organizationUuid", ""),
                 )
+                self._note_manual_switch(target_account, from_ref)
                 return {"from": from_ref, "to": to_ref, "warnings": warnings_out}
 
             current_email, _ = current_identity
@@ -7429,6 +7447,7 @@ class ClaudeAccountSwitcher:
             target_email,
             data["accounts"][target_account].get("organizationUuid", ""),
         )
+        self._note_manual_switch(target_account, from_ref)
         return {"from": from_ref, "to": to_ref, "warnings": warnings_out}
 
     def _print_switch_followup(self) -> None:
