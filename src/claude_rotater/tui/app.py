@@ -29,7 +29,8 @@ from textual.worker import WorkerState
 from claude_rotater import printer
 from claude_rotater.autoswitch import STATE_FILENAME, AutoSwitchEvent
 from claude_rotater.estimator import AccountEstimate, estimate_account
-from claude_rotater.exceptions import LoginError
+from claude_rotater import statusline_setup
+from claude_rotater.exceptions import ClaudeSwitchError, LoginError
 from claude_rotater.login import StagedLogin
 from claude_rotater.token_refresh import RefreshEvent, TokenRefresher
 from claude_rotater.models import AccountsSnapshot
@@ -45,7 +46,6 @@ from claude_rotater.snapshot_source import account_identity
 from claude_rotater.switcher import ClaudeAccountSwitcher
 from claude_rotater.tui.config import ConfigScreen
 from claude_rotater.tui.data import ActionResult, SnapshotSource, format_duration, run_action
-from claude_rotater.tui import _shim  # INTEGRATION SHIM: see tui/_shim.py
 from claude_rotater.tui.main import (
     LONG_5H_SPAN_S,
     LONG_7D_SPAN_S,
@@ -111,6 +111,8 @@ class RotaApp(App):
     # "live" / "stale" / "off" for the statusline feed; "" until first read.
     feed_state: reactive[str] = reactive("")
     feed_installed = False
+    # "not-installed" / "installed" / "foreign" (someone else's statusline).
+    feed_install = statusline_setup.NOT_INSTALLED
     # The long-term view (``h``): past windows instead of the current ones.
     long_view: reactive[bool] = reactive(False)
     long_term: reactive[dict[str, LongTerm]] = reactive(dict, always_update=True)
@@ -347,7 +349,7 @@ class RotaApp(App):
         snap = self.source.take(full=full, store_only=store_only)
         estimates = self._estimates_for(snap)
         last_switch_at = self._read_last_switch_at()
-        feed = _shim.feed_status(self.switcher.backup_dir)
+        feed = statusline_setup.status(self.switcher.backup_dir)
         self.call_from_thread(
             self._apply_snapshot, generation, lane, snap, estimates, last_switch_at, feed
         )
@@ -384,7 +386,7 @@ class RotaApp(App):
                 for num in identities
             }
             long_term = (
-                self._long_term_for(history, identities, series, now) if self.long_view else None
+                self._long_term_for(history, identities, now) if self.long_view else None
             )
         except Exception as exc:
             self.log.warning(f"usage history unavailable: {exc}")
@@ -396,17 +398,12 @@ class RotaApp(App):
         return {num: LongTerm() for num in identities} if self.long_view else None
 
     @staticmethod
-    def _long_term_for(history, identities, series, now: float) -> dict[str, LongTerm]:
+    def _long_term_for(history, identities, now: float) -> dict[str, LongTerm]:
         """Past windows per account for the long-term view. Worker thread only."""
         out: dict[str, LongTerm] = {}
         for num, identity in identities.items():
-            loaded = series.get(num, {})
-            peaks = _shim.windows(
-                history, num, identity, "5h", now - LONG_5H_SPAN_S, preloaded=loaded
-            )
-            curve = _shim.long_series(
-                history, num, identity, "7d", now - LONG_7D_SPAN_S, preloaded=loaded
-            )
+            peaks = history.windows(identity, "5h", now - LONG_5H_SPAN_S)
+            curve = history.long_series(identity, "7d", now - LONG_7D_SPAN_S)
             out[num] = LongTerm(
                 peaks_5h=tuple((w.resets_at, w.peak_pct) for w in peaks),
                 series_7d=tuple(curve),
@@ -441,7 +438,7 @@ class RotaApp(App):
         snap: AccountsSnapshot,
         estimates=None,
         last_switch_at: float | None = None,
-        feed: "_shim.FeedStatus | None" = None,
+        feed: statusline_setup.StatuslineStatus | None = None,
     ) -> None:
         if estimates is not None:
             self.series = estimates[1]
@@ -450,6 +447,7 @@ class RotaApp(App):
                 self.long_term = estimates[2]
         if feed is not None:
             self.feed_installed = feed.installed
+            self.feed_install = feed.install
             self.feed_state = feed.state
         status = self.auto_status
         if last_switch_at is not None and (
@@ -745,19 +743,33 @@ class RotaApp(App):
                 "rota stops receiving live usage from your sessions and polls "
                 "the active account instead. Your previous statusline is restored."
             )
-            title, yes, fn, label = "Statusline", "Remove", _shim.uninstall_statusline, "Remove statusline feed"
+            yes, setup, label = "Remove", statusline_setup.uninstall, "Remove statusline feed"
         else:
+            if self.feed_install == statusline_setup.FOREIGN:
+                keeps = (
+                    "Your current statusline keeps showing: rota wraps it and "
+                    "only reads what it is sent."
+                )
+            else:
+                keeps = "rota shows a minimal statusline of its own."
             message = (
                 "Add rota to Claude Code's statusline?\n\n"
                 "Each response then reports the active account's usage to rota "
-                "at no API cost, so it polls less. Your current statusline keeps "
-                "showing; rota only reads what it is sent."
+                f"at no API cost, so it polls less. {keeps}"
             )
-            title, yes, fn, label = "Statusline", "Set up", _shim.install_statusline, "Set up statusline feed"
+            yes, setup, label = "Set up", statusline_setup.install, "Set up statusline feed"
+        fn = partial(self._statusline_change, setup)
         self.push_screen(
-            ConfirmModal(message, title=title, yes_label=yes),
+            ConfirmModal(message, title="Statusline", yes_label=yes),
             lambda confirmed: self._start_action(label, fn) if confirmed else None,
         )
+
+    def _statusline_change(self, setup) -> None:
+        """Run an install/uninstall; its failure is shown like any action's."""
+        try:
+            setup(self.switcher.backup_dir)
+        except statusline_setup.StatuslineSetupError as exc:
+            raise ClaudeSwitchError(f"Claude Code's settings were not changed: {exc}") from exc
 
     # -- theme --------------------------------------------------------------
 

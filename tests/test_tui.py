@@ -335,14 +335,6 @@ def fake_refresher(monkeypatch):
     return FakeRefresher
 
 
-@pytest.fixture(autouse=True)
-def no_real_statusline(monkeypatch):
-    """The statusline shim must never reach a real statusline_setup module
-    (it reads Claude Code's settings): tests see only the feed-file fallback
-    or an explicit fake."""
-    monkeypatch.setattr("claude_rotater.tui._shim._setup_module", lambda: None)
-
-
 def make_app(fake: FakeSwitcher):
     from claude_rotater.tui.app import RotaApp
 
@@ -2143,14 +2135,30 @@ class TestLongTermView:
 
 @pytest.mark.asyncio
 class TestStatuslineKey:
-    def _calls(self, monkeypatch, status):
-        from claude_rotater.tui import _shim
+    """Real ``statusline_setup`` against the isolated test ``$HOME``: the
+    settings file it edits is ``$HOME/.claude/settings.json`` of the test."""
 
-        calls: list[str] = []
-        monkeypatch.setattr(_shim, "feed_status", lambda backup_dir, now=None: status)
-        monkeypatch.setattr(_shim, "install_statusline", lambda: calls.append("install"))
-        monkeypatch.setattr(_shim, "uninstall_statusline", lambda: calls.append("uninstall"))
+    def _status(self, install: str, state: str):
+        from claude_rotater import statusline_setup
+
+        return statusline_setup.StatuslineStatus(
+            install, state, Path("settings.json"), None, None
+        )
+
+    def _calls(self, monkeypatch, status):
+        from claude_rotater import statusline_setup
+
+        calls: list[tuple[str, object]] = []
+        monkeypatch.setattr(statusline_setup, "status", lambda backup_dir=None, now=None: status)
+        monkeypatch.setattr(statusline_setup, "install", lambda d=None: calls.append(("install", d)))
+        monkeypatch.setattr(statusline_setup, "uninstall", lambda d=None: calls.append(("uninstall", d)))
         return calls
+
+    @staticmethod
+    def _settings() -> Path:
+        from claude_rotater import statusline_setup
+
+        return statusline_setup.settings_path()
 
     async def test_header_shows_feed_off_without_a_feed(self, tmp_path):
         app = make_app(three_accounts(tmp_path))
@@ -2159,8 +2167,10 @@ class TestStatuslineKey:
             assert "○ feed off" in painted(app, "#status")
 
     async def test_header_shows_live_feed_from_feed_file(self, tmp_path):
-        from claude_rotater import feed
+        from claude_rotater import feed, statusline_setup
 
+        assert self._settings().is_relative_to(Path.home())  # never the real one
+        statusline_setup.install(tmp_path)
         path = Path(feed.feed_path(tmp_path))
         path.parent.mkdir(parents=True)
         path.write_text("{}\n")
@@ -2170,10 +2180,9 @@ class TestStatuslineKey:
             assert "● feed live" in painted(app, "#status")
 
     async def test_s_confirms_then_installs(self, tmp_path, monkeypatch):
-        from claude_rotater.tui import _shim
         from claude_rotater.tui.modals import ConfirmModal
 
-        calls = self._calls(monkeypatch, _shim.FeedStatus("off", False))
+        calls = self._calls(monkeypatch, self._status("not-installed", "off"))
         app = make_app(three_accounts(tmp_path))
         async with app.run_test(size=(120, 40)) as pilot:
             await settle(pilot)
@@ -2187,13 +2196,12 @@ class TestStatuslineKey:
             await pilot.pause()
             await pilot.press("y")
             await settle(pilot)
-            assert calls == ["install"]
+            assert calls == [("install", tmp_path)]
 
     async def test_s_when_installed_offers_removal(self, tmp_path, monkeypatch):
-        from claude_rotater.tui import _shim
         from claude_rotater.tui.modals import ConfirmModal
 
-        calls = self._calls(monkeypatch, _shim.FeedStatus("stale", True))
+        calls = self._calls(monkeypatch, self._status("installed", "stale"))
         app = make_app(three_accounts(tmp_path))
         async with app.run_test(size=(120, 40)) as pilot:
             await settle(pilot)
@@ -2203,18 +2211,62 @@ class TestStatuslineKey:
             assert isinstance(app.screen, ConfirmModal)
             await pilot.press("y")
             await settle(pilot)
-            assert calls == ["uninstall"]
+            assert calls == [("uninstall", tmp_path)]
 
-    async def test_install_failure_is_shown_not_raised(self, tmp_path, monkeypatch):
+    async def test_install_failure_is_shown_not_raised(self, tmp_path):
         from claude_rotater.tui.modals import OutputModal
 
-        # No real module: the shim refuses, and the app reports it.
+        settings = self._settings()
+        settings.parent.mkdir(parents=True, exist_ok=True)
+        settings.write_text("{not json")
         app = make_app(three_accounts(tmp_path))
         async with app.run_test(size=(120, 40)) as pilot:
             await settle(pilot)
             await pilot.press("s", "y")
             await settle(pilot)
             assert isinstance(app.screen, OutputModal)
+            shown = " ".join(str(w.render()) for w in app.screen.query("Static"))
+            assert "were not changed" in shown and "not valid JSON" in shown
+            assert not app.busy
+        assert settings.read_text() == "{not json"
+
+    async def test_s_installs_and_removes_for_real(self, tmp_path):
+        from claude_rotater import statusline_setup
+
+        app = make_app(three_accounts(tmp_path))
+        async with app.run_test(size=(120, 40)) as pilot:
+            await settle(pilot)
+            await pilot.press("s", "y")
+            await settle(pilot)
+            assert statusline_setup.status(tmp_path).installed
+            assert app.feed_installed and app.feed_state == "stale"
+            assert "◐ feed stale" in painted(app, "#status")
+            await pilot.press("s", "y")
+            await settle(pilot)
+            assert not app.feed_installed and app.feed_state == "off"
+        assert "statusLine" not in json.loads(self._settings().read_text())
+
+    async def test_foreign_statusline_is_wrapped_and_restored(self, tmp_path):
+        from claude_rotater.tui.modals import ConfirmModal
+
+        settings = self._settings()
+        settings.parent.mkdir(parents=True, exist_ok=True)
+        original = {"statusLine": {"type": "command", "command": "my-line --x"}}
+        settings.write_text(json.dumps(original))
+        app = make_app(three_accounts(tmp_path))
+        async with app.run_test(size=(120, 40)) as pilot:
+            await settle(pilot)
+            assert app.feed_install == "foreign"
+            await pilot.press("s")
+            await pilot.pause()
+            assert isinstance(app.screen, ConfirmModal)
+            assert "rota wraps it" in app.screen._message
+            await pilot.press("y")
+            await settle(pilot)
+            assert app.feed_install == "installed"
+            await pilot.press("s", "y")
+            await settle(pilot)
+        assert json.loads(settings.read_text()) == original
 
 
 @pytest.mark.asyncio
