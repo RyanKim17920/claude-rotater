@@ -43,7 +43,7 @@ import math
 import os
 import re
 import sys
-from dataclasses import dataclass
+from typing import NamedTuple
 
 FEED_DIRNAME = "feed"  # under <backup>/cache: throwaway, never blocks migration
 FEED_FILENAME = "statusline.jsonl"
@@ -292,8 +292,7 @@ def append_record(path: str, record: dict, max_bytes: int = MAX_FEED_BYTES) -> N
 # -- reading ------------------------------------------------------------------
 
 
-@dataclass(frozen=True)
-class FeedCursor:
+class FeedCursor(NamedTuple):
     """Where a reader stopped: the file's identity and the byte after the
     last complete line consumed."""
 

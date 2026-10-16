@@ -22,12 +22,12 @@ References:
 
 from __future__ import annotations
 
-import hashlib
 import os
 import stat
 from pathlib import Path
 
-from claude_rotater.models import Platform
+# hashlib and claude_rotater.models are imported where used: `rota feed`
+# imports this module on every statusline refresh and needs neither.
 
 DATA_DIRNAME = ".rota"
 DATA_HOME_ENV = "ROTA_HOME"
@@ -140,6 +140,8 @@ def backup_keychain_service(backup_root: Path) -> str:
         _normalized(get_default_backup_root())
     ):
         return KEYCHAIN_SERVICE_BASE
+    import hashlib
+
     digest = hashlib.sha256(normalized.encode("utf-8")).hexdigest()[:8]
     return f"{KEYCHAIN_SERVICE_BASE}-{digest}"
 
@@ -153,6 +155,8 @@ def get_legacy_backup_roots() -> list[Path]:
     ``~/.claude-swap-backup``. ``$XDG_DATA_HOME`` is ignored when unset,
     empty, or non-absolute, as upstream did.
     """
+    from claude_rotater.models import Platform
+
     roots: list[Path] = []
     if Platform.detect() in (Platform.LINUX, Platform.WSL):
         xdg = os.environ.get("XDG_DATA_HOME", "")
