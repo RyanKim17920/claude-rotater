@@ -1680,8 +1680,8 @@ class CredentialStore:
         serialized.
 
         Losing a row is not cosmetic: ``_adopt_stashed_successor`` iterates
-        manifest rows only, so a row-less entry can never be adopted, while
-        ``_list_unclaimed_credentials``' glob keeps listing its bytes forever.
+        manifest rows only, so a row-less entry can never be adopted while
+        its bytes stay on disk forever.
 
         This raises on failure -- ``LockError`` on a lock timeout, ``OSError``
         from ``_write_stash_manifest``'s ``atomic_write_json`` (full disk,
@@ -1751,17 +1751,6 @@ class CredentialStore:
         }
         self._mutate_stash_manifest(lambda entries: entries.update({entry_id: row}))
         return entry_id
-
-    def _list_unclaimed_credentials(self) -> dict[str, dict]:
-        """Manifest entries by id, including orphaned entry files (no metadata)."""
-        entries = dict(self._read_stash_manifest())
-        try:
-            for path in self._host.credentials_dir.glob(".unclaimed-*.enc"):
-                entry_id = path.name[len(".unclaimed-"):-len(".enc")]
-                entries.setdefault(entry_id, {"createdAt": None})
-        except OSError:
-            pass
-        return entries
 
     def _read_unclaimed_credential(self, entry_id: str) -> tuple[str, bool]:
         """Decode one stashed credential's bytes.

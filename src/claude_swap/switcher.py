@@ -1765,9 +1765,9 @@ class ClaudeAccountSwitcher:
             # and proceeding lets ``_write_stash_manifest`` set the bad file
             # aside — the only repair, and it only runs on a write.
             #
-            # Fail-closed still has an exit: ``_list_unclaimed_credentials``
-            # globs the entry files, so `cswap unclaimed` lists the orphans by
-            # id and `--purge` drops them even with the manifest unreadable.
+            # Fail-closed still has an exit, by hand: the entry files sit in
+            # the credentials directory as ``.unclaimed-<id>.enc``, and
+            # removing them (or repairing the manifest) lets adoption resume.
             raise CredentialReadError(
                 f"the unclaimed manifest is {manifest_verdict} and stashed "
                 f"entry files exist; deferring account {account_num}'s "

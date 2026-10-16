@@ -38,6 +38,7 @@ from claude_swap.usage_store import FetchRecord, UsageEntry
 from claude_swap.models import Platform
 from claude_swap.settings import AutoSwitchSettings
 from claude_swap.switcher import ClaudeAccountSwitcher
+from tests._stash import unclaimed_entries
 
 
 class FakeClock:
@@ -2706,7 +2707,7 @@ class TestTokenIdentity:
         q = harness.state().get("quarantine", {})
         assert q.get("2", {}).get("reason") == "invalid_grant"
         # The safety copy was not consumed, and the switch landed elsewhere.
-        assert len(harness.switcher._store._list_unclaimed_credentials()) == 1
+        assert len(unclaimed_entries(harness.switcher._store)) == 1
         assert outcome is TickOutcome.SWITCHED
         assert harness.active_number() == 3
 
