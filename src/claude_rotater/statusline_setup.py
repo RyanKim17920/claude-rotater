@@ -188,9 +188,18 @@ def _backup(path: Path, raw: str | None, backup_dir: Path | None) -> Path | None
         return None
     directory = _backup_root(backup_dir) / BACKUP_DIRNAME
     directory.mkdir(parents=True, exist_ok=True)
+    # Names sort oldest first: a readable stamp, then the full nanosecond
+    # clock (macOS only ticks in microseconds, so two backups in one tick
+    # take the next free name instead of colliding).
     stamp = time.strftime("%Y%m%dT%H%M%S")
-    target = directory / f"settings.{stamp}.{time.time_ns() % 1_000_000:06d}.json"
-    fd = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    ns = time.time_ns()
+    while True:
+        target = directory / f"settings.{stamp}.{ns:020d}.json"
+        try:
+            fd = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            break
+        except FileExistsError:
+            ns += 1
     with os.fdopen(fd, "w", encoding="utf-8") as handle:
         handle.write(raw)
     for old in sorted(directory.glob("settings.*.json"))[:-MAX_BACKUPS]:

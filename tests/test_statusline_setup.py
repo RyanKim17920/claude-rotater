@@ -234,6 +234,24 @@ class TestCareWithUserFiles:
             ss.uninstall(data)
         assert len(list((data / ss.BACKUP_DIRNAME).iterdir())) == ss.MAX_BACKUPS
 
+    def test_backups_in_one_clock_tick_do_not_collide_and_keep_the_newest(
+        self, env, monkeypatch
+    ):
+        path, data = env
+        # A microsecond clock read twice per tick, as on macOS.
+        reads = iter(range(10_000))
+        monkeypatch.setattr(
+            ss.time, "time_ns", lambda: 1_700_000_000_000_000_000 + next(reads) // 2 * 1000
+        )
+        for i in range(ss.MAX_BACKUPS + 2):
+            write_settings(path, {**ORIGINAL, "n": i})
+            ss.install(data)
+            ss.uninstall(data)
+        kept = sorted((data / ss.BACKUP_DIRNAME).iterdir())
+        assert len(kept) == ss.MAX_BACKUPS
+        assert json.loads(kept[-1].read_text())["n"] == ss.MAX_BACKUPS + 1
+        assert all(json.loads(k.read_text())["n"] > 0 for k in kept)
+
     def test_write_failure_raises_and_leaves_the_file(self, env, monkeypatch):
         path, data = env
         before = write_settings(path, ORIGINAL)
