@@ -303,7 +303,7 @@ class TestSetUnsetSetting:
         assert load_settings(tmp_path).model == "Fable"
 
     def test_set_string_kind_rejects_empty(self, tmp_path: Path):
-        with pytest.raises(ConfigError, match="unset"):
+        with pytest.raises(ConfigError, match=r"ctrl\+r"):
             set_setting(tmp_path, "autoswitch.model", "   ")
         assert not settings_path(tmp_path).exists()
 

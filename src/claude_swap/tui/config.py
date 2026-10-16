@@ -15,7 +15,7 @@ grouped under the ``SETTING_GROUPS`` headings, and the keys are:
 - esc (or c / q while not editing): back to the main page.
 
 Every change is written at once through ``set_setting`` / ``unset_setting``
-(the same path as ``cswap config set``); a value equal to the default is
+(the shared validated writers in settings.py); a value equal to the default is
 stored by removing the key, so the file only holds what differs. The screen
 then posts ``ConfigScreen.SettingChanged`` so the host app can react
 (restart the engine, apply the theme). Those notifications are debounced per

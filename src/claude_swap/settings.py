@@ -85,7 +85,7 @@ class SettingSpec:
     """Metadata for one user-tunable settings.json key.
 
     Single source of truth for bounds/choices: both the lenient clamp on load
-    (`_clamped`) and the strict validation in `cswap config set`
+    (`_clamped`) and the strict validation on the TUI config page
     (`parse_setting_value`) read from here, so the two can't drift.
     """
 
@@ -364,7 +364,7 @@ _BOOL_WORDS = {
 
 
 def parse_setting_value(spec: SettingSpec, raw_value: str):
-    """Strictly parse a CLI-provided string for `cswap config set`.
+    """Strictly parse a string typed on the TUI config page.
 
     Unlike the forgiving clamp on load, out-of-range or mistyped values raise
     ConfigError so the user learns about the problem when setting the value,
@@ -389,8 +389,8 @@ def parse_setting_value(spec: SettingSpec, raw_value: str):
         value = raw_value.strip()
         if not value:
             raise ConfigError(
-                f"{spec.dotted} expects a non-empty value; use "
-                f"'cswap config unset {spec.dotted}' to clear it"
+                f"{spec.dotted} expects a non-empty value; press ctrl+r on "
+                "cswap's config page (c) to clear it"
             )
         return value
     try:
@@ -448,7 +448,7 @@ def _read_raw_for_write(path: Path) -> dict:
 
 
 def set_setting(backup_root: Path, dotted_key: str, raw_value: str):
-    """Validate and persist one key for `cswap config set`; returns the value.
+    """Validate and persist one key from the TUI config page; returns the value.
 
     Writes only the given key (plus schemaVersion) — deliberately not
     ``save_settings``, which writes every known key and would freeze the
@@ -489,7 +489,7 @@ def effective_settings(backup_root: Path) -> list[tuple[SettingSpec, object, boo
     """(spec, effective value, explicitly set?) per key, in registry order.
 
     "Set" means the key is present in the raw file — an explicit value equal
-    to the default still counts — so `cswap config`'s "(default)" marker
+    to the default still counts — so the config page's "(default)" marker
     reflects the file, not value equality.
     """
     raw = _read_raw(settings_path(backup_root))
