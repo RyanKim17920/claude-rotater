@@ -38,7 +38,6 @@ from claude_swap.json_output import (
     USAGE_RELOGIN_REQUIRED,
     USAGE_TOKEN_EXPIRED,
     account_ref,
-    account_row,
     last_good_usage_fields,
     usage_failure_fields,
     usage_fields,
@@ -1841,9 +1840,9 @@ class ClaudeAccountSwitcher:
                 # (undecodable) -- either way the bytes are permanently gone,
                 # not merely inaccessible right now, so nothing can ever
                 # adopt this row. Retire it now: left alone it is rescanned
-                # on every gate pass and leaks in --json's
-                # unclaimedCredentials forever, the same accumulation the
-                # CAS-conflict branch above already retires on sight.
+                # on every gate pass and accumulates in the stash forever,
+                # the same buildup the CAS-conflict branch above already
+                # retires on sight.
                 self._retire_stash_entry(entry_id, account_num)
                 self._logger.info(
                     "Retired account %s's unreadable-bytes stash entry: its "
@@ -4819,90 +4818,20 @@ class ClaudeAccountSwitcher:
                 seen[key] = snum
         return out
 
-    def _build_list_payload(
-        self,
-        accounts_info: list[tuple[int, str, str, str, bool, str, str]],
-        entries: dict[str, UsageEntry],
-    ) -> dict:
-        """Build the ``--list --json`` payload from gathered account + usage data."""
-        active_num: int | None = None
-        accounts = []
-        seq_data = self._get_sequence_data() or {}
-        now = self._usage_store.clock()
-        for num, email, org_name, org_uuid, is_active, creds, alias in accounts_info:
-            if is_active:
-                active_num = num
-            entry = entries[str(num)]
-            # JSON carries the decision-grade value: last-good only while it is
-            # recent enough to act on (≤ STALE_OK_S), else unavailable. Showing
-            # older measurements is a human-display affordance only — scripts
-            # keying on usageStatus == "ok" must not act on arbitrarily old data.
-            accounts.append(
-                account_row(
-                    num, email, org_name, org_uuid, is_active,
-                    entry.decision_value(),
-                    usage_fetched_at=entry.fetched_at,
-                    usage_age_s=entry.age_s,
-                    last_good_usage=entry.last_good,
-                    last_error=entry.last_error,
-                    backoff_until=(
-                        entry.backoff_until if entry.in_backoff(now) else None
-                    ),
-                    alias=alias,
-                    disabled=self._disabled_from_data(seq_data, str(num)),
-                    login_expires_at=oauth.login_expires_at_iso(creds),
-                )
-            )
-        payload = {
-            "schemaVersion": SCHEMA_VERSION,
-            "activeAccountNumber": active_num,
-            "accounts": accounts,
-        }
-        # Additive fields (absent when clean) — never printed warnings; the
-        # JSON contract keeps stdout a single machine-readable object.
-        dup_warnings = self._duplicate_account_warnings(accounts_info)
-        if dup_warnings:
-            payload["duplicateAccountWarnings"] = dup_warnings
-        lockstep_warnings = self._lockstep_usage_warnings(accounts_info, entries)
-        if lockstep_warnings:
-            payload["lockstepUsageWarnings"] = lockstep_warnings
-        unclaimed = self._store._list_unclaimed_credentials()
-        if unclaimed:
-            payload["unclaimedCredentials"] = sorted(unclaimed)
-        return payload
-
-    def list_accounts(
-        self,
-        json_output: bool = False,
-        fetch: set[str] | None = None,
-    ) -> dict | None:
-        """List all managed accounts.
-
-        In ``json_output`` mode, returns the schema-v1 payload (printing nothing)
-        for the CLI to serialize; otherwise prints the human view and returns None.
+    def list_accounts(self, fetch: set[str] | None = None) -> None:
+        """Print the human view of all managed accounts.
 
         ``fetch`` restricts which accounts *may* be fetched this pass (the TUI
         watch view's adaptive set); ``None`` — the CLI default — leaves every
         stale account eligible.
         """
         if not self.sequence_file.exists():
-            # JSON mode must never prompt — emit an empty list instead of the
-            # interactive first-run setup.
-            if json_output:
-                return {
-                    "schemaVersion": SCHEMA_VERSION,
-                    "activeAccountNumber": None,
-                    "accounts": [],
-                }
             print(dimmed("No accounts are managed yet."))
             self._first_run_setup()
             return None
 
         accounts_info = self._build_accounts_info()
         entries = self._collect_usage_entries(accounts_info, fetch=fetch)
-
-        if json_output:
-            return self._build_list_payload(accounts_info, entries)
 
         seq_data = self._get_sequence_data() or {}
         print(bolded("Accounts:"))
@@ -4921,9 +4850,9 @@ class ClaudeAccountSwitcher:
                 print()
 
         # Safety copies (unclaimed credentials) are deliberately NOT surfaced
-        # here: users can't act on them (recovery is always /login + cswap
-        # add), and with no GC a one-time event would nag forever. They stay
-        # in the JSON payload and logs for diagnostics.
+        # here: users can't act on them (recovery is always /login plus a
+        # re-add from the TUI), and with no GC a one-time event would nag
+        # forever. They stay in the logs for diagnostics.
         dup_warnings = self._duplicate_account_warnings(accounts_info)
         lockstep_warnings = self._lockstep_usage_warnings(accounts_info, entries)
         if dup_warnings or lockstep_warnings:

@@ -302,59 +302,6 @@ def last_good_usage_fields(
     return out
 
 
-def account_row(
-    number: int,
-    email: str,
-    org_name: str,
-    org_uuid: str,
-    active: bool,
-    usage_entry: dict | str | None,
-    *,
-    usage_fetched_at: float | None = None,
-    usage_age_s: float | None = None,
-    last_good_usage: dict | None = None,
-    last_error: str | None = None,
-    backoff_until: float | None = None,
-    alias: str = "",
-    disabled: bool = False,
-    login_expires_at: str | None = None,
-) -> dict:
-    """A full account row for ``--list``. ``backoff_until`` is the live
-    backoff only; a lapsed one is the caller's to withhold."""
-    status, usage = usage_fields(usage_entry, usage_fetched_at)
-    row = {
-        "number": number,
-        "email": email,
-        "organizationName": org_name,
-        "organizationUuid": org_uuid,
-        "isOrganization": bool(org_uuid),
-        "active": active,
-        "usageStatus": status,
-        "usage": usage,
-    }
-    if alias:
-        row["alias"] = alias
-    # Additive field: present only when the slot is held out of rotation, so
-    # existing consumers keying on the base schema are unaffected.
-    if disabled:
-        row["disabled"] = True
-    # Additive field: when the stored login records the expiry of its refresh
-    # token (see ``oauth.login_expires_at_iso``), scripts can warn ahead of the
-    # ``relogin_required`` that follows; absent when the login carries none.
-    if login_expires_at:
-        row["loginExpiresAt"] = login_expires_at
-    if usage is not None:
-        row.update(usage_freshness_fields(usage_fetched_at, usage_age_s))
-    else:
-        row.update(
-            last_good_usage_fields(
-                last_good_usage, usage_fetched_at, usage_age_s
-            )
-        )
-        row.update(usage_failure_fields(status, last_error, backoff_until))
-    return row
-
-
 def error_envelope(exc: Exception) -> dict:
     """The structured error payload emitted on a handled ClaudeSwitchError."""
     return {

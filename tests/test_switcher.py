@@ -7400,24 +7400,6 @@ class TestLockstepUsageDetection:
         }
         assert switcher._lockstep_usage_warnings(self._info(), entries) == []
 
-    def test_payload_carries_lockstep_warnings_additively(
-        self, temp_home, sample_sequence_data,
-    ):
-        switcher = self._switcher(temp_home, sample_sequence_data)
-        lockstep = {
-            "1": self._entry(25.0, "2026-07-10T12:00:00Z", 60.0, "2026-07-14T00:00:00Z"),
-            "2": self._entry(25.0, "2026-07-10T12:00:00Z", 60.0, "2026-07-14T00:00:00Z"),
-        }
-        payload = switcher._build_list_payload(self._info(), lockstep)
-        assert len(payload["lockstepUsageWarnings"]) == 1
-        clean = {
-            "1": self._entry(25.0, "2026-07-10T12:00:00Z", 60.0, "2026-07-14T00:00:00Z"),
-            "2": self._entry(30.0, "2026-07-10T13:00:00Z", 10.0, "2026-07-15T00:00:00Z"),
-        }
-        payload = switcher._build_list_payload(self._info(), clean)
-        assert "lockstepUsageWarnings" not in payload
-
-
 class TestStashAndRetentionStore:
     """CredentialStore: unclaimed stash + previous-generation retention."""
 
@@ -8613,22 +8595,6 @@ class TestDisableEnableAccount:
         # Marker attaches to the disabled row, not the enabled one.
         disabled_line = next(ln for ln in out.splitlines() if ln.strip().startswith("2:"))
         assert "(disabled)" in disabled_line
-
-    def test_json_list_carries_disabled_field(self, temp_home):
-        s = self._setup(temp_home)
-        self._seed(s, 1, "a@example.com")
-        self._seed(s, 2, "b@example.com")
-        s.set_account_disabled("2", True)
-
-        with patch.object(s, "_read_credentials", return_value=""), \
-             patch.object(s, "_read_account_credentials", return_value=""):
-            payload = s.list_accounts(json_output=True)
-
-        rows = {r["number"]: r for r in payload["accounts"]}
-        assert rows[2].get("disabled") is True
-        # Additive: absent (not False) on enabled rows.
-        assert "disabled" not in rows[1]
-
 
 class TestDegradedReadProvenance:
     """M1 (stale-credential robustness): a credential read that fell back
