@@ -1972,16 +1972,6 @@ class ClaudeAccountSwitcher:
     ) -> tuple[str, bool]:
         return self._store._read_account_credentials_ex(account_num, email)
 
-    def list_unclaimed_credentials(self) -> dict[str, dict]:
-        """Internal safety copies preserved at switch time (diagnostics only).
-
-        Write-only storage: entries are created when a switch displaces live
-        credential bytes it could not attribute to the outgoing slot, and are
-        never consumed automatically — recovery from any such state is the
-        documented ``/login`` + ``cswap add [--slot N]``.
-        """
-        return self._store._list_unclaimed_credentials()
-
     # -- session profile lifecycle ----------------------------------------
 
     def _session_dir(self, account_num: str, email: str) -> Path:

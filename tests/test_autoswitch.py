@@ -2706,7 +2706,7 @@ class TestTokenIdentity:
         q = harness.state().get("quarantine", {})
         assert q.get("2", {}).get("reason") == "invalid_grant"
         # The safety copy was not consumed, and the switch landed elsewhere.
-        assert len(harness.switcher.list_unclaimed_credentials()) == 1
+        assert len(harness.switcher._store._list_unclaimed_credentials()) == 1
         assert outcome is TickOutcome.SWITCHED
         assert harness.active_number() == 3
 

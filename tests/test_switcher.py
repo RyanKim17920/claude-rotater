@@ -6903,7 +6903,7 @@ class TestProvenanceGuard:
                 p.stop()
         assert creds_store[("1", "test@example.com")] == rotated
         assert op["warnings"] == []
-        assert switcher.list_unclaimed_credentials() == {}
+        assert switcher._store._list_unclaimed_credentials() == {}
 
     def test_resolution_backfills_empty_slot_uuid(
         self, temp_home, mock_claude_config, sample_sequence_data,
@@ -6965,7 +6965,7 @@ class TestProvenanceGuard:
         assert creds_store[("1", "test@example.com")] == self._A1_BACKUP
         assert creds_store[("2", "account2@example.com")] == a2_backup
         # Foreign bytes preserved byte-exactly.
-        entries = switcher.list_unclaimed_credentials()
+        entries = switcher._store._list_unclaimed_credentials()
         assert len(entries) == 1
         (entry_id,) = entries
         assert _read_safety_copy(switcher, entry_id) == foreign
@@ -7001,7 +7001,7 @@ class TestProvenanceGuard:
                 p.stop()
         assert creds_store[("1", "test@example.com")] == self._A1_BACKUP
         assert creds_store[("2", "account2@example.com")] == a2_backup
-        assert switcher.list_unclaimed_credentials() == {}
+        assert switcher._store._list_unclaimed_credentials() == {}
         assert any("already matches Account-2" in w for w in op["warnings"])
 
     def test_alien_credential_preserved_and_skipped(
@@ -7029,7 +7029,7 @@ class TestProvenanceGuard:
             for p in patches:
                 p.stop()
         assert creds_store[("1", "test@example.com")] == self._A1_BACKUP
-        entries = switcher.list_unclaimed_credentials()
+        entries = switcher._store._list_unclaimed_credentials()
         assert len(entries) == 1
         (entry_id,) = entries
         assert _read_safety_copy(switcher, entry_id) == alien
@@ -7066,7 +7066,7 @@ class TestProvenanceGuard:
                 p.stop()
         assert creds_store[("1", "test@example.com")] == self._A1_BACKUP
         assert creds_store[("2", "account2@example.com")] == a2_backup
-        assert len(switcher.list_unclaimed_credentials()) == 1
+        assert len(switcher._store._list_unclaimed_credentials()) == 1
         assert any(
             "does not match a managed account" in w for w in op["warnings"]
         )
@@ -7097,7 +7097,7 @@ class TestProvenanceGuard:
             for p in patches:
                 p.stop()
         assert creds_store[("1", "test@example.com")] == rotated
-        assert switcher.list_unclaimed_credentials() == {}
+        assert switcher._store._list_unclaimed_credentials() == {}
         assert op["warnings"] == []
 
     def test_partial_identity_uuid_match_with_slot_org_recorded(
@@ -7153,7 +7153,7 @@ class TestProvenanceGuard:
             for p in patches:
                 p.stop()
         assert creds_store[("1", "test@example.com")] == mystery
-        assert switcher.list_unclaimed_credentials() == {}
+        assert switcher._store._list_unclaimed_credentials() == {}
         assert op["warnings"] == []
 
     def test_foreign_attribution_survives_missing_email(
@@ -7183,7 +7183,7 @@ class TestProvenanceGuard:
                 p.stop()
         assert creds_store[("1", "test@example.com")] == self._A1_BACKUP
         assert creds_store[("2", "account2@example.com")] == a2_backup
-        assert len(switcher.list_unclaimed_credentials()) == 1
+        assert len(switcher._store._list_unclaimed_credentials()) == 1
         assert any("Account-2" in w for w in op["warnings"])
 
     def test_unresolvable_mismatch_backs_up_pre_fix(
@@ -7213,7 +7213,7 @@ class TestProvenanceGuard:
                 p.stop()
         # Pre-fix backup happened; the switch completed quietly.
         assert creds_store[("1", "test@example.com")] == mystery
-        assert switcher.list_unclaimed_credentials() == {}
+        assert switcher._store._list_unclaimed_credentials() == {}
         assert op["warnings"] == []
         assert json.loads(live_state["creds"])["claudeAiOauth"]["accessToken"] == "sk-stale-2"
 
@@ -7250,7 +7250,7 @@ class TestProvenanceGuard:
                 p.stop()
         # Backup untouched, credential preserved, switch completed.
         assert creds_store[("1", "test@example.com")] == self._A1_BACKUP
-        stash = switcher.list_unclaimed_credentials()
+        stash = switcher._store._list_unclaimed_credentials()
         assert len(stash) == 1
         assert next(iter(stash.values()))["reason"] == "known-foreign"
         assert any("previously identified" in w for w in op["warnings"])
@@ -7282,7 +7282,7 @@ class TestProvenanceGuard:
             for p in patches:
                 p.stop()
         assert creds_store[("1", "test@example.com")] == mystery
-        assert switcher.list_unclaimed_credentials() == {}
+        assert switcher._store._list_unclaimed_credentials() == {}
         assert op["warnings"] == []
 
     def test_safety_copy_failure_aborts_before_live_overwrite(
@@ -7353,7 +7353,7 @@ class TestProvenanceGuard:
         assert json.loads(live_state["creds"])["claudeAiOauth"][
             "accessToken"] == "sk-stale-2"
         # Nothing worth stashing in an empty blob.
-        assert switcher.list_unclaimed_credentials() == {}
+        assert switcher._store._list_unclaimed_credentials() == {}
         # The user is told the slot needs a fresh login.
         assert any("log in" in w.lower() for w in op["warnings"])
 
@@ -7414,7 +7414,7 @@ class TestProvenanceGuard:
                 p.stop()
         # Stale resolution rejected → unresolved → pre-fix backup, no copy.
         assert creds_store[("1", "test@example.com")] == moved
-        assert switcher.list_unclaimed_credentials() == {}
+        assert switcher._store._list_unclaimed_credentials() == {}
         assert op["warnings"] == []
 
 
@@ -7923,7 +7923,7 @@ class TestDirectActivationPreservation:
         switcher, unmanaged = self._setup(temp_home)
         with patch.object(switcher, "list_accounts"):
             switcher._perform_switch("1", emit_output=False)
-        entries = switcher.list_unclaimed_credentials()
+        entries = switcher._store._list_unclaimed_credentials()
         assert len(entries) == 1
         (entry_id,) = entries
         assert _read_safety_copy(switcher, entry_id) == unmanaged
@@ -7964,7 +7964,7 @@ class TestDirectActivationPreservation:
         switcher, orphaned = self._setup(temp_home, live_identity_email=None)
         with patch.object(switcher, "list_accounts"):
             switcher._perform_switch("1", emit_output=False)
-        entries = switcher.list_unclaimed_credentials()
+        entries = switcher._store._list_unclaimed_credentials()
         assert len(entries) == 1
         (entry_id,) = entries
         assert _read_safety_copy(switcher, entry_id) == orphaned
@@ -8311,7 +8311,7 @@ class TestUuidConflictClassification:
         # (a positively-different account, so this is NOT the fail-open
         # path — a recycled email must never be backed into the slot).
         assert creds_store[("1", "test@example.com")] == a1_backup
-        assert len(switcher.list_unclaimed_credentials()) == 1
+        assert len(switcher._store._list_unclaimed_credentials()) == 1
         assert any(
             "does not match a managed account" in w for w in op["warnings"]
         )
@@ -9509,7 +9509,7 @@ class TestConsumeGate:
         # racer's write survives; our successor was stashed, not written over it
         assert s._read_account_credentials("1", "test@example.com") == racer
         assert result.credentials == racer      # adopt the store's newer lineage
-        unclaimed = s.list_unclaimed_credentials()
+        unclaimed = s._store._list_unclaimed_credentials()
         assert unclaimed, "consumed successor must be stashed, never discarded"
 
     def test_gate_prefers_newer_session_profile_lineage(
@@ -9679,7 +9679,7 @@ class TestConsumeGate:
         s._store._stash_manifest_path().write_text("{not json at all")
 
         # 1. the operator can SEE the orphan, by glob, with no readable rows
-        listed = s.list_unclaimed_credentials()
+        listed = s._store._list_unclaimed_credentials()
         assert listed, "corrupt manifest hid the orphan from `cswap unclaimed`"
 
         # 2. and can DROP it — the mutator does not refuse on corrupt
@@ -9900,7 +9900,7 @@ class TestConsumeGate:
 
         assert posted == [], "spent a grant for a slot that no longer exists"
         assert result.error == "transient"
-        assert not s.list_unclaimed_credentials(), (
+        assert not s._store._list_unclaimed_credentials(), (
             "stashed a successor for an account the user deleted"
         )
 
@@ -10282,7 +10282,7 @@ class TestConsumeGateLockFailures:
             out = s.consume_backup_grant("1", "test@example.com", self._OLD)
         # successor survives: returned to the caller AND stashed
         assert out.credentials == self._NEW
-        assert s.list_unclaimed_credentials(), "successor must be stashed"
+        assert s._store._list_unclaimed_credentials(), "successor must be stashed"
 
     def test_a_stashed_successor_is_not_reported_as_freshened(
         self, temp_home: Path, sample_sequence_data: dict, monkeypatch
@@ -10333,7 +10333,7 @@ class TestConsumeGateLockFailures:
             "onto the consumed generation still in the store"
         )
         # The successor is still preserved for the next pass to adopt.
-        assert s.list_unclaimed_credentials(), "successor must still be stashed"
+        assert s._store._list_unclaimed_credentials(), "successor must still be stashed"
 
 
 class TestPermanentlyUnreadableStashRow:
@@ -10400,7 +10400,7 @@ class TestPermanentlyUnreadableStashRow:
             "(network?)' and sends the operator to check a connection that "
             "is fine, on a condition only they can clear"
         )
-        assert entry_id in s.list_unclaimed_credentials(), (
+        assert entry_id in s._store._list_unclaimed_credentials(), (
             "the row must survive: it is the sole copy of a generation the "
             "slot already consumed, and nothing distinguishes a lock that "
             "clears in a minute from one that never does"
@@ -10557,7 +10557,7 @@ class TestGateUltraReviewFixes:
 
         # The gate adopts the newer store lineage, as designed.
         assert out.credentials == THIRD
-        stashed = s.list_unclaimed_credentials()
+        stashed = s._store._list_unclaimed_credentials()
         assert stashed, "the consumed successor must be preserved"
 
         # Now the defect: a later pass must be able to retire it. Adoption
@@ -10565,7 +10565,7 @@ class TestGateUltraReviewFixes:
         adopted = s._adopt_stashed_successor("1", "test@example.com", THIRD)
         assert adopted is None      # correctly not adopted (dead branch)
         assert not [
-            e for e in s.list_unclaimed_credentials()
+            e for e in s._store._list_unclaimed_credentials()
             if s._store._read_stash_manifest().get(e, {}).get("reason")
             == "consume-gate-cas-conflict"
         ], (
@@ -10697,7 +10697,7 @@ class TestGateUltraReviewFixes:
         # install a token that can never refresh.
         assert out.error == "transient"
         assert out.credentials == self._NEW      # survives in the outcome
-        assert s.list_unclaimed_credentials(), "successor must be stashed"
+        assert s._store._list_unclaimed_credentials(), "successor must be stashed"
 
     def test_persist_and_stash_both_failing_still_never_raises(
         self, temp_home: Path, sample_sequence_data: dict, monkeypatch
@@ -10841,7 +10841,7 @@ class TestGateUltraReviewFixes:
         assert (
             s._read_account_credentials("1", "test@example.com") == self._NEW
         )
-        assert not s.list_unclaimed_credentials(), "stash entry consumed"
+        assert not s._store._list_unclaimed_credentials(), "stash entry consumed"
 
     # -- empty-store CAS (remove-account race) ---------------------------
 
@@ -10865,7 +10865,7 @@ class TestGateUltraReviewFixes:
         assert s._read_account_credentials("1", "test@example.com") == "", (
             "removed slot must stay empty"
         )
-        assert s.list_unclaimed_credentials(), "successor parked in stash"
+        assert s._store._list_unclaimed_credentials(), "successor parked in stash"
 
     # -- STALE_MARKER precedence ------------------------------------------
 
@@ -11817,7 +11817,7 @@ class TestUnreadableBackupIsNotAbsent:
             out = s.consume_backup_grant("1", "test@example.com", self._OLD)
 
         reasons = [
-            m.get("reason") for m in s.list_unclaimed_credentials().values()
+            m.get("reason") for m in s._store._list_unclaimed_credentials().values()
         ]
         assert reasons, "the consumed successor must still be stashed"
         assert "consume-gate-slot-removed" not in reasons, (
@@ -11992,7 +11992,7 @@ class TestStashReaderUnreadableVsAbsent:
             "the only copy of the live credential, so the gate must defer, "
             "never report the spent-generation POST's invalid_grant"
         )
-        assert s.list_unclaimed_credentials(), (
+        assert s._store._list_unclaimed_credentials(), (
             "the entry must survive for the next pass to adopt"
         )
 
@@ -12012,7 +12012,7 @@ class TestStashReaderUnreadableVsAbsent:
         assert not post.called, "adopted successor must short-circuit the POST"
         assert out.error is None
         assert out.credentials == self._NEW
-        assert not s.list_unclaimed_credentials(), "stash entry consumed"
+        assert not s._store._list_unclaimed_credentials(), "stash entry consumed"
 
     def test_row_c_control_nothing_stashed_posts_the_snapshot(
         self, temp_home: Path, sample_sequence_data: dict,
@@ -12103,7 +12103,7 @@ class TestStashReaderUnreadableVsAbsent:
                    side_effect=self._post_rejects_spent):
             s.consume_backup_grant("1", "test@example.com", self._OLD)
 
-        assert not s.list_unclaimed_credentials(), (
+        assert not s._store._list_unclaimed_credentials(), (
             "an absent-bytes stash entry must be retired once the gate "
             "confirms it can never be adopted, the same way a CAS-conflict "
             "entry already is"
@@ -12151,7 +12151,7 @@ class TestStashReaderUnreadableVsAbsent:
             "unreadable row starved the scan before the readable one was "
             "reached"
         )
-        assert second_id not in s.list_unclaimed_credentials()
+        assert second_id not in s._store._list_unclaimed_credentials()
 
 
 class TestSessionShellGuardCoversEveryMutator:
