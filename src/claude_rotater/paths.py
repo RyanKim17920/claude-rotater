@@ -11,27 +11,31 @@ claude-code does. Key rules (from claude-code source):
   ``.claude.json`` sits at homedir by default, not inside ``.claude/``.
 - Credentials: ``<config_home>/.credentials.json``.
 
-Also resolves the rota backup root, which on Linux/WSL follows the XDG Base
-Directory Specification (``$XDG_DATA_HOME/claude-swap``) and falls back to the
-legacy ``~/.claude-swap-backup`` on macOS/Windows.
+Also resolves rota's own data directory (``~/.rota``, or ``$ROTA_HOME``), the
+Keychain service its per-account backups live under, and where the upstream
+claude-swap tool kept its data (read only, by the one-time import).
 
 References:
 - claude-code utils/env.ts getGlobalClaudeFile
 - claude-code utils/secureStorage/plainTextStorage.ts getStoragePath
-- XDG Base Directory Specification: https://specifications.freedesktop.org/basedir-spec/basedir-spec-latest.html
 """
 
 from __future__ import annotations
 
+import hashlib
 import os
-import shutil
 import stat
 from pathlib import Path
 
-from claude_rotater.exceptions import MigrationError
 from claude_rotater.models import Platform
 
+DATA_DIRNAME = ".rota"
+DATA_HOME_ENV = "ROTA_HOME"
+KEYCHAIN_SERVICE_BASE = "rota"
+
+# Upstream claude-swap's data locations, read only by the one-time import.
 LEGACY_BACKUP_DIRNAME = ".claude-swap-backup"
+LEGACY_XDG_DIRNAME = "claude-swap"
 
 
 def get_claude_config_home() -> Path:
@@ -97,140 +101,65 @@ def get_credentials_path() -> Path:
     return get_claude_config_home() / ".credentials.json"
 
 
-def get_legacy_backup_root() -> Path:
-    """Return the legacy (pre-XDG) backup root: ``~/.claude-swap-backup``."""
-    return Path.home() / LEGACY_BACKUP_DIRNAME
+def get_default_backup_root() -> Path:
+    """Return rota's default data directory, ``~/.rota``, ignoring ``ROTA_HOME``."""
+    return Path.home() / DATA_DIRNAME
 
 
 def get_backup_root() -> Path:
-    """Return the rota backup root for the current platform.
+    """Return rota's data directory: ``$ROTA_HOME`` if set, else ``~/.rota``.
 
-    Linux/WSL: ``$XDG_DATA_HOME/claude-swap`` (default ``~/.local/share/claude-swap``).
-    macOS/Windows/unknown: ``~/.claude-swap-backup`` (legacy layout).
-
-    Per the XDG spec, ``$XDG_DATA_HOME`` is ignored when unset, empty, or
-    non-absolute. A leading ``~`` is expanded so values like ``~/data`` set
-    via systemd unit files or Dockerfiles (which don't get shell expansion)
-    still work.
+    ``ROTA_HOME`` is the one way to run a separate profile (its own accounts,
+    settings, cache and Keychain items). A leading ``~`` is expanded, since
+    launchd plists, systemd units and Dockerfiles do not expand it, and a
+    relative value is made absolute against the current directory.
     """
+    value = os.environ.get(DATA_HOME_ENV, "")
+    if value:
+        return Path(os.path.abspath(os.path.expanduser(value)))
+    return get_default_backup_root()
+
+
+def _normalized(path: Path) -> str:
+    return os.path.normpath(os.path.abspath(path))
+
+
+def backup_keychain_service(backup_root: Path) -> str:
+    """Keychain service holding the per-account backups of ``backup_root``.
+
+    The default data directory uses the fixed name ``rota``. Any other
+    directory gets ``rota-<8 hex>``, the first 8 hex digits of the SHA-256 of
+    its absolute, normalized path, so two data directories never read or
+    overwrite each other's items and the name stays the same across runs.
+    Symlinks are not resolved, matching how Claude Code derives its own
+    per-config-dir service names. Upstream claude-swap used one fixed
+    ``claude-swap`` service; rota only ever reads it (see legacy_import).
+    """
+    normalized = _normalized(backup_root)
+    if os.path.normcase(normalized) == os.path.normcase(
+        _normalized(get_default_backup_root())
+    ):
+        return KEYCHAIN_SERVICE_BASE
+    digest = hashlib.sha256(normalized.encode("utf-8")).hexdigest()[:8]
+    return f"{KEYCHAIN_SERVICE_BASE}-{digest}"
+
+
+def get_legacy_backup_roots() -> list[Path]:
+    """Where upstream claude-swap kept its data, most specific first.
+
+    Linux/WSL: ``$XDG_DATA_HOME/claude-swap`` (default
+    ``~/.local/share/claude-swap``), then ``~/.claude-swap-backup`` for an
+    install that never ran upstream's XDG move. macOS/Windows/unknown:
+    ``~/.claude-swap-backup``. ``$XDG_DATA_HOME`` is ignored when unset,
+    empty, or non-absolute, as upstream did.
+    """
+    roots: list[Path] = []
     if Platform.detect() in (Platform.LINUX, Platform.WSL):
         xdg = os.environ.get("XDG_DATA_HOME", "")
-        if xdg:
-            xdg_path = Path(os.path.expanduser(xdg))
-            if xdg_path.is_absolute():
-                return xdg_path / "claude-swap"
-        return Path.home() / ".local" / "share" / "claude-swap"
-    return get_legacy_backup_root()
-
-
-# Names that any prior rota run may have created in the backup root without
-# user data being present (logger output, update-check + usage cache). The
-# migration treats a target containing only these as effectively empty, since
-# wiping them loses no real state.
-_THROWAWAY_NAMES = {"cache"}
-_THROWAWAY_PREFIXES = ("rota.log",)
-
-
-def _target_has_meaningful_data(target: Path) -> bool:
-    """Return True if target contains anything beyond throwaway artifacts."""
-    try:
-        entries = list(target.iterdir())
-    except (FileNotFoundError, NotADirectoryError):
-        return False
-    for entry in entries:
-        if entry.name in _THROWAWAY_NAMES:
-            continue
-        if any(entry.name.startswith(p) for p in _THROWAWAY_PREFIXES):
-            continue
-        return True
-    return False
-
-
-def _wipe_throwaway_artifacts(target: Path) -> None:
-    """Remove cache dir / log files so shutil.move can land on target."""
-    try:
-        entries = list(target.iterdir())
-    except (FileNotFoundError, NotADirectoryError):
-        return
-    for entry in entries:
-        if entry.is_dir() and not entry.is_symlink():
-            shutil.rmtree(entry)
+        xdg_path = Path(os.path.expanduser(xdg)) if xdg else None
+        if xdg_path is not None and xdg_path.is_absolute():
+            roots.append(xdg_path / LEGACY_XDG_DIRNAME)
         else:
-            entry.unlink()
-    target.rmdir()
-
-
-def migration_flag_for(target: Path) -> Path:
-    """The interrupted-migration flag for ``target``: a SIBLING of the
-    backup root, not a child.
-
-    Spell it here only -- this flag is what turns the collision refusal
-    below into an rmtree of the destination, and a second copy drifts.
-    """
-    return target.parent / f".{target.name}.migrating"
-
-
-def migrate_legacy_backup_dir(target: Path) -> bool:
-    """Move the legacy backup directory to ``target`` if needed.
-
-    Uses ``shutil.move`` (atomic ``rename`` on same FS; copy + unlink across
-    FS) guarded by a ``<target>.migrating`` flag file. Touching the flag
-    *before* the move and removing it *after* lets us tell an interrupted
-    migration apart from a foreign collision on the next run:
-
-    * Flag present, legacy still there → resume (discard any partial target
-      and retry).
-    * Flag present, legacy gone → previous run completed but didn't get to
-      clean the flag; just unlink it.
-    * No flag, both paths exist → genuine collision, refuse — *unless* the
-      target only holds throwaway artifacts (cache/, log files) that any
-      prior rota run may have laid down before legacy reappeared (e.g.
-      first run on a fresh box, then legacy synced in from another machine).
-      In that case wipe the artifacts and migrate normally.
-
-    Returns:
-        True if the move ran in this call, False if it was a no-op.
-
-    Raises:
-        MigrationError: on a genuine collision, or when ``shutil.move`` fails.
-    """
-    legacy = get_legacy_backup_root()
-    try:
-        same_path = legacy.resolve() == target.resolve()
-    except OSError:
-        same_path = legacy == target
-    if same_path:
-        return False
-
-    flag = migration_flag_for(target)
-
-    if not legacy.exists():
-        # Successful prior run that died before unlinking the flag.
-        flag.unlink(missing_ok=True)
-        return False
-
-    try:
-        if flag.exists():
-            # Prior run was interrupted before completion. Discard any
-            # (potentially partial) target and retry the move from legacy.
-            if target.exists():
-                shutil.rmtree(target)
-        elif target.exists():
-            if _target_has_meaningful_data(target):
-                raise MigrationError(
-                    f"Both legacy ({legacy}) and new ({target}) backup paths exist. "
-                    f"Refusing to merge or overwrite — inspect both and remove the "
-                    f"stale one manually before re-running."
-                )
-            _wipe_throwaway_artifacts(target)
-
-        target.parent.mkdir(parents=True, exist_ok=True)
-        flag.touch()
-        shutil.move(legacy, target)
-        flag.unlink()
-    except OSError as exc:
-        raise MigrationError(
-            f"Migration of {legacy} → {target} failed: {exc}"
-        ) from exc
-
-    return True
+            roots.append(Path.home() / ".local" / "share" / LEGACY_XDG_DIRNAME)
+    roots.append(Path.home() / LEGACY_BACKUP_DIRNAME)
+    return roots

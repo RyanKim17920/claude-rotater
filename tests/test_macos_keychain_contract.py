@@ -4,7 +4,7 @@ Two layers of coverage:
 
 1. **Mocked tests** (run on every PR, every platform): assert that the macOS
    backup-credentials path passes the correct `(service, account)` tuple to the
-   `macos_keychain` security wrapper, under the new `claude-swap` service. This
+   `macos_keychain` security wrapper, under the `rota` service. This
    guards the multi-account backup namespace on every CI run.
 
 2. **Real-keychain integration tests** (GHA macOS only): exercise
@@ -57,7 +57,7 @@ class TestBackupCredentialsSecurity:
 
     The autouse ``block_real_keychain`` guard already prevents any real Keychain
     access; here we install a MagicMock to assert the exact call shape. The
-    per-account backup service is the new ``claude-swap`` (not the old keyring
+    per-account backup service is ``rota`` (not the old keyring
     ``claude-code``).
     """
 
@@ -70,9 +70,30 @@ class TestBackupCredentialsSecurity:
             result = macos_switcher._read_account_credentials("1", "user@example.com")
 
             mock_kc.get_password.assert_called_once_with(
-                "claude-swap", "account-1-user@example.com"
+                "rota", "account-1-user@example.com"
             )
             assert result == "fake-token"
+
+    def test_a_rota_home_profile_uses_its_own_service(
+        self, temp_home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        """Two data dirs must never share backup items: a ROTA_HOME profile
+        writes under ``rota-<hash>``, never ``rota`` or ``claude-swap``."""
+        from claude_rotater.paths import backup_keychain_service
+
+        profile = tmp_path / "work-profile"
+        monkeypatch.setenv("ROTA_HOME", str(profile))
+        switcher = ClaudeAccountSwitcher()
+        switcher.platform = Platform.MACOS
+        service = backup_keychain_service(profile)
+        assert service.startswith("rota-") and service != "rota"
+
+        with patch("claude_rotater.credentials.macos_keychain") as mock_kc:
+            mock_kc.get_password.return_value = None
+            switcher._write_account_credentials("1", "a@example.com", "tok")
+            mock_kc.set_password.assert_called_once_with(
+                service, "account-1-a@example.com", "tok"
+            )
 
     def test_write_account_credentials_uses_security_service(
         self, macos_switcher: ClaudeAccountSwitcher
@@ -86,7 +107,7 @@ class TestBackupCredentialsSecurity:
             )
 
             mock_kc.set_password.assert_called_once_with(
-                "claude-swap", "account-2-alice@example.com", "secret-token"
+                "rota", "account-2-alice@example.com", "secret-token"
             )
 
     def test_write_retains_prev_generation_in_keychain_not_a_file(
@@ -101,9 +122,9 @@ class TestBackupCredentialsSecurity:
             )
 
             mock_kc.set_password.assert_has_calls([
-                call("claude-swap", "account-2-alice@example.com.prev",
+                call("rota", "account-2-alice@example.com.prev",
                      "old-generation"),
-                call("claude-swap", "account-2-alice@example.com",
+                call("rota", "account-2-alice@example.com",
                      "secret-token"),
             ])
         prev_file = macos_switcher._store._prev_backup_path(
@@ -118,10 +139,10 @@ class TestBackupCredentialsSecurity:
             macos_switcher._delete_account_credentials("3", "bob@example.com")
 
             mock_kc.delete_password.assert_has_calls([
-                call("claude-swap", "account-3-bob@example.com"),
-                call("claude-swap", "account-3-bob@example.com.prev"),
-                call("claude-swap", "account-None-bob@example.com"),
-                call("claude-swap", "account-None-bob@example.com.prev"),
+                call("rota", "account-3-bob@example.com"),
+                call("rota", "account-3-bob@example.com.prev"),
+                call("rota", "account-None-bob@example.com"),
+                call("rota", "account-None-bob@example.com.prev"),
             ])
 
 
@@ -284,10 +305,10 @@ def test_wrapper_roundtrip_real_keychain(tmp_keychain: str):
     back via the keychain *search list* (no explicit keychain argument), then
     deleted, with the rc-44 "not found" contract checked at the end.
     """
-    macos_keychain.set_password("claude-swap-test", "acct-1", "round-trip-token")
-    assert macos_keychain.get_password("claude-swap-test", "acct-1") == "round-trip-token"
-    macos_keychain.delete_password("claude-swap-test", "acct-1")
-    assert macos_keychain.get_password("claude-swap-test", "acct-1") is None
+    macos_keychain.set_password("rota-test", "acct-1", "round-trip-token")
+    assert macos_keychain.get_password("rota-test", "acct-1") == "round-trip-token"
+    macos_keychain.delete_password("rota-test", "acct-1")
+    assert macos_keychain.get_password("rota-test", "acct-1") is None
 
 
 class TestOurOwnFileModeIsNotAKeychainFailure:

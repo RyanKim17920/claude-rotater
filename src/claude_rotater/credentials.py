@@ -35,6 +35,7 @@ from claude_rotater.exceptions import (
 from claude_rotater.fsutil import replace_with_retry
 from claude_rotater.models import Platform
 from claude_rotater.paths import (
+    backup_keychain_service,
     get_claude_config_home,
     get_credentials_path,
     get_default_claude_config_home,
@@ -106,10 +107,6 @@ def _active_oauth_keychain_services() -> list[str]:
     return services
 
 
-# Service name for per-account backup credentials now managed via the ``security``
-# CLI on macOS. Deliberately distinct from KEYRING_SERVICE so old keyring items and
-# new security items coexist during migration (safe write → verify → delete).
-SECURITY_SERVICE = "claude-swap"
 
 # Service name of Claude Code's *active* OAuth credential in the macOS Keychain
 # (read by Claude Code itself; we read/write it when switching accounts).
@@ -1066,7 +1063,7 @@ class CredentialStore:
     # -- backup credential backends ---------------------------------------
     #
     # Two backends for per-account backups: base64 ``.enc`` files under
-    # ``credentials_dir`` and the macOS Keychain (``SECURITY_SERVICE``). On macOS
+    # ``credentials_dir`` and the macOS Keychain (``_backup_service``). On macOS
     # reads are ``.enc``-wins: a fallback ``.enc`` (written while the Keychain was
     # unusable) is authoritative over a possibly-stale Keychain copy, so a Keychain
     # that recovers can't shadow a newer file. A successful Keychain write
@@ -1074,6 +1071,12 @@ class CredentialStore:
 
     def _backup_enc_path(self, account_num: str, email: str) -> Path:
         return self._host.credentials_dir / f".creds-{account_num}-{email}.enc"
+
+    @property
+    def _backup_service(self) -> str:
+        """Keychain service for this data dir's backups (see
+        :func:`paths.backup_keychain_service`)."""
+        return backup_keychain_service(self._host.backup_dir)
 
     def _backup_username(self, account_num: str, email: str) -> str:
         return f"account-{account_num}-{email}"
@@ -1087,7 +1090,7 @@ class CredentialStore:
         """
         creds = self._kc_call(
             macos_keychain.get_password,
-            SECURITY_SERVICE,
+            self._backup_service,
             self._backup_username(account_num, email),
         )
         return creds or ""
@@ -1096,7 +1099,7 @@ class CredentialStore:
         """Write a per-account backup to the Keychain only. Raises on failure."""
         self._kc_call(
             macos_keychain.set_password,
-            SECURITY_SERVICE,
+            self._backup_service,
             self._backup_username(account_num, email),
             credentials,
         )
@@ -1105,7 +1108,7 @@ class CredentialStore:
         """Delete a per-account backup Keychain item only. Raises on failure."""
         self._kc_call(
             macos_keychain.delete_password,
-            SECURITY_SERVICE,
+            self._backup_service,
             self._backup_username(account_num, email),
         )
 
@@ -1113,7 +1116,7 @@ class CredentialStore:
         """Delete a slot's retained ``.prev`` Keychain item. Raises on failure."""
         self._kc_call(
             macos_keychain.delete_password,
-            SECURITY_SERVICE,
+            self._backup_service,
             self._prev_backup_username(account_num, email),
         )
 
@@ -1471,7 +1474,7 @@ class CredentialStore:
             if self._use_keychain():
                 self._kc_call(
                     macos_keychain.set_password,
-                    SECURITY_SERVICE,
+                    self._backup_service,
                     self._prev_backup_username(account_num, email),
                     current,
                 )
@@ -1504,7 +1507,7 @@ class CredentialStore:
             try:
                 return self._kc_call(
                     macos_keychain.get_password,
-                    SECURITY_SERVICE,
+                    self._backup_service,
                     self._prev_backup_username(account_num, email),
                 ) or ""
             except macos_keychain.KEYCHAIN_ERRORS as e:

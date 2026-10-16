@@ -11,9 +11,9 @@ from claude_rotater.logging_config import setup_logging
 def test_setup_does_not_create_dir(tmp_path: Path):
     """Calling setup_logging must not materialize the log directory.
 
-    The log dir lives under the rota backup root; pre-creating it laid down
-    cache/log artifacts that later tripped the legacy → XDG migration
-    collision check (see paths.migrate_legacy_backup_dir).
+    The log dir lives under the rota data dir, and the one-time legacy
+    import runs only while that dir does not exist yet, so creating it
+    early would silently skip the import.
     """
     log_dir = tmp_path / "should-not-exist"
     logger = setup_logging(log_dir)

@@ -45,7 +45,6 @@ from claude_rotater.json_output import (
 )
 from claude_rotater.credentials import (  # noqa: F401  (constants re-exported for migrations/tests)
     CLAUDE_CODE_KEYCHAIN_SERVICE,
-    SECURITY_SERVICE,
     ActiveCredentials,
     CredentialStore,
     looks_like_api_key,
@@ -81,8 +80,6 @@ from claude_rotater.paths import (
     get_credentials_path,
     get_default_claude_config_home,
     get_global_config_path,
-    get_legacy_backup_root,
-    migrate_legacy_backup_dir,
 )
 from claude_rotater.process_detection import get_running_instances
 from claude_rotater import poll_policy
@@ -101,7 +98,7 @@ from claude_rotater.usage_store import (
 # and for the Windows Credential Manager migration).
 KEYRING_SERVICE = "claude-code"
 
-# SECURITY_SERVICE and CLAUDE_CODE_KEYCHAIN_SERVICE now live in credentials.py
+# CLAUDE_CODE_KEYCHAIN_SERVICE now lives in credentials.py
 # (storage concerns); re-exported above for migrations.py and the test suite.
 
 # Setup-tokens are inference-only server-side; wider scopes trigger 403s
@@ -281,18 +278,6 @@ class ClaudeAccountSwitcher:
         self.home = Path.home()
         self.platform = Platform.detect()
         self.backup_dir = get_backup_root()
-
-        # Migrate legacy ~/.claude-swap-backup to the new XDG path on Linux/WSL
-        # before any logger or directory setup writes to the new location.
-        # Migration is a no-op on macOS/Windows where backup_dir already
-        # equals the legacy path. MigrationError on a genuine collision
-        # propagates as a ClaudeSwitchError and is caught by the CLI.
-        if migrate_legacy_backup_dir(self.backup_dir):
-            legacy = get_legacy_backup_root()
-            print(
-                f"claude-swap: migrated data from {legacy} to {self.backup_dir}",
-                file=sys.stderr,
-            )
 
         self.sequence_file = self.backup_dir / "sequence.json"
         self.configs_dir = self.backup_dir / "configs"

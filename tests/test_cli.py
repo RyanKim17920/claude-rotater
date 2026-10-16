@@ -20,7 +20,7 @@ _SRC_DIR = str(Path(__file__).resolve().parent.parent / "src")
 
 # A throwaway HOME for subprocesses. The in-process autouse Keychain/HOME guards
 # do NOT reach child processes, so a spawned ``python -m claude_rotater`` would
-# otherwise resolve to the developer's real ``~/.claude-swap-backup`` and run the
+# otherwise resolve to the developer's real ``~/.rota`` and run the
 # data migration against real accounts (touching the real Keychain on macOS). An empty,
 # isolated HOME has no ``sequence.json`` → the migration skips before any Keychain
 # access, and no ``.claude.json`` → no account to read.
@@ -52,11 +52,11 @@ def _subprocess_env(**extra: str) -> dict[str, str]:
         env["USERPROFILE"] = _ISOLATED_HOME
     elif "USERPROFILE" not in extra:
         env["USERPROFILE"] = extra["HOME"]
-    # CLAUDE_CONFIG_DIR / XDG_DATA_HOME bypass HOME in path resolution, so a
-    # developer with either exported would otherwise point the spawned CLI back
-    # at real config/backup paths (and on macOS, the real Keychain). Drop them
+    # CLAUDE_CONFIG_DIR / ROTA_HOME / ROTA_IMPORT_FROM bypass HOME in path
+    # resolution, so a developer with any of them exported would otherwise
+    # point the spawned CLI back at real config/backup paths (and on macOS, the real Keychain). Drop them
     # unless a caller set them deliberately.
-    for var in ("CLAUDE_CONFIG_DIR", "XDG_DATA_HOME"):
+    for var in ("CLAUDE_CONFIG_DIR", "XDG_DATA_HOME", "ROTA_HOME", "ROTA_IMPORT_FROM"):
         if var not in extra:
             env.pop(var, None)
     return env

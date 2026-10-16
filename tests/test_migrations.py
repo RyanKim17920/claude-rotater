@@ -407,7 +407,7 @@ def _make_macos_switcher(temp_home: Path) -> ClaudeAccountSwitcher:
 class TestMacosKeyringToSecurity:
     """``migrate_macos_keyring_to_security``: relocate per-account backup creds
     from the legacy keyring service (``claude-code``) to the ``security``-managed
-    service (``claude-swap``). The autouse guard fakes the security backend
+    service (``rota``). The autouse guard fakes the security backend
     in-memory; tests inject a ``FakeKeyring`` for the source."""
 
     def test_non_macos_skips(self, temp_home):

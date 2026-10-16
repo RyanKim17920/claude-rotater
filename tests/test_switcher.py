@@ -33,7 +33,6 @@ from claude_rotater.credentials import ActiveCredentials
 from claude_rotater.switcher import (
     CLAUDE_CODE_KEYCHAIN_SERVICE,
     ClaudeAccountSwitcher,
-    SECURITY_SERVICE,
     SETUP_TOKEN_SCOPES,
     _format_usage_lines,
 )
@@ -6289,7 +6288,7 @@ class TestMacosKeychainFallback:
             s._write_account_credentials("1", "a@example.com", "FILE-CREDS")
         assert s._read_account_credentials("1", "a@example.com") == "FILE-CREDS"
         # Stale keychain copy cleared (best-effort) so it can't resurface.
-        assert (SECURITY_SERVICE, "account-1-a@example.com") not in block_real_keychain.data
+        assert ("rota", "account-1-a@example.com") not in block_real_keychain.data
 
     @pytest.mark.parametrize("bad", ["corrupt", "", "!!!!", "   ", "\n"])
     def test_backup_bad_enc_falls_back_to_keychain(
@@ -6311,7 +6310,7 @@ class TestMacosKeychainFallback:
         s._write_backup_enc("1", "a@example.com", "FILE")
         s._delete_account_credentials("1", "a@example.com")
         assert not s._backup_enc_path("1", "a@example.com").exists()
-        assert (SECURITY_SERVICE, "account-1-a@example.com") not in block_real_keychain.data
+        assert ("rota", "account-1-a@example.com") not in block_real_keychain.data
 
     # -- .prev retention on an unreadable current generation --------------
 
@@ -6324,7 +6323,7 @@ class TestMacosKeychainFallback:
         s = self._macos_switcher()
         s._kc_write_backup("1", "a@example.com", "gen-1")
         s._write_account_credentials("1", "a@example.com", "gen-2")
-        assert (SECURITY_SERVICE, "account-1-a@example.com.prev") in block_real_keychain.data
+        assert ("rota", "account-1-a@example.com.prev") in block_real_keychain.data
         assert s._store._read_previous_backup("1", "a@example.com") == "gen-1"
 
 

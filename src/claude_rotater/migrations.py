@@ -35,7 +35,7 @@ from claude_rotater import macos_keychain
 from claude_rotater.exceptions import MigrationIncomplete
 from claude_rotater.fsutil import replace_with_retry
 from claude_rotater.models import Platform, get_timestamp
-from claude_rotater.switcher import KEYRING_SERVICE, SECURITY_SERVICE
+from claude_rotater.switcher import KEYRING_SERVICE
 
 if TYPE_CHECKING:
     from claude_rotater.switcher import ClaudeAccountSwitcher
@@ -292,7 +292,7 @@ def migrate_macos_keyring_to_security(switcher: "ClaudeAccountSwitcher") -> bool
     ``security`` service.
 
     macOS now stores per-account backup credentials in the Keychain via the
-    ``security`` CLI under ``SECURITY_SERVICE`` (see
+    ``security`` CLI under the data dir's backup service (see
     :mod:`claude_rotater.macos_keychain`) instead of the third-party ``keyring``
     library's ``KEYRING_SERVICE``. Source and dest are *different* services, so old
     keyring items and new security items coexist during a safe

@@ -84,23 +84,13 @@ class EngineHarness:
 
     def __init__(self, temp_home: Path, **settings_kwargs):
         self.temp_home = temp_home
-        # get_backup_root() (switcher.py) resolves via Path.home() on every
-        # platform (both its XDG branch and its legacy
-        # get_legacy_backup_root() fallback honour it, paths.py:101-108) —
-        # but on LINUX/WSL, $XDG_DATA_HOME takes precedence over Path.home()
-        # when set (paths.py:102-106). Patching Path.home() alone is not a
-        # superset of patching $XDG_DATA_HOME alone: a developer/CI with
-        # XDG_DATA_HOME exported would have every EngineHarness's XDG branch
-        # resolve to that ONE ambient value regardless of Path.home(),
-        # aliasing all harnesses in the process onto one store. Keep BOTH
-        # patches — neither mechanism dominates the other, and each covers
-        # the platforms/environments where the other is silent.
+        # get_backup_root() resolves ~/.rota via Path.home(), but $ROTA_HOME
+        # takes precedence when set. Patching Path.home() alone is not a
+        # superset of pinning $ROTA_HOME: one exported ROTA_HOME would alias
+        # every harness in the process onto one store. Pin both.
         with (
             patch("pathlib.Path.home", return_value=self.temp_home),
-            patch.dict(
-                os.environ,
-                {"XDG_DATA_HOME": str(self.temp_home / ".local" / "share")},
-            ),
+            patch.dict(os.environ, {"ROTA_HOME": str(self.temp_home / ".rota")}),
         ):
             self.switcher = ClaudeAccountSwitcher()
             self.switcher.platform = Platform.LINUX
@@ -211,18 +201,10 @@ class TestEngineHarnessIsolation:
     isolation silently, and the next multi-harness test would alias two
     accounts' stores into one without any assertion noticing.
 
-    An earlier fix scoped isolation on `$XDG_DATA_HOME`, which
-    `get_backup_root()` only consults on LINUX/WSL (paths.py:101) — so
-    the guard's OWN skipif, added because the mechanism is genuinely absent
-    off Linux, also left the guard itself untested there (measured: skip
-    forced + scoping reverted, full suite SURVIVED). The aliasing it
-    guards against is real off Linux (direct probe: two harnesses on
-    distinct subtrees collapsed to one store under the legacy
-    ~/.claude-swap-backup path, and h1's seeded account silently became
-    h2's). `Path.home()` is honoured by get_backup_root() on EVERY platform
-    (both its XDG branch and its `get_legacy_backup_root()` fallback —
-    paths.py:101-108), so scoping there instead makes the guard, and this
-    test, load-bearing everywhere and lets the skipif be deleted.
+    The aliasing it guards against is real on every platform (direct
+    probe: two harnesses on distinct subtrees collapsed to one store, and
+    h1's seeded account silently became h2's), so the test is parametrized
+    over all of them.
 
     A "distinct subtree" harness (`EngineHarness(temp_home / "h1")`, the
     pattern this test and `decision_at()` in `TestAdaptiveScheduler` use)
@@ -275,28 +257,22 @@ class TestEngineHarnessIsolation:
             "z@example.com"
         ), "h1's seed() bled into h2's store"
 
-    def test_two_harnesses_with_xdg_data_home_set_get_distinct_stores(
+    def test_two_harnesses_with_rota_home_set_get_distinct_stores(
         self, temp_home, monkeypatch
     ):
-        """The `Path.home()` patch is NOT a superset of the
-        `$XDG_DATA_HOME` one. `get_backup_root()` gives `$XDG_DATA_HOME`
-        precedence over `Path.home()` on Linux/WSL
-        (paths.py:101-107) -- so a developer/CI with `XDG_DATA_HOME` exported
-        still gets two harnesses colliding on ONE store, even though each
-        harness's `Path.home()` differs. The prior test above cannot see this
-        because the autouse `_isolate_real_home` fixture unconditionally
-        `delenv`s `XDG_DATA_HOME`, so it must be re-set here, after that
-        fixture has already run, to reproduce the defect at all.
+        """The `Path.home()` patch is NOT a superset of the `$ROTA_HOME`
+        one: `get_backup_root()` gives `$ROTA_HOME` precedence, so a
+        developer/CI with it exported would still get two harnesses
+        colliding on ONE store. The autouse `_isolate_real_home` fixture
+        `delenv`s `ROTA_HOME`, so it is re-set here to reproduce the defect.
         """
-        monkeypatch.setattr(Platform, "detect", staticmethod(lambda: Platform.LINUX))
-        shared_xdg = temp_home / "shared-xdg"
-        monkeypatch.setenv("XDG_DATA_HOME", str(shared_xdg))
+        monkeypatch.setenv("ROTA_HOME", str(temp_home / "shared-profile"))
         h1 = EngineHarness(temp_home / "h1")
         h2 = EngineHarness(temp_home / "h2")
         assert h1.switcher.backup_dir != h2.switcher.backup_dir, (
             f"both harnesses collapsed onto {h1.switcher.backup_dir} with "
-            "XDG_DATA_HOME set -- Path.home() scoping alone does not "
-            "override XDG_DATA_HOME's precedence on Linux/WSL"
+            "ROTA_HOME set -- Path.home() scoping alone does not "
+            "override ROTA_HOME's precedence"
         )
 
         h1.seed(1, "a@example.com")

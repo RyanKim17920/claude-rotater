@@ -312,61 +312,20 @@ def test_frozen_specs_include_the_two_non_recursive_roots(
     assert home in non_recursive_roots
 
 
-@pytest.mark.parametrize("platform", [Platform.LINUX, Platform.MACOS])
-def test_frozen_specs_cover_the_migration_flag_and_the_transcript_tree(
-    monkeypatch, tmp_path, platform
-):
-    """Two writes that reach past every root the test above checks.
-
-    The migration flag is a SIBLING of the backup root, and transcripts land
-    two levels under a ``~/.claude`` that is non-recursive on purpose. Both
-    were allowed while every root here was armed, so a spec test that only
-    counts the roots cannot see either.
-
-    Parametrized over the two store layouts, because they put the flag in
-    different places: XDG at ``~/.local/share/.claude-swap.migrating``,
-    whose parent is no root at all, and legacy (macOS, and Windows through
-    the same branch) at ``~/..claude-swap-backup.migrating``, a direct child
-    of the ``$HOME`` root. Only the XDG layout leaves it uncovered without
-    this entry, so a premise phrased for that one alone is false on the
-    other two platforms.
-    """
+def test_frozen_specs_cover_the_transcript_tree(monkeypatch, tmp_path):
+    """Transcripts land two levels under a ``~/.claude`` that is
+    non-recursive on purpose, so a spec test that only counts the roots
+    cannot see them."""
     home = tmp_path / "home"
     (home / ".claude").mkdir(parents=True)
     monkeypatch.setattr("pathlib.Path.home", lambda: home)
-    monkeypatch.setattr(Platform, "detect", staticmethod(lambda: platform))
-    for var in ("CLAUDE_CONFIG_DIR", "CLAUDE_SECURESTORAGE_CONFIG_DIR", "XDG_DATA_HOME"):
+    for var in ("CLAUDE_CONFIG_DIR", "CLAUDE_SECURESTORAGE_CONFIG_DIR", "ROTA_HOME"):
         monkeypatch.delenv(var, raising=False)
-
-    # CONTROL: the patch above really selected this layout. Without it both
-    # arms resolve the same store, and the legacy coverage this test exists
-    # for disappears with nothing failing.
-    assert paths.get_backup_root() == (
-        home / ".claude-swap-backup" if platform is Platform.MACOS
-        else home / ".local" / "share" / "claude-swap"
-    )
+    assert paths.get_backup_root() == home / ".rota"
 
     specs = conftest._freeze_real_store_specs()
-    roots = {root for root, _ in specs}
     recursive_roots = {root for root, recursive in specs if recursive}
-
-    flag = paths.migration_flag_for(paths.get_backup_root())
-    assert flag in roots, (
-        f"the migration flag is unprotected; a test that creates it leaves it "
-        f"behind and the next real run rmtree's the store it names. {flag}"
-    )
-    # PREMISE: a SIBLING of the backup root, so no recursive root covering
-    # that root ever reaches it -- on either layout.
-    assert not any(root in flag.parents for root in recursive_roots)
-    # BEHAVIOUR, not membership. A FILE root is reachable only through the
-    # `target == root` arm -- nothing can sit under a file -- and deleting
-    # that arm leaves the ENTIRE suite green, so assert the refusal itself.
-    # The parent is made first, while nothing protects it yet, so a
-    # regression reads as a write that was ALLOWED, not a missing directory.
-    flag.parent.mkdir(parents=True, exist_ok=True)
-    monkeypatch.setattr(conftest, "_REAL_STORE_SPECS", specs)
-    with pytest.raises(conftest.RealStoreWriteBlocked):
-        flag.touch()
+    assert home / ".rota" in recursive_roots
 
     # Every DIRECTORY `--share-history` shares needs a recursive root of its
     # own: its contents land two levels under the non-recursive `~/.claude`.
@@ -424,39 +383,55 @@ def test_frozen_specs_ignore_a_developer_exported_claude_config_dir(
     )
 
 
-def test_frozen_specs_include_the_ambient_xdg_override_backup_root(
+def test_frozen_specs_include_the_ambient_rota_home_backup_root(
     monkeypatch, tmp_path
 ):
-    """`_freeze_real_store_specs` clears XDG_DATA_HOME before resolving, so on
-    a machine where it's exported OUTSIDE $HOME, the real account store lives
-    at the override path and this snapshot never included it — the defaults
-    snapshot alone is not enough. The frozen set must ALSO contain the root
-    `claude_rotater.paths` resolves to under the environment as it actually is."""
+    """`_freeze_real_store_specs` clears ROTA_HOME before resolving, so on a
+    machine where it's exported OUTSIDE $HOME, the real account store lives
+    at the override path and the defaults snapshot never includes it. The
+    frozen set must ALSO contain the root `claude_rotater.paths` resolves to
+    under the environment as it actually is."""
     home = tmp_path / "home"
     home.mkdir()
-    xdg = tmp_path / "xdg-outside-home"  # deliberately NOT under `home`
-    xdg.mkdir()
+    profile = tmp_path / "profile-outside-home"  # deliberately NOT under `home`
     monkeypatch.setattr("pathlib.Path.home", lambda: home)
-    monkeypatch.setattr(Platform, "detect", staticmethod(lambda: Platform.LINUX))
-    monkeypatch.setenv("XDG_DATA_HOME", str(xdg))
+    monkeypatch.setenv("ROTA_HOME", str(profile))
     monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
 
     specs = conftest._freeze_real_store_specs()
     recursive_roots = {root for root, recursive in specs if recursive}
 
-    assert xdg / "claude-swap" in recursive_roots, (
-        "the XDG-override backup root must be protected, not only the "
-        "cleared-env default ~/.local/share/claude-swap"
+    assert profile in recursive_roots, (
+        "the ROTA_HOME backup root must be protected, not only the "
+        "cleared-env default ~/.rota"
     )
-    assert home / ".local" / "share" / "claude-swap" in recursive_roots, (
+    assert home / ".rota" in recursive_roots, (
         "the genuinely-default root must still be protected too"
     )
+
+
+def test_frozen_specs_include_every_legacy_root_recursively(monkeypatch, tmp_path):
+    """Upstream's data dirs are only ever read by the import; any write
+    under them (XDG layout or the dot-dir) must be refused."""
+    home = tmp_path / "home"
+    home.mkdir()
+    xdg = tmp_path / "xdg-outside-home"
+    monkeypatch.setattr("pathlib.Path.home", lambda: home)
+    monkeypatch.setattr(Platform, "detect", staticmethod(lambda: Platform.LINUX))
+    monkeypatch.setenv("XDG_DATA_HOME", str(xdg))
+
+    recursive_roots = {
+        root for root, recursive in conftest._freeze_real_store_specs() if recursive
+    }
+    assert xdg / "claude-swap" in recursive_roots
+    assert home / ".local" / "share" / "claude-swap" in recursive_roots
+    assert home / ".claude-swap-backup" in recursive_roots
 
 
 def test_layout_a_runtime_real_store_is_refused_and_unrelated_tmp_still_writes(
     monkeypatch, tmp_path
 ):
-    """The mandatory YES/NO probe from the finding: under layout A (XDG_DATA_HOME
+    """The mandatory YES/NO probe from the finding: under layout A (ROTA_HOME
     exported outside $HOME), a write to the RUNTIME real store (what
     `paths.get_backup_root()` actually resolves to under this environment)
     must be refused (YES-arm) while a write to an unrelated tmp path must
@@ -464,21 +439,27 @@ def test_layout_a_runtime_real_store_is_refused_and_unrelated_tmp_still_writes(
     """
     home = tmp_path / "home"
     home.mkdir()
-    xdg = tmp_path / "xdg-outside-home"
-    xdg.mkdir()
+    profile = tmp_path / "profile-outside-home"
+    profile.mkdir()
     monkeypatch.setattr("pathlib.Path.home", lambda: home)
-    monkeypatch.setattr(Platform, "detect", staticmethod(lambda: Platform.LINUX))
-    monkeypatch.setenv("XDG_DATA_HOME", str(xdg))
+    monkeypatch.setenv("ROTA_HOME", str(profile))
     monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
 
     # Install the specs a real conftest import would freeze under THIS
     # (simulated) ambient environment — this is what the fix under test
     # changes; the live audit hook reads `conftest._REAL_STORE_SPECS` by
     # module-global lookup at call time, so this patch governs its behavior.
-    monkeypatch.setattr(conftest, "_REAL_STORE_SPECS", conftest._freeze_real_store_specs())
+    specs = conftest._freeze_real_store_specs()
+    monkeypatch.setattr(conftest, "_REAL_STORE_SPECS", specs)
+    # The hints a real import would derive from those specs: the profile's
+    # basename is arbitrary, so only the derived hint lets the write through
+    # the cheap pre-filter to the specs check.
+    monkeypatch.setattr(
+        conftest, "_REAL_STORE_HINTS", conftest._derive_real_store_hints(specs, home)
+    )
 
     runtime_real_store = paths.get_backup_root()
-    assert runtime_real_store == xdg / "claude-swap"  # sanity: the hole's target
+    assert runtime_real_store == profile  # sanity: the hole's target
 
     # YES-arm: the runtime real store must be refused.
     yes_target = runtime_real_store / "sequence.json"
@@ -795,39 +776,16 @@ def test_a_relative_candidate_that_already_carries_a_hint_is_still_joined(
 
 
 def test_the_legacy_backup_root_is_protected_recursively():
-    """`~/.claude-swap-backup` is a SEPARATE live path on Linux -- `switcher`
-    migrates data out of it and purges it -- and nothing was asserting it.
-
-    RECURSIVELY, because the flag is what the hook branches on: a
-    non-recursive root protects only its direct children, and the file the
-    original incident overwrote was nested (`credentials/*.enc`). Asserting
-    membership alone passes on a spec downgraded to non-recursive.
-
-    On macOS and Windows `get_backup_root()` returns this same path, so the
-    entry is a duplicate there and dropping it is a no-op. The assert is
-    Linux-only in effect and needs no marker: if those platforms ever stop
-    aliasing the two, it starts firing there too.
-    """
-    # THE ARTIFACT THE HOOK READS, not the factory that built it. The hook
-    # branches on the module global frozen at import; asserting on a fresh
-    # `_freeze_real_store_specs()` call leaves the two unconnected, and
-    # flattening every flag in that global was measured green across the whole
-    # suite while a nested `credentials/*.enc` write went REFUSED -> ALLOWED.
+    """`~/.claude-swap-backup` is upstream's live store, which rota only
+    reads. RECURSIVELY, because the file the original incident overwrote
+    was nested (`credentials/*.enc`)."""
+    # THE ARTIFACT THE HOOK READS, not the factory that built it.
     frozen = dict(conftest._REAL_STORE_SPECS)
     frozen_legacy = conftest._HOME_AT_FREEZE_TIME / paths.LEGACY_BACKUP_DIRNAME
     assert frozen.get(frozen_legacy) is True, (
         f"the legacy backup root {frozen_legacy} is not frozen as RECURSIVELY "
         "protected in the specs the audit hook actually reads, so a nested "
         f"write under it is allowed: {sorted((str(r), f) for r, f in frozen.items())}"
-    )
-    recursive_roots = {
-        root for root, recursive in conftest._freeze_real_store_specs() if recursive
-    }
-    legacy = paths.get_legacy_backup_root()
-    assert legacy in recursive_roots, (
-        f"the legacy backup root {legacy} is not frozen as recursively "
-        "protected, so a test whose isolation has unwound can write into the "
-        f"account's real pre-XDG store: {sorted(map(str, recursive_roots))}"
     )
 
 
@@ -861,28 +819,16 @@ def test_c0_a_scratch_home_still_protects_the_os_account_home_store(monkeypatch,
     monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
 
     pwd_home = Path(pwd.getpwuid(os.getuid()).pw_dir)
-    # POINTED AWAY -- ON LINUX AND WSL ONLY. There the ambient pass then
-    # cannot supply the scratch root, so the assert below rests on the pass
-    # this case names, and dropping `default_specs` fails it. On macOS and
-    # Windows `get_backup_root()` ignores `XDG_DATA_HOME` entirely and
-    # answers `~/.claude-swap-backup`, so both passes resolve to the same
-    # directory and this case cannot tell them apart -- the mutation it
-    # claims to kill SURVIVES on those jobs. Measured on both.
-    #
-    # The pass is still load-bearing in the scenario this case exists for:
-    # the mandated recipe exports HOME AND `XDG_DATA_HOME` before the
-    # interpreter starts, and only `default_specs` then protects the scratch
-    # HOME's own store.
-    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "xdg-outside"))
+    # POINTED AWAY: the ambient pass then cannot supply the scratch root, so
+    # the assert below rests on the pass this case names, and dropping
+    # `default_specs` fails it.
+    monkeypatch.setenv("ROTA_HOME", str(tmp_path / "profile-outside"))
     specs = conftest._freeze_real_store_specs()
     roots = [root for root, _recursive in specs]
 
-    # THE LAYOUT IS PER-PLATFORM, so both expectations are DERIVED under the
-    # HOME each snapshot resolves against, never spelled out. Written as the
-    # XDG path they named a directory macOS does not use: the backup root
-    # there is `~/.claude-swap-backup`, so this case failed on the one
-    # platform whose store lives somewhere else.
-    monkeypatch.delenv("XDG_DATA_HOME", raising=False)
+    # Both expectations are DERIVED under the HOME each snapshot resolves
+    # against, never spelled out.
+    monkeypatch.delenv("ROTA_HOME", raising=False)
     monkeypatch.setenv("HOME", str(pwd_home))
     # THE PREMISE FOR THE THING THAT CAN SILENTLY BREAK. `_REAL_PATH_HOME` is
     # captured at import; if that capture ever lands on a PATCHED `Path.home`,

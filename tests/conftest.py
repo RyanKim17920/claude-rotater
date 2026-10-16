@@ -116,7 +116,8 @@ def _freeze_real_store_specs() -> tuple[tuple[Path, bool], ...]:
     def _resolve() -> tuple[tuple[Path, bool], ...]:
         return (
             (_paths.get_backup_root(), True),
-            (_paths.get_legacy_backup_root(), True),
+            # Upstream claude-swap's dirs: the import only ever reads them.
+            *((root, True) for root in _paths.get_legacy_backup_roots()),
             (_paths.get_claude_config_home(), False),
             (_paths.get_default_claude_config_home(), False),
             (_paths.get_global_config_path().parent, False),
@@ -129,14 +130,6 @@ def _freeze_real_store_specs() -> tuple[tuple[Path, bool], ...]:
             # this docstring names as the protected set -- drops out of the
             # frozen roots entirely.
             (Path.home(), False),
-            # THE MIGRATION FLAG, which no other root reaches: it is a
-            # SIBLING of the backup root, not a child. A test allowed to
-            # create it leaves it behind -- `RealStoreWriteBlocked` is not an
-            # OSError, so the migration's own `flag.unlink()` never runs --
-            # and the next real run reads it as "a prior migration was
-            # interrupted" and rmtree's the live store instead of refusing
-            # the collision.
-            (_paths.migration_flag_for(_paths.get_backup_root()), False),
             # TWO LEVELS DOWN, so the non-recursive `~/.claude` above does
             # not reach them. `--share-history` moves real transcripts to
             # `~/.claude/projects/<slug>/<uuid>.jsonl`, and `_mkdir_private`
@@ -162,7 +155,8 @@ def _freeze_real_store_specs() -> tuple[tuple[Path, bool], ...]:
                     os.environ[k] = v
 
     default_specs = _resolve_with_cleared(
-        "CLAUDE_CONFIG_DIR", "CLAUDE_SECURESTORAGE_CONFIG_DIR", "XDG_DATA_HOME"
+        "CLAUDE_CONFIG_DIR", "CLAUDE_SECURESTORAGE_CONFIG_DIR", "XDG_DATA_HOME",
+        "ROTA_HOME",
     )
     # C-0: a THIRD snapshot, additive to (not replacing) default_specs above.
     # The mandated review/CI isolation recipe sets HOME/USERPROFILE (and
@@ -182,7 +176,7 @@ def _freeze_real_store_specs() -> tuple[tuple[Path, bool], ...]:
     # used to protect.
     home_default_specs = _resolve_with_cleared(
         "CLAUDE_CONFIG_DIR", "CLAUDE_SECURESTORAGE_CONFIG_DIR", "XDG_DATA_HOME",
-        "HOME", "USERPROFILE",
+        "ROTA_HOME", "HOME", "USERPROFILE",
     )
 
     seen: set[Path] = set()
@@ -254,7 +248,7 @@ def _derive_real_store_hints(
     (computed once, correctly, at conftest import time) excluding it.
     """
     return tuple(
-        {".claude", "claude-swap"}
+        {".claude", ".rota", "claude-swap"}
         | {root.name for root, _r in specs if root.name and root != home}
     )
 
@@ -308,8 +302,7 @@ def _real_store_audit_hook(event: str, args: tuple) -> None:
     elif event == "os.rename":
         # Covers os.replace too (same underlying audit event) — args are
         # (src, dst, src_dir_fd, dst_dir_fd). I-1: the SOURCE matters too,
-        # not only the destination — `shutil.move`'s `os.rename` (which is
-        # what `migrate_legacy_backup_dir` uses) relocates the protected
+        # not only the destination — `shutil.move`'s `os.rename` relocates the protected
         # root itself when the source is inside it and the destination is
         # not, the same "make the store disappear from where every reader
         # expects it" shape the `shutil.rmtree` branch below exists for.
@@ -494,7 +487,7 @@ def _isolate_real_home(request, tmp_path_factory, monkeypatch):
 
     Some tests (CLI/TUI argument tests that call ``main()``, etc.) construct a real
     ``ClaudeAccountSwitcher`` without the ``temp_home`` fixture. Without isolation
-    that switcher resolves to the real ``~/.claude-swap-backup`` — writing logs,
+    that switcher resolves to the real ``~/.rota`` — writing logs,
     running data migrations, and reading the real account list. Redirect ``$HOME``
     to a throwaway dir unless the test already uses ``temp_home`` (which sets its
     own). Runs first (autouse, before the keychain guard and other fixtures).
@@ -505,8 +498,9 @@ def _isolate_real_home(request, tmp_path_factory, monkeypatch):
     ``~/Library/Keychains``. An isolated ``$HOME`` makes those commands fail. The
     fixture itself swaps the default keychain to a throwaway one and restores it.
 
-    Always neutralize ``CLAUDE_CONFIG_DIR`` and ``XDG_DATA_HOME`` (even for
-    ``temp_home`` tests): both bypass ``$HOME`` in path resolution
+    Always neutralize ``CLAUDE_CONFIG_DIR``, ``XDG_DATA_HOME``, ``ROTA_HOME``
+    and ``ROTA_IMPORT_FROM`` (even for ``temp_home`` tests): they bypass
+    ``$HOME`` in path resolution
     (``paths.get_global_config_path``/``get_backup_root``), so a developer with
     either exported could otherwise have tests read/write real Claude config or
     backup paths — and on macOS that leads back to the real Keychain. Tests that
@@ -515,6 +509,8 @@ def _isolate_real_home(request, tmp_path_factory, monkeypatch):
     monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
     monkeypatch.delenv("CLAUDE_SECURESTORAGE_CONFIG_DIR", raising=False)
     monkeypatch.delenv("XDG_DATA_HOME", raising=False)
+    monkeypatch.delenv("ROTA_HOME", raising=False)
+    monkeypatch.delenv("ROTA_IMPORT_FROM", raising=False)
     if "temp_home" in request.fixturenames:
         return  # temp_home provides its own isolated home
     if "tmp_keychain" in request.fixturenames:

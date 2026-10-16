@@ -533,7 +533,7 @@ def main() -> None:
     json_mode = bool(getattr(args, "json", False))
 
     # Initialize the switcher and dispatch under a single error handler so
-    # init-time failures (e.g. MigrationError on a backup-dir collision) are
+    # init-time failures (e.g. MigrationError from the legacy import) are
     # presented like every other ClaudeSwitchError: clean stderr line, exit
     # 1, no traceback. JSON-capable commands return a payload; this is the
     # single point that serializes it.
