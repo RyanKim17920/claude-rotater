@@ -36,6 +36,28 @@ order:
 
 Dropping is always safe: the account simply falls back to polling, and the
 next good record (every statusline refresh produces one) is taken.
+
+**Staleness.** Each chat's statusline shows the rate limits of *its own*
+last API response and re-renders them on a timer, so an idle chat keeps
+emitting old numbers with a fresh ``t`` and two chats on one account
+disagree. Three rules keep that from reaching the store:
+
+- A reading is dated by the session's last assistant message (the
+  record's ``at``, see :mod:`claude_rotater.feed`), falling back to ``t``;
+  every rule above runs on that date, so an idle chat's re-render is as old
+  as its last response.
+- A record whose session reported exactly the same values (``at``
+  included) in its previous record is a re-render and carries nothing new:
+  dropped as ``rerender``.
+- Within one window, per account, usage never decreases, so the accepted
+  readings of a pass are folded together keeping the highest pct (and the
+  stored one, :func:`merged_usage`): a stale chat can never pull an
+  account's number down.
+
+The feed never fully replaces polling: the hold an adopted reading places
+lasts at most until ``pollSpareSeconds`` after this machine's last real
+poll of the account, so a ground-truth fetch still corrects drift (or a
+misattribution) on the spare cadence while a session is busy.
 """
 
 from __future__ import annotations
@@ -44,7 +66,7 @@ import json
 import logging
 import os
 import time
-from collections import Counter
+from collections import Counter, OrderedDict
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -76,6 +98,10 @@ BEHIND_PCT = RESET_DROP_PCT
 # An unchanged reading is added to the history at most this often (the
 # statusline refreshes every few seconds while a session is busy).
 HISTORY_MIN_GAP_S = 60.0
+
+# Sessions whose last record is remembered for the re-render check; the
+# oldest is forgotten first (costs at most one duplicate record).
+SESSION_MEMORY = 256
 
 ACCEPTED = "accepted"
 ACCEPTED_SESSION = "accepted-session"
@@ -109,6 +135,25 @@ def _norm(path: str) -> str:
     except (OSError, ValueError):
         resolved = os.path.abspath(path)
     return os.path.normcase(resolved)
+
+
+def reading_time(record: dict) -> float:
+    """When a record's numbers were current: the session's last assistant
+    message (``at``) when known, never later than the record itself."""
+    t = float(record["t"])
+    at = record.get("at")
+    if isinstance(at, (int, float)) and not isinstance(at, bool):
+        return min(float(at), t)
+    return t
+
+
+def _values(record: dict) -> tuple:
+    """What a session reported, for the re-render check."""
+    return (record.get("at"),) + tuple(
+        (key, window.get("pct"), window.get("resets_at"))
+        for key in feed.WINDOW_KEYS
+        if isinstance(window := record.get(key), dict)
+    )
 
 
 def _live_windows(record: dict, t: float) -> dict[str, dict]:
@@ -278,6 +323,7 @@ class FeedIngestor:
         self.clock = clock
         self._cursor: feed.FeedCursor | None = None
         self._last_sample: dict[str, tuple[float, tuple]] = {}
+        self._sessions: OrderedDict[str, tuple] = OrderedDict()
 
     @property
     def watch_dir(self) -> str:
@@ -285,7 +331,7 @@ class FeedIngestor:
 
     def ingest(self) -> IngestResult:
         """One pass: read what was appended since the last pass, attribute
-        it, adopt the newest accepted reading per account. Never raises."""
+        it, adopt the folded accepted readings per account. Never raises."""
         result = IngestResult()
         try:
             records, self._cursor = feed.read_new(self.path, self._cursor)
@@ -297,19 +343,38 @@ class FeedIngestor:
             _logger.debug("Statusline feed records dropped: %s", dict(result.rejected))
         return result
 
+    def _rerender(self, record: dict) -> bool:
+        """Whether ``record`` repeats its session's previous record."""
+        session = record.get("session_id")
+        if not isinstance(session, str):
+            return False
+        values = _values(record)
+        repeat = self._sessions.get(session) == values
+        self._sessions[session] = values
+        self._sessions.move_to_end(session)
+        while len(self._sessions) > SESSION_MEMORY:
+            self._sessions.popitem(last=False)
+        return repeat
+
     def _apply(self, records: list[dict], result: IngestResult) -> None:
         now = self.clock()
-        stale_s = poll_policy.load_cadence(self.backup_dir).feed_stale_s
+        cadence = poll_policy.load_cadence(self.backup_dir)
+        stale_s = cadence.feed_stale_s
         identities = self.switcher.usage_identities()
         store = self.switcher._usage_store
-        stored = {num: entry.last_good for num, entry in store.entries(identities).items()}
+        entries = store.entries(identities)
+        stored = {num: entry.last_good for num, entry in entries.items()}
         active = self.switcher.current_account_number()
         last_switch_at = read_last_switch_at(self.backup_dir)
         config_home = str(paths.get_claude_config_home())
         sessions_dir = self.backup_dir / "sessions"
 
-        newest: dict[str, dict] = {}
+        accepted: dict[str, list[dict]] = {}
         for record in records:
+            if self._rerender(record):
+                result.rejected["rerender"] += 1
+                continue
+            record = dict(record, t=reading_time(record))
             verdict = attribute(
                 record,
                 now=now,
@@ -324,17 +389,33 @@ class FeedIngestor:
             if not verdict.accepted:
                 result.rejected[verdict.reason] += 1
                 continue
-            prev = newest.get(verdict.slot)
-            if prev is None or record["t"] >= prev["t"]:
-                newest[verdict.slot] = record
+            accepted.setdefault(verdict.slot, []).append(record)
 
-        for slot, record in newest.items():
-            usage = merged_usage(stored.get(slot), record)
-            age = max(0.0, now - float(record["t"]))
+        for slot, group in accepted.items():
+            group.sort(key=lambda r: r["t"])
+            usage = stored.get(slot)
+            for record in group:
+                usage = merged_usage(usage, record)
+            t = float(group[-1]["t"])
+            age = max(0.0, now - t)
+            hold_s = max(0.0, stale_s - age)
+            # Ground truth on the spare cadence: the hold never outlasts
+            # pollSpareSeconds past this machine's last real poll.
+            entry = entries.get(slot)
+            last_attempt = entry.last_attempt_at if entry is not None else None
             ident = {slot: identities[slot]}
-            store.adopt({slot: (usage, age)}, ident, hold_s=max(0.0, stale_s - age))
-            result.adopted[slot] = float(record["t"])
-            self._sample(slot, usage, ident, float(record["t"]))
+            if last_attempt is None:
+                # Never polled here: no hold, and a plan that is due now, so
+                # the first ground-truth fetch is not starved by the feed
+                # keeping the reading fresh.
+                hold_s = 0.0
+                if entry is None or entry.next_poll_at is None:
+                    store.set_poll_plan({slot: (now, None)}, ident)
+            else:
+                hold_s = min(hold_s, max(0.0, last_attempt + cadence.spare_s - now))
+            store.adopt({slot: (usage, age)}, ident, hold_s=hold_s)
+            result.adopted[slot] = t
+            self._sample(slot, usage, ident, t)
 
     def _sample(self, slot: str, usage: dict, ident: dict, t: float) -> None:
         key = tuple(

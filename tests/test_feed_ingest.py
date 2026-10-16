@@ -18,6 +18,7 @@ from claude_rotater.feed_ingest import (
     attribute,
     merged_usage,
     read_last_switch_at,
+    reading_time,
 )
 from tests.test_autoswitch import EngineHarness, _iso_at, _usage
 
@@ -235,6 +236,11 @@ def entry(h, num="1"):
     return h.switcher._usage_store.entries(h.switcher.usage_identities())[num]
 
 
+def polled(h, *nums):
+    """Stamp a real poll of ``nums`` (what holds are capped against)."""
+    collect(h, {n: _usage(10) for n in nums}, set(nums))
+
+
 def collect(h, usage_by_num, fetch):
     fetched: list[str] = []
 
@@ -250,29 +256,60 @@ def collect(h, usage_by_num, fetch):
 class TestIngest:
     def test_adopts_holds_and_records_history(self, h):
         ing = FeedIngestor(h.switcher, clock=h.clock)
+        polled(h, "1")
+        h.clock.advance(1)
         write(h, pct5=42.0)
         result = ing.ingest()
         assert result.adopted == {"1": h.clock.now}
         e = entry(h)
         assert e.last_good["five_hour"]["pct"] == 42.0
         assert e.fetched_at == h.clock.now
-        assert e.held_until == pytest.approx(h.clock.now + poll_policy.FEED_STALE_S)
+        # Capped at the spare cadence after the poll a second ago.
+        assert e.held_until == pytest.approx(h.clock.now - 1 + poll_policy.SPARE_INTERVAL_S)
         assert e.decision_value() is not None
         series = h.switcher.usage_history.series({"1": ID1})["1"]
-        assert [p.pct for p in series["5h"]] == [42.0]
+        assert [p.pct for p in series["5h"]][-1] == 42.0
         # Nothing new: nothing done.
         assert not ing.ingest().changed
 
-    def test_active_is_not_polled_while_the_feed_is_fresh(self, h):
+    def test_fresh_feed_still_gets_a_ground_truth_poll_on_the_spare_cadence(self, h):
         ing = FeedIngestor(h.switcher, clock=h.clock)
         usage = {"1": _usage(10), "2": _usage(10)}
         assert sorted(collect(h, usage, {"1", "2"})) == ["1", "2"]
-        for _ in range(4):  # a busy session keeps refreshing the feed
-            h.clock.advance(300)
-            write(h, pct5=20.0)
+        start = h.clock.now
+        polls = []
+        for _ in range(30):  # a busy session refreshes the feed every minute
+            h.clock.advance(60)
+            write(h, pct5=20.0 + len(polls))
             ing.ingest()
-            # The active plan (600 s) comes due, but the hold keeps it off.
-            assert "1" not in collect(h, usage, {"1", "2"})
+            if "1" in collect(h, usage, {"1"}):
+                polls.append(h.clock.now - start)
+        spare = poll_policy.SPARE_INTERVAL_S
+        # Not more often than the spare cadence (jitter aside), but never
+        # starved by the feed either.
+        assert len(polls) >= 2
+        gaps = [b - a for a, b in zip([0.0] + polls, polls)]
+        assert all(gap >= spare * (1 - poll_policy.JITTER_FRAC) - 60 for gap in gaps)
+        assert all(gap <= spare * (1 + poll_policy.JITTER_FRAC) + 60 for gap in gaps)
+
+    def test_never_polled_account_gets_its_first_poll_despite_the_feed(self, h):
+        ing = FeedIngestor(h.switcher, clock=h.clock)
+        write(h, pct5=20.0)
+        ing.ingest()
+        e = entry(h)
+        assert e.held_until is None
+        assert e.next_poll_at == h.clock.now
+        assert collect(h, {"1": _usage(10)}, {"1"}) == ["1"]
+
+    def test_hold_is_capped_at_the_spare_cadence_after_the_last_poll(self, h):
+        ing = FeedIngestor(h.switcher, clock=h.clock)
+        polled(h, "1")
+        h.clock.advance(400)
+        write(h)
+        ing.ingest()
+        assert entry(h).held_until == pytest.approx(
+            h.clock.now - 400 + poll_policy.SPARE_INTERVAL_S
+        )
 
     def test_stale_feed_falls_back_to_polling(self, h):
         ing = FeedIngestor(h.switcher, clock=h.clock)
@@ -290,12 +327,14 @@ class TestIngest:
             json.dumps({"autoswitch": {"feedStaleSeconds": 120}})
         )
         ing = FeedIngestor(h.switcher, clock=h.clock)
+        polled(h, "1")
         write(h)
         ing.ingest()
         assert entry(h).held_until == pytest.approx(h.clock.now + 120)
 
     def test_late_ingest_holds_only_the_remainder(self, h):
         ing = FeedIngestor(h.switcher, clock=h.clock)
+        polled(h, "1")
         write(h)
         h.clock.advance(100)
         ing.ingest()
@@ -375,3 +414,124 @@ class TestIngest:
         monkeypatch.setattr(h.switcher._usage_store, "adopt", boom)
         write(h)
         assert not ing.ingest().changed
+
+
+# -- staleness: re-renders, divergent sessions, reading time ------------------------
+
+
+def swrite(h, session, at, **kw):
+    """A record from chat ``session`` whose last response was at ``at``."""
+    kw.setdefault("t", h.clock.now)
+    kw.setdefault("config_dir", str(h.temp_home / ".claude"))
+    kw.setdefault("reset5", NOW + 4 * 3600)
+    kw.setdefault("reset7", NOW + 5 * 86400)
+    record = rec(**kw)
+    record["session_id"] = session
+    if at is not None:
+        record["at"] = at
+    feed.append_record(feed.feed_path(h.switcher.backup_dir), record)
+
+
+class TestStaleness:
+    def test_reading_time_prefers_the_last_response_but_never_the_future(self):
+        assert reading_time({"t": 100.0, "at": 40.0}) == 40.0
+        assert reading_time({"t": 100.0, "at": 140.0}) == 100.0
+        assert reading_time({"t": 100.0}) == 100.0
+        assert reading_time({"t": 100.0, "at": True}) == 100.0
+
+    def test_idle_chat_rerendering_old_numbers_is_stale(self, h):
+        ing = FeedIngestor(h.switcher, clock=h.clock)
+        # Rendered just now, but its last response was 20 minutes ago.
+        swrite(h, "idle", at=h.clock.now - 1200, pct5=30.0)
+        result = ing.ingest()
+        assert result.rejected == {"stale": 1}
+        assert entry(h).last_good is None
+
+    def test_two_chats_diverge_the_higher_reading_wins(self, h):
+        ing = FeedIngestor(h.switcher, clock=h.clock)
+        polled(h, "1")
+        h.clock.advance(10)
+        # The busy chat answered 5 s ago at 50%; the quieter one, rendered
+        # later, still shows its response from 2 minutes ago at 49%.
+        swrite(h, "busy", at=h.clock.now - 5, pct5=50.0)
+        swrite(h, "quiet", at=h.clock.now - 120, pct5=49.0)
+        result = ing.ingest()
+        assert result.adopted == {"1": h.clock.now - 5}
+        assert entry(h).last_good["five_hour"]["pct"] == 50.0
+        # The quiet chat renders again, still behind: it never pulls the
+        # account's number down.
+        h.clock.advance(30)
+        swrite(h, "quiet", at=h.clock.now - 60, pct5=49.5)
+        ing.ingest()
+        assert entry(h).last_good["five_hour"]["pct"] == 50.0
+        # Older than what the store holds: it does not make it look fresher.
+        assert entry(h).fetched_at == pytest.approx(h.clock.now - 35)
+
+    def test_far_behind_chat_is_dropped(self, h):
+        ing = FeedIngestor(h.switcher, clock=h.clock)
+        polled(h, "1")
+        h.clock.advance(10)
+        swrite(h, "busy", at=h.clock.now - 5, pct5=50.0)
+        ing.ingest()
+        swrite(h, "quiet", at=h.clock.now - 2, pct5=30.0)
+        assert ing.ingest().rejected == {"behind-stored": 1}
+        assert entry(h).last_good["five_hour"]["pct"] == 50.0
+
+    def test_rerenders_are_dropped_until_the_values_change(self, h):
+        ing = FeedIngestor(h.switcher, clock=h.clock)
+        polled(h, "1")
+        at = h.clock.now + 1
+        h.clock.advance(5)
+        for _ in range(3):
+            swrite(h, "s", at=at, pct5=40.0)
+            h.clock.advance(5)
+        result = ing.ingest()
+        assert result.adopted == {"1": at}
+        assert result.rejected == {"rerender": 2}
+        # Same numbers from a new response: news (it renews freshness).
+        swrite(h, "s", at=h.clock.now, pct5=40.0)
+        assert ing.ingest().adopted == {"1": h.clock.now}
+        # Re-render across passes is still recognized.
+        h.clock.advance(5)
+        swrite(h, "s", at=h.clock.now - 5, pct5=40.0)
+        assert ing.ingest().rejected == {"rerender": 1}
+
+    def test_rerender_without_a_transcript_time_is_dropped_too(self, h):
+        ing = FeedIngestor(h.switcher, clock=h.clock)
+        swrite(h, "s", at=None, pct5=40.0)
+        h.clock.advance(5)
+        swrite(h, "s", at=None, pct5=40.0)
+        assert ing.ingest().rejected == {"rerender": 1}
+
+    def test_session_memory_is_bounded(self, h):
+        from claude_rotater.feed_ingest import SESSION_MEMORY
+
+        ing = FeedIngestor(h.switcher, clock=h.clock)
+        for i in range(SESSION_MEMORY + 10):
+            ing._rerender({"session_id": f"s{i}", "t": 1.0})
+        assert len(ing._sessions) == SESSION_MEMORY
+        assert "s0" not in ing._sessions
+
+    def test_window_reset_takes_the_new_low_reading(self, h):
+        ing = FeedIngestor(h.switcher, clock=h.clock)
+        reset = h.clock.now + 600
+        swrite(h, "s", at=h.clock.now, pct5=95.0, reset5=reset)
+        ing.ingest()
+        assert entry(h).last_good["five_hour"]["pct"] == 95.0
+        h.clock.advance(700)  # the 5h window rolled over
+        swrite(h, "s", at=h.clock.now - 10, pct5=2.0, reset5=reset + 5 * 3600)
+        result = ing.ingest()
+        assert result.adopted == {"1": h.clock.now - 10}
+        usage = entry(h).last_good["five_hour"]
+        assert usage["pct"] == 2.0
+        assert poll_policy.parse_reset_ts(usage["resets_at"]) == reset + 5 * 3600
+
+    def test_rerenders_add_no_history(self, h):
+        ing = FeedIngestor(h.switcher, clock=h.clock)
+        at = h.clock.now
+        for _ in range(5):
+            swrite(h, "s", at=at, pct5=40.0)
+            h.clock.advance(HISTORY_MIN_GAP_S + 1)
+            ing.ingest()
+        series = h.switcher.usage_history.series({"1": ID1})["1"]["5h"]
+        assert [p.t for p in series] == [at]
