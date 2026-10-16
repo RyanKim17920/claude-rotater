@@ -12,10 +12,9 @@ from enum import Enum, auto
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from claude_swap.usage_store import UsageEntry
-
 if TYPE_CHECKING:
     from claude_swap.switcher import ClaudeAccountSwitcher
+    from claude_swap.usage_store import UsageEntry
 
 
 #: Alias validation: letters/digits/-/_/., non-empty, not purely digits (so an

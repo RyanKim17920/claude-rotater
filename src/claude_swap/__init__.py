@@ -1,9 +1,29 @@
-"""Multi-account switcher for Claude Code."""
+"""Multi-account switcher for Claude Code.
 
-from importlib.metadata import version
+The package attributes resolve lazily (PEP 562): importing any submodule runs
+this file first, and ``cswap feed`` runs on every statusline refresh, where
+pulling in the switcher (and with it the HTTP and Keychain stacks) would cost
+over 100 ms per call for nothing.
+"""
 
-__version__ = version("claude-swap")
+from __future__ import annotations
 
-from claude_swap.switcher import ClaudeAccountSwitcher
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from claude_swap.switcher import ClaudeAccountSwitcher
 
 __all__ = ["ClaudeAccountSwitcher", "__version__"]
+
+
+def __getattr__(name: str):
+    if name == "__version__":
+        from importlib.metadata import version
+
+        value = version("claude-swap")
+    elif name == "ClaudeAccountSwitcher":
+        from claude_swap.switcher import ClaudeAccountSwitcher as value
+    else:
+        raise AttributeError(f"module 'claude_swap' has no attribute {name!r}")
+    globals()[name] = value
+    return value
