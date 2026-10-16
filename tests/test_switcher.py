@@ -387,127 +387,6 @@ class TestResolveByAlias:
         assert email == "account2@example.com"
 
 
-class TestAliasCommand:
-    """Test ClaudeAccountSwitcher.set_alias()/unset_alias()/list_aliases()."""
-
-    def _write(self, switcher, data):
-        switcher._setup_directories()
-        switcher._write_json(switcher.sequence_file, data)
-
-    def test_set_alias_by_number(self, temp_home: Path, sample_sequence_data: dict):
-        switcher = ClaudeAccountSwitcher()
-        self._write(switcher, sample_sequence_data)
-
-        num, normalized = switcher.set_alias("2", "dev")
-
-        assert num == "2"
-        assert normalized == "dev"
-        data = switcher._get_sequence_data()
-        assert data["accounts"]["2"]["alias"] == "dev"
-
-    def test_set_alias_normalizes_to_lowercase(
-        self, temp_home: Path, sample_sequence_data: dict
-    ):
-        switcher = ClaudeAccountSwitcher()
-        self._write(switcher, sample_sequence_data)
-
-        _, normalized = switcher.set_alias("2", "DEV")
-
-        assert normalized == "dev"
-        data = switcher._get_sequence_data()
-        assert data["accounts"]["2"]["alias"] == "dev"
-
-    def test_set_alias_by_email(self, temp_home: Path, sample_sequence_data: dict):
-        switcher = ClaudeAccountSwitcher()
-        self._write(switcher, sample_sequence_data)
-
-        num, _ = switcher.set_alias("account2@example.com", "dev")
-
-        assert num == "2"
-        data = switcher._get_sequence_data()
-        assert data["accounts"]["2"]["alias"] == "dev"
-
-    def test_rename_via_existing_alias_identifier(
-        self, temp_home: Path, sample_sequence_data: dict
-    ):
-        """cswap alias <old> <new> — identifier can itself be an alias."""
-        switcher = ClaudeAccountSwitcher()
-        self._write(switcher, sample_sequence_data)
-        switcher.set_alias("1", "dev")
-
-        num, normalized = switcher.set_alias("dev", "prod")
-
-        assert num == "1"
-        assert normalized == "prod"
-        assert switcher._resolve_account_identifier("prod") == "1"
-        assert switcher._resolve_account_identifier("dev") is None
-
-    def test_set_invalid_alias_raises(self, temp_home: Path, sample_sequence_data: dict):
-        switcher = ClaudeAccountSwitcher()
-        self._write(switcher, sample_sequence_data)
-
-        with pytest.raises(ValidationError):
-            switcher.set_alias("2", "123")
-
-    def test_set_duplicate_alias_raises(self, temp_home: Path, sample_sequence_data: dict):
-        sample_sequence_data["accounts"]["1"]["alias"] = "dev"
-        switcher = ClaudeAccountSwitcher()
-        self._write(switcher, sample_sequence_data)
-
-        with pytest.raises(ConfigError):
-            switcher.set_alias("2", "dev")
-
-    def test_unset_alias(self, temp_home: Path, sample_sequence_data: dict):
-        sample_sequence_data["accounts"]["2"]["alias"] = "dev"
-        switcher = ClaudeAccountSwitcher()
-        self._write(switcher, sample_sequence_data)
-
-        num = switcher.unset_alias("2")
-
-        assert num == "2"
-        data = switcher._get_sequence_data()
-        assert "alias" not in data["accounts"]["2"]
-
-    def test_unset_alias_idempotent(self, temp_home: Path, sample_sequence_data: dict):
-        """Clearing an already-unset alias must not raise."""
-        switcher = ClaudeAccountSwitcher()
-        self._write(switcher, sample_sequence_data)
-
-        switcher.unset_alias("2")  # never set — should be a silent no-op
-        switcher.unset_alias("2")
-
-    def test_alias_unknown_account_raises(self, temp_home: Path, sample_sequence_data: dict):
-        switcher = ClaudeAccountSwitcher()
-        self._write(switcher, sample_sequence_data)
-
-        with pytest.raises(AccountNotFoundError):
-            switcher.set_alias("999", "dev")
-
-    def test_list_aliases(self, temp_home: Path, sample_sequence_data: dict):
-        sample_sequence_data["accounts"]["2"]["alias"] = "dev"
-        switcher = ClaudeAccountSwitcher()
-        self._write(switcher, sample_sequence_data)
-
-        assert switcher.list_aliases() == [("2", "dev", "account2@example.com")]
-
-    def test_list_aliases_sequence_order(self, temp_home: Path, sample_sequence_data: dict):
-        switcher = ClaudeAccountSwitcher()
-        self._write(switcher, sample_sequence_data)
-        switcher.set_alias("2", "content")
-        switcher.set_alias("1", "dev")
-
-        assert switcher.list_aliases() == [
-            ("1", "dev", "account1@example.com"),
-            ("2", "content", "account2@example.com"),
-        ]
-
-    def test_list_aliases_empty(self, temp_home: Path, sample_sequence_data: dict):
-        switcher = ClaudeAccountSwitcher()
-        self._write(switcher, sample_sequence_data)
-
-        assert switcher.list_aliases() == []
-
-
 class TestDirectorySetup:
     """Test directory setup."""
 
@@ -8882,7 +8761,9 @@ class TestDisableEnableAccount:
         s = self._setup(temp_home)
         self._seed(s, 1, "a@example.com")
         self._seed(s, 2, "b@example.com")
-        s.set_alias("2", "dev")
+        data = s._get_sequence_data()
+        data["accounts"]["2"]["alias"] = "dev"
+        s._write_json(s.sequence_file, data)
 
         s.set_account_disabled("dev", True)
         assert s.is_account_disabled("2") is True
@@ -12368,19 +12249,3 @@ class TestSessionShellGuardCoversEveryMutator:
         s = self._switcher(sample_sequence_data, monkeypatch)
         with pytest.raises(SwitchError):
             s.purge()
-
-    def test_set_alias_refuses_inside_a_session_shell(
-        self, temp_home: Path, mock_claude_config: Path,
-        sample_sequence_data: dict, monkeypatch,
-    ):
-        s = self._switcher(sample_sequence_data, monkeypatch)
-        with pytest.raises(SwitchError):
-            s.set_alias("2", "work")
-
-    def test_unset_alias_refuses_inside_a_session_shell(
-        self, temp_home: Path, mock_claude_config: Path,
-        sample_sequence_data: dict, monkeypatch,
-    ):
-        s = self._switcher(sample_sequence_data, monkeypatch)
-        with pytest.raises(SwitchError):
-            s.unset_alias("2")
