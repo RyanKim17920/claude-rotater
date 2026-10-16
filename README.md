@@ -169,12 +169,14 @@ Run `cswap` on its own for the full-screen dashboard. It is one page: a compact 
 <img src="assets/tui-watch.png" width="760" alt="cswap — live 5h/7d usage bars for every account, with reset times and the active account marked">
 
 - **Auto-switch is always on while the TUI is open.** It runs the same engine as `cswap auto`, live, with the same guards: the threshold, hysteresis, the cooldown (shared with any `cswap auto` or menu bar running beside it), and quarantine of dead tokens. There is no dry-run in the TUI; to keep an account out of rotation, disable it. You only need `cswap auto` for headless use.
-- **Keys:** `enter` switch to the highlighted account, `a` add the current login, `t` add a token, `d` disable / enable, `x` remove, `f` refresh now, `c` settings, `ctrl+t` theme, `q` quit.
-- **Settings page (`c`):** every `cswap config` key, grouped into *Auto-switch*, *Polling* and *Appearance*, with inline help and a default / custom marker. `tab` or the arrow keys move, `enter` applies, `ctrl+r` resets a key to its default, and `esc` goes back. Values are validated exactly like `cswap config set`: an invalid one is shown in red and nothing is written. Changes apply right away (for example, a new threshold restarts the auto-switcher with it).
+- **Keys:** `enter` switch to the highlighted account, `l` log an account in, `a` add the current login, `t` add a token, `d` disable / enable, `x` remove, `f` refresh now, `c` settings, `ctrl+t` theme, `q` quit.
+- **Log in (`l`):** runs `claude auth login` in a separate, temporary profile, so the active account is never touched, then stores the new login (or replaces the stored credential of an account you already manage). On a row marked *re-login needed* it pre-fills that account's address. The temporary profile and its keychain item are always deleted afterwards.
+- **Idle accounts stay logged in.** While the TUI is open, every account that is neither active nor in use by a `cswap run` session has its token refreshed shortly before it expires. A row shows `login 2d` when the login itself (which only a new login renews) ends within `ui.loginWarnDays` days.
+- **Settings page (`c`):** every `cswap config` key, grouped into *Auto-switch*, *Polling* and *Appearance*. `↑`/`↓` move, `←`/`→` (or `-`/`+`) change the value in place (numbers step and stop at their range, choices cycle, toggles flip), `enter` or a digit types an exact value (`enter` saves, `esc` cancels), `ctrl+r` resets a key to its default, and `esc` goes back. Changes are saved at once and apply right away (for example, a new threshold restarts the auto-switcher with it); the bottom line shows the selected key's full help, range and default.
 
 ### Refresh expired tokens
 
-If an account's token expires, log back into Claude Code with that account and re-run:
+In the TUI, press `l` on the account's row. From a shell, log back into Claude Code with that account and re-run:
 
 ```bash
 cswap add
