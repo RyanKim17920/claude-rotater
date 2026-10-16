@@ -62,8 +62,11 @@ revoke the stored refresh token.
 ### Statusline step
 
 Claude Code hands your statusline command the active account's usage on
-every refresh. Pass it to rota so the auto-switcher reacts at once and skips
-polling that account. In a statusline script:
+every refresh. Pass it to rota so the auto-switcher reacts at once and polls
+that account only every `pollSpareSeconds` to check the numbers. Each chat
+reports its own last response, so rota dates a reading by that response,
+ignores a chat's repeated renders and keeps the highest reading per window.
+In a statusline script:
 
 ```bash
 input=$(cat)
@@ -71,8 +74,9 @@ rota feed <<<"$input" >/dev/null 2>&1 &
 ```
 
 or put `rota feed --tee` in front of an existing command:
-`"command": "rota feed --tee | ~/.claude/statusline.sh"`. `rota feed` never
-fails, so it cannot break your statusline.
+`"command": "rota feed --tee | ~/.claude/statusline.sh"`. With no statusline
+yet, `rota feed --line` is one: it prints the model and 5h/7d usage.
+`rota feed` never fails, so it cannot break your statusline.
 
 ## Data and profiles
 
