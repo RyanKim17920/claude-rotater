@@ -103,6 +103,16 @@ def window_pct(last_good: dict | None, key: str) -> float | None:
     return float(pct) if isinstance(pct, (int, float)) else None
 
 
+def iso_epoch(value: object) -> float | None:
+    """Epoch seconds of an API ISO timestamp ("...Z"), or None if unparseable."""
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(str(value).replace("Z", "+00:00")).timestamp()
+    except ValueError:
+        return None
+
+
 def reset_text(window: dict | None, now: float) -> str | None:
     """Live countdown to one window's reset ("resets 2h 13m"), if known.
 
@@ -111,12 +121,8 @@ def reset_text(window: dict | None, now: float) -> str | None:
     """
     if not isinstance(window, dict):
         return None
-    resets_at = window.get("resets_at")
-    if not resets_at:
-        return None
-    try:
-        ts = datetime.fromisoformat(str(resets_at).replace("Z", "+00:00")).timestamp()
-    except ValueError:
+    ts = iso_epoch(window.get("resets_at"))
+    if ts is None:
         return None
     remaining = ts - now
     if remaining <= 0:
@@ -183,6 +189,7 @@ __all__ = [
     "SnapshotSource",
     "format_age",
     "format_duration",
+    "iso_epoch",
     "last_seen_note",
     "reset_clock",
     "reset_text",
