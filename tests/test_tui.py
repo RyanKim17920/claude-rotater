@@ -28,6 +28,7 @@ from claude_rotater.usage_store import UsageEntry
 
 sys.path.insert(0, str(Path(__file__).parent))
 from _fake_history import FakeHistory, linear_points  # noqa: E402
+from claude_rotater.usage_history import Point  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -332,6 +333,14 @@ def fake_refresher(monkeypatch):
     FakeRefresher.instances = []
     monkeypatch.setattr("claude_rotater.tui.app.default_refresher_factory", FakeRefresher)
     return FakeRefresher
+
+
+@pytest.fixture(autouse=True)
+def no_real_statusline(monkeypatch):
+    """The statusline shim must never reach a real statusline_setup module
+    (it reads Claude Code's settings): tests see only the feed-file fallback
+    or an explicit fake."""
+    monkeypatch.setattr("claude_rotater.tui._shim._setup_module", lambda: None)
 
 
 def make_app(fake: FakeSwitcher):
@@ -1953,3 +1962,355 @@ class TestThemeWiring:
             await pilot.press("ctrl+t")
             await pilot.pause()
             assert app.theme == "rota-light"
+
+
+# ---------------------------------------------------------------------------
+# Redesign: long-term view, statusline key, widths, repaint discipline
+# ---------------------------------------------------------------------------
+
+
+def long_history(now: float) -> dict:
+    """burn_history plus past 5h windows and a previous 7d window."""
+    series = burn_history(now)
+    past = []
+    for k, peak in enumerate((40.0, 95.0, 70.0)):
+        reset = now - (k + 1) * 86400
+        past += [Point(reset - 4 * 3600, peak / 2, reset), Point(reset - 3600, peak, reset)]
+    prev7 = now - 4 * 86400
+    series["1"]["5h"] = past + series["1"]["5h"]
+    series["1"]["7d"] = [
+        Point(prev7 - 6 * 86400 + h * 3600, h * 0.5, prev7) for h in range(0, 144, 6)
+    ] + series["1"]["7d"]
+    return series
+
+
+class TestLongTermLines:
+    def _acc(self):
+        return make_account(1, active=True, entry=make_entry(62.0, 31.0), email="me@x.com")
+
+    def test_draws_peaks_and_curve_with_titles(self):
+        from claude_rotater.tui.main import LongTerm, long_term_lines
+
+        now = time.time()
+        lt = LongTerm(
+            peaks_5h=((now - 86400, 95.0), (now - 2 * 86400, 40.0)),
+            series_7d=tuple(Point(now - 9 * 86400 + h * 3600, h / 3, None) for h in range(200)),
+        )
+        lines = long_term_lines(self._acc(), lt, now=now, threshold=90, width=120, height=20)
+        text = "\n".join(line.plain for line in lines)
+        assert "5h peaks  last 7 days · 2 windows · 1 past 90%" in text
+        assert "7d usage  since" in text and "peak 66%" in text
+        assert "█" in text  # peak columns
+        assert any(0x2800 <= ord(ch) <= 0x28FF for ch in text)  # 7d braille curve
+        assert len(lines) <= 20 and all(line.cell_len <= 120 for line in lines)
+
+    def test_side_by_side_when_wide_stacked_when_narrow(self):
+        from claude_rotater.tui.main import LongTerm, long_term_lines
+
+        now = time.time()
+        lt = LongTerm(peaks_5h=((now - 86400, 50.0),), series_7d=(Point(now - 3600, 20.0, None),))
+        wide = [l.plain for l in long_term_lines(self._acc(), lt, now=now, threshold=90, width=120, height=20)]
+        assert any("5h peaks" in l and "7d usage" in l for l in wide)
+        narrow = [l.plain for l in long_term_lines(self._acc(), lt, now=now, threshold=90, width=80, height=20)]
+        assert not any("5h peaks" in l and "7d usage" in l for l in narrow)
+        assert any("5h peaks" in l for l in narrow) and any("7d usage" in l for l in narrow)
+
+    def test_loading_and_empty_states(self):
+        from claude_rotater.tui.main import LongTerm, long_term_lines
+
+        now = time.time()
+        loading = long_term_lines(self._acc(), None, now=now, threshold=90, width=80, height=10)
+        assert "loading history" in loading[-1].plain
+        empty = long_term_lines(self._acc(), LongTerm(), now=now, threshold=90, width=80, height=10)
+        assert "no past windows recorded yet" in empty[-1].plain
+        assert long_term_lines(None, None, now=now, threshold=90, width=80, height=10) == []
+
+
+class TestDetailGraphs:
+    def _lines(self, width, height=24):
+        from claude_rotater.estimator import estimate_account
+        from claude_rotater.tui.main import detail_lines
+
+        now = time.time()
+        series = burn_history(now)["1"]
+        est = estimate_account(series, models=(), threshold=90, now=now)
+        acc = make_account(1, active=True, entry=make_entry(62.0, 31.0), email="me@x.com")
+        return [
+            line.plain
+            for line in detail_lines(acc, est, series, now=now, threshold=90, width=width, height=height)
+        ]
+
+    def test_wide_pane_puts_5h_and_7d_side_by_side(self):
+        lines = self._lines(120)
+        assert any(line.startswith("5h  ") and "7d  " in line for line in lines)
+        assert all(len(line) <= 120 for line in lines)
+
+    def test_narrow_pane_stacks_them(self):
+        lines = self._lines(80)
+        starts = [i for i, line in enumerate(lines) if line.startswith(("5h  ", "7d  "))]
+        assert len(starts) == 2 and starts[1] > starts[0] + 3
+        assert all(len(line) <= 80 for line in lines)
+
+    def test_each_graph_has_threshold_and_projection(self):
+        lines = self._lines(80, height=30)
+        from claude_rotater.tui.plot import RESET_GLYPH, THRESHOLD_GLYPH
+
+        five = lines[: next(i for i, l in enumerate(lines) if l.startswith("7d  "))]
+        seven = lines[len(five):]
+        for block in (five, seven):
+            body = "\n".join(block)
+            assert THRESHOLD_GLYPH in body and RESET_GLYPH in body
+            assert "now" in block[-1]
+
+    def test_short_pane_drops_the_account_title(self):
+        assert self._lines(80, height=12)[0].startswith("5h  ")
+        assert self._lines(80, height=24)[0].startswith("me@x.com")
+
+
+class TestSnapshotKey:
+    def test_ignores_taken_at_and_age(self):
+        from claude_rotater.tui.main import snapshot_key
+
+        acc = make_account(1, entry=make_entry(40.0, 10.0))
+        a = AccountsSnapshot(active_number="1", accounts=(acc,), taken_at=1.0)
+        aged = dataclasses.replace(acc, usage=dataclasses.replace(acc.usage, age_s=999.0))
+        b = AccountsSnapshot(active_number="1", accounts=(aged,), taken_at=2.0)
+        assert snapshot_key(a) == snapshot_key(b)
+
+    def test_sees_new_measurement_and_state(self):
+        from claude_rotater.tui.main import snapshot_key
+
+        acc = make_account(1, entry=make_entry(40.0, 10.0))
+        base = snapshot_key(AccountsSnapshot("1", (acc,), 1.0))
+        moved = dataclasses.replace(acc, usage=dataclasses.replace(acc.usage, fetched_at=acc.usage.fetched_at + 60))
+        assert snapshot_key(AccountsSnapshot("1", (moved,), 1.0)) != base
+        assert snapshot_key(AccountsSnapshot("1", (dataclasses.replace(acc, disabled=True),), 1.0)) != base
+
+
+@pytest.mark.asyncio
+class TestLongTermView:
+    async def test_h_toggles_history_and_back(self, tmp_path):
+        fake = three_accounts(tmp_path)
+        history = with_history(fake, long_history(time.time()))
+        app = make_app(fake)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await settle(pilot)
+            reads = history.reads
+            await pilot.press("h")
+            await settle(pilot)
+            assert app.long_view
+            assert history.reads == reads + 1  # history read once on the way in
+            detail = painted(app, "#detail")
+            assert "5h peaks" in detail and "7d usage" in detail
+            assert "4 windows · 1 past 90%" in detail  # 3 past + the running one
+            assert app.long_term["1"].peaks_5h
+            await pilot.press("h")
+            await settle(pilot)
+            assert not app.long_view
+            assert "5h  62%" in painted(app, "#detail")
+
+    async def test_history_button(self, tmp_path):
+        fake = three_accounts(tmp_path)
+        with_history(fake, long_history(time.time()))
+        app = make_app(fake)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await settle(pilot)
+            await pilot.click("#act-history")
+            await settle(pilot)
+            assert app.long_view
+
+    async def test_history_follows_highlight(self, tmp_path):
+        fake = three_accounts(tmp_path)
+        with_history(fake, long_history(time.time()))
+        app = make_app(fake)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await settle(pilot)
+            await pilot.press("h")
+            await settle(pilot)
+            await pilot.press("down")
+            await pilot.pause()
+            detail = painted(app, "#detail")
+            assert "work@y.com" in detail and "no past windows recorded yet" in detail
+
+    async def test_no_history_object_still_toggles(self, tmp_path):
+        app = make_app(three_accounts(tmp_path))
+        async with app.run_test(size=(80, 24)) as pilot:
+            await settle(pilot)
+            await pilot.press("h")
+            await settle(pilot)
+            assert "no past windows recorded yet" in painted(app, "#detail")
+
+
+@pytest.mark.asyncio
+class TestStatuslineKey:
+    def _calls(self, monkeypatch, status):
+        from claude_rotater.tui import _shim
+
+        calls: list[str] = []
+        monkeypatch.setattr(_shim, "feed_status", lambda backup_dir, now=None: status)
+        monkeypatch.setattr(_shim, "install_statusline", lambda: calls.append("install"))
+        monkeypatch.setattr(_shim, "uninstall_statusline", lambda: calls.append("uninstall"))
+        return calls
+
+    async def test_header_shows_feed_off_without_a_feed(self, tmp_path):
+        app = make_app(three_accounts(tmp_path))
+        async with app.run_test(size=(120, 40)) as pilot:
+            await settle(pilot)
+            assert "○ feed off" in painted(app, "#status")
+
+    async def test_header_shows_live_feed_from_feed_file(self, tmp_path):
+        from claude_rotater import feed
+
+        path = Path(feed.feed_path(tmp_path))
+        path.parent.mkdir(parents=True)
+        path.write_text("{}\n")
+        app = make_app(three_accounts(tmp_path))
+        async with app.run_test(size=(120, 40)) as pilot:
+            await settle(pilot)
+            assert "● feed live" in painted(app, "#status")
+
+    async def test_s_confirms_then_installs(self, tmp_path, monkeypatch):
+        from claude_rotater.tui import _shim
+        from claude_rotater.tui.modals import ConfirmModal
+
+        calls = self._calls(monkeypatch, _shim.FeedStatus("off", False))
+        app = make_app(three_accounts(tmp_path))
+        async with app.run_test(size=(120, 40)) as pilot:
+            await settle(pilot)
+            await pilot.press("s")
+            await pilot.pause()
+            assert isinstance(app.screen, ConfirmModal)
+            await pilot.press("n")
+            await settle(pilot)
+            assert calls == []
+            await pilot.press("s")
+            await pilot.pause()
+            await pilot.press("y")
+            await settle(pilot)
+            assert calls == ["install"]
+
+    async def test_s_when_installed_offers_removal(self, tmp_path, monkeypatch):
+        from claude_rotater.tui import _shim
+        from claude_rotater.tui.modals import ConfirmModal
+
+        calls = self._calls(monkeypatch, _shim.FeedStatus("stale", True))
+        app = make_app(three_accounts(tmp_path))
+        async with app.run_test(size=(120, 40)) as pilot:
+            await settle(pilot)
+            assert "◐ feed stale" in painted(app, "#status")
+            await pilot.press("s")
+            await pilot.pause()
+            assert isinstance(app.screen, ConfirmModal)
+            await pilot.press("y")
+            await settle(pilot)
+            assert calls == ["uninstall"]
+
+    async def test_install_failure_is_shown_not_raised(self, tmp_path, monkeypatch):
+        from claude_rotater.tui.modals import OutputModal
+
+        # No real module: the shim refuses, and the app reports it.
+        app = make_app(three_accounts(tmp_path))
+        async with app.run_test(size=(120, 40)) as pilot:
+            await settle(pilot)
+            await pilot.press("s", "y")
+            await settle(pilot)
+            assert isinstance(app.screen, OutputModal)
+
+
+@pytest.mark.asyncio
+class TestWidths:
+    @pytest.mark.parametrize("size", [(80, 24), (120, 40), (160, 50)])
+    async def test_main_page_fits_and_shows_both_graphs(self, tmp_path, size):
+        from textual.widgets import Button
+
+        fake = three_accounts(tmp_path)
+        with_history(fake, long_history(time.time()))
+        app = make_app(fake)
+        async with app.run_test(size=size) as pilot:
+            await settle(pilot)
+            width = size[0]
+            status = painted(app, "#status")
+            assert len(status) <= width and "rota" in status and "switch at 90%" in status
+            for number in ("1", "2", "3"):
+                assert len(row_plain(app, number)) <= width - 1
+            detail = painted(app, "#detail").splitlines()
+            assert any(line.startswith("5h  62%") for line in detail)
+            assert any("7d  31%" in line for line in detail)
+            side_by_side = any(line.startswith("5h  ") and "7d  " in line for line in detail)
+            assert side_by_side == (width >= 120)
+            assert all(len(line) <= width for line in detail)
+            assert all(b.region.right <= width for b in app.screen.query(Button) if b.display)
+            assert app.screen.query_one("#actions").region.bottom == size[1]
+
+    @pytest.mark.parametrize("size", [(80, 24), (120, 40), (160, 50)])
+    async def test_long_term_view_fits(self, tmp_path, size):
+        fake = three_accounts(tmp_path)
+        with_history(fake, long_history(time.time()))
+        app = make_app(fake)
+        async with app.run_test(size=size) as pilot:
+            await settle(pilot)
+            await pilot.press("h")
+            await settle(pilot)
+            detail = painted(app, "#detail").splitlines()
+            assert any("5h peaks" in line for line in detail)
+            assert any("7d usage" in line for line in detail)
+            assert all(len(line) <= size[0] for line in detail)
+
+    @pytest.mark.parametrize("size", [(80, 24), (120, 40), (160, 50)])
+    async def test_config_page_fits(self, tmp_path, size):
+        app = make_app(three_accounts(tmp_path))
+        async with app.run_test(size=size) as pilot:
+            await settle(pilot)
+            await pilot.press("c")
+            await pilot.pause()
+            title = app.screen.query_one("#config-title").render().plain
+            assert title.startswith(" rota ") and "settings" in title
+            await pilot.press("right")  # ←/→ still adjust on the restyled list
+            await pilot.pause()
+            from claude_rotater.settings import effective_settings
+
+            values = {spec.dotted: (v, is_set) for spec, v, is_set in effective_settings(tmp_path)}
+            assert values["autoswitch.threshold"][1]
+
+
+@pytest.mark.asyncio
+class TestRepaintDiscipline:
+    async def test_unchanged_store_reads_do_not_repaint(self, tmp_path, monkeypatch):
+        from claude_rotater.tui.main import MainScreen
+
+        app = make_app(three_accounts(tmp_path))
+        async with app.run_test(size=(120, 40)) as pilot:
+            await settle(pilot)
+            count = {"n": 0}
+            original = MainScreen.repaint
+
+            def counting(self):
+                count["n"] += 1
+                original(self)
+
+            monkeypatch.setattr(MainScreen, "repaint", counting)
+            for _ in range(3):
+                app._tick()
+                await settle(pilot)
+            assert count["n"] == 0
+            fake = app.switcher
+            fake._accounts[0] = dataclasses.replace(
+                fake._accounts[0], usage=make_entry(70.0, 31.0, age_s=1.0)
+            )
+            app._tick()
+            await settle(pilot)
+            assert count["n"] >= 1
+            assert "70%" in row_plain(app, "1")
+
+    async def test_no_sub_second_timers(self, tmp_path):
+        from claude_rotater.tui.main import MainScreen
+
+        assert MainScreen.CLOCK_TICK_S >= 30
+        app = make_app(three_accounts(tmp_path))
+        async with app.run_test(size=(120, 40)) as pilot:
+            await settle(pilot)
+            intervals = [
+                t._interval for node in (app, app.screen) for t in node._timers
+                if t.name != "screen_update"  # Textual's own compositor tick
+            ]
+            assert intervals and min(intervals) >= app.POLL_INTERVAL_S
