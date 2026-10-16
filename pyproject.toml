@@ -40,8 +40,8 @@ Repository = "https://github.com/realiti4/claude-swap"
 Issues = "https://github.com/realiti4/claude-swap/issues"
 
 [project.scripts]
-claude-swap = "claude_swap.cli:main"
-cswap = "claude_swap.cli:main"
+claude-swap = "claude_swap.entry:main"
+cswap = "claude_swap.entry:main"
 
 [build-system]
 requires = ["hatchling"]

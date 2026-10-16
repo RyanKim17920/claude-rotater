@@ -985,6 +985,13 @@ def main() -> None:
     force_utf8_output()
     _use_native_tls()
     argv = sys.argv[1:]
+    if argv and argv[0] == "feed":
+        # Hidden verb for Claude Code's statusline. The console script
+        # dispatches it before this module loads (claude_swap.entry); this
+        # branch serves wrappers that call cli.main directly.
+        from claude_swap.feed import main as feed_main
+
+        sys.exit(feed_main(argv[1:]))
     try:
         from claude_swap.appearance import cli_should_probe, cli_theme
         # `run` execs a child that takes over the terminal, and `--json`
