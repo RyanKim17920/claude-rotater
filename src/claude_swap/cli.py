@@ -65,9 +65,10 @@ _SUBCOMMAND_FLAGS = {
     "purge": "--purge",
     "upgrade": "--upgrade",
     "update": "--upgrade",
+    # Bare `cswap` is the documented way into the TUI. `tui` and `watch`
+    # (which once opened a dedicated watch page) stay as hidden aliases so
+    # existing scripts and muscle memory keep working.
     "tui": "--tui",
-    # `watch` predates the single-page TUI (it opened a dedicated watch
-    # page); live usage is now the TUI's main page, so it is an alias.
     "watch": "--tui",
     "menubar": "--menubar",
 }
@@ -595,7 +596,7 @@ def _auto_command(argv: list[str]) -> None:
         description=(
             "Automatically switch accounts when the active one nears its "
             "5h/7d rate limit. Runs a foreground polling loop; use --once "
-            "for a single tick (cron-friendly). The TUI (cswap tui) runs "
+            "for a single tick (cron-friendly). The TUI (bare cswap) runs "
             "this same engine live while it is open, so you only need "
             "cswap auto for headless use."
         ),
@@ -1026,7 +1027,7 @@ def main() -> None:
 
     # Bare `cswap` in an interactive terminal opens the TUI dashboard (like
     # lazygit/k9s). TTY-gated on both ends so scripts and pipes keep getting
-    # the usage error, and `cswap tui` stays the explicit spelling.
+    # the usage error; `cswap tui` is the hidden explicit spelling.
     if not argv and sys.stdout.isatty() and sys.stdin.isatty():
         argv = ["--tui"]
 
@@ -1041,6 +1042,7 @@ def main() -> None:
         description="""Multi-Account Switcher for Claude Code
 
 Commands:
+  %(prog)s                            interactive TUI with live auto-switch
   %(prog)s help                       show this help
   %(prog)s list                       list managed accounts
   %(prog)s status                     show current account
@@ -1067,8 +1069,6 @@ Commands:
   %(prog)s export <path>              export accounts
   %(prog)s import <path>              import accounts
   %(prog)s import-usage <path>        adopt usage another machine read (list --json)
-  %(prog)s tui                        dashboard + live auto-switch (also: bare %(prog)s)
-  %(prog)s watch                      alias of tui
   %(prog)s menubar                    macOS menu bar app
   %(prog)s menubar --install-service  keep the menu bar running via launchd
   %(prog)s upgrade                    self-upgrade to latest
@@ -1473,8 +1473,8 @@ The original flag spellings (%(prog)s --switch, %(prog)s --list, ...) keep worki
 
             import_usage(switcher, args.import_usage, hold_s=args.hold)
         elif args.tui or args.watch:
-            # --watch is the hidden legacy spelling of `cswap watch`, kept so
-            # old scripts and shell aliases still open the TUI.
+            # `tui`, `watch` and their flags are hidden aliases of bare
+            # `cswap`, kept so old scripts and shell aliases still open it.
             from claude_swap.tui import run as tui_run
 
             sys.exit(tui_run(switcher))

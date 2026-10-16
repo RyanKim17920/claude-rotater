@@ -1188,7 +1188,8 @@ class TestAutoCommand:
 
 
 class TestTuiDispatch:
-    """`tui`, `watch` and the legacy flags all open the one-page TUI.
+    """Bare `cswap` is the documented TUI entry; `tui`, `watch` and the
+    legacy flags are hidden aliases that all open the one-page TUI.
 
     `watch` used to open a dedicated watch page (``start="watch"``); live
     usage is now the TUI's main page, so every spelling calls ``run(switcher)``
@@ -1239,16 +1240,20 @@ class TestTuiDispatch:
                 cli.main()
         assert excinfo.value.code == 2
 
-    def test_main_help_lists_watch_as_alias(self, capsys):
+    def test_main_help_documents_bare_cswap_and_hides_aliases(self, capsys):
         with patch.object(sys, "argv", ["claude-swap", "--help"]):
             with pytest.raises(SystemExit) as excinfo:
                 cli.main()
         assert excinfo.value.code == 0
         out = capsys.readouterr().out
-        watch_line = next(ln for ln in out.splitlines() if " watch " in ln)
-        assert "alias of tui" in watch_line
+        commands = out.split("Commands:", 1)[1].split("Aliases:", 1)[0]
+        lines = [ln.split() for ln in commands.splitlines() if ln.strip()]
+        # The first command row is the bare program name: the one TUI entry.
+        assert lines[0][1:] == ["interactive", "TUI", "with", "live", "auto-switch"]
+        verbs = {words[1] for words in lines if len(words) > 1}
+        assert "tui" not in verbs and "watch" not in verbs
         assert "watch page" not in out
-        assert "--watch" not in out  # the legacy flag stays hidden
+        assert "--watch" not in out and "--tui" not in out
 
     def test_auto_help_says_tui_runs_the_same_engine(self, capsys):
         with patch.object(sys, "argv", ["claude-swap", "auto", "--help"]):

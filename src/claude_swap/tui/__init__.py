@@ -1,9 +1,9 @@
 """Textual-based interactive TUI for claude-swap.
 
-Entry point for ``cswap tui`` (and bare ``cswap`` in an interactive
-terminal). Heavy imports (textual, rich) stay inside :func:`run` so the
-plain CLI paths — ``cswap list``, cron's ``cswap auto --once`` — never pay
-for them.
+Entry point for bare ``cswap`` in an interactive terminal (``cswap tui``
+and ``cswap watch`` are hidden aliases). Heavy imports (textual, rich) stay
+inside :func:`run` so the plain CLI paths — ``cswap list``, cron's
+``cswap auto --once`` — never pay for them.
 """
 
 from __future__ import annotations

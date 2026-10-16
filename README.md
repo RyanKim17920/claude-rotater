@@ -164,9 +164,9 @@ Subfolders inherit the nearest mapped ancestor. In an unmapped directory, `cswap
 
 ### Interactive dashboard (TUI)
 
-Run `cswap` on its own (or `cswap tui`; `cswap watch` is an alias) for the full-screen dashboard. It is one page: a compact list of every account with live 5h/7d usage, burn rate and the estimated time to the switch threshold, a usage plot for the highlighted account, and a status line for the auto-switcher. Works on macOS, Linux, and Windows.
+Run `cswap` on its own for the full-screen dashboard. It is one page: a compact list of every account with live 5h/7d usage, burn rate and the estimated time to the switch threshold, a usage plot for the highlighted account, and a status line for the auto-switcher. Works on macOS, Linux, and Windows.
 
-<img src="assets/tui-watch.png" width="760" alt="cswap tui — live 5h/7d usage bars for every account, with reset times and the active account marked">
+<img src="assets/tui-watch.png" width="760" alt="cswap — live 5h/7d usage bars for every account, with reset times and the active account marked">
 
 - **Auto-switch is always on while the TUI is open.** It runs the same engine as `cswap auto`, live, with the same guards: the threshold, hysteresis, the cooldown (shared with any `cswap auto` or menu bar running beside it), and quarantine of dead tokens. There is no dry-run in the TUI; to keep an account out of rotation, disable it. You only need `cswap auto` for headless use.
 - **Keys:** `enter` switch to the highlighted account, `a` add the current login, `t` add a token, `d` disable / enable, `x` remove, `f` refresh now, `c` settings, `ctrl+t` theme, `q` quit.
@@ -202,8 +202,7 @@ cswap alias                     # List all aliases
 cswap move 2 1                  # Assign an account to a slot (relocates to an empty slot, swaps if taken)
 cswap unclaimed                 # List stashed credential entries (slot + why they were stashed)
 cswap unclaimed --purge ID      # Drop one (deletes its bytes; recover with /login + `cswap add`)
-cswap tui                       # Interactive dashboard (also: bare `cswap`)
-cswap watch                     # Alias of `cswap tui`
+cswap                           # Interactive dashboard
 cswap upgrade                   # Upgrade claude-swap to the latest version
 cswap purge                     # Remove all claude-swap data
 ```
