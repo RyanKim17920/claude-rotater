@@ -22,7 +22,7 @@ refresh worker and re-projected from the cached estimate once a second.
 from __future__ import annotations
 
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Sequence
 
 from rich.text import Text
@@ -95,7 +95,6 @@ class AutoStatus:
     last_switch_at: float | None = None
     last_switch: str = ""  # "2 → 1" when this session saw the switch
     last_outcome: str = ""  # most recent no-switch reason / error summary
-    events: tuple[str, ...] = field(default=())
 
 
 def status_text(
