@@ -200,6 +200,56 @@ class TestProfiles:
         assert not target.exists()
 
 
+class TestKeychainServiceOverride:
+    def _import(self, temp_home, macos):
+        legacy = temp_home / ".claude-swap-backup"
+        _seed_legacy(legacy)
+        return import_legacy_data(temp_home / ".rota", macos)
+
+    def test_copies_from_the_named_service(
+        self, temp_home, macos, monkeypatch, block_real_keychain
+    ):
+        block_real_keychain.data[("swap-work", "account-2-b@example.com")] = "tok-work"
+        _seed_keychain(block_real_keychain)  # the default service: must be ignored
+        monkeypatch.setenv("ROTA_IMPORT_KEYCHAIN_SERVICE", "swap-work")
+
+        result = self._import(temp_home, macos)
+
+        assert result is not None and result.keychain_items == 1
+        assert block_real_keychain.data[("rota", "account-2-b@example.com")] == "tok-work"
+        assert ("rota", "account-1-a@example.com") not in block_real_keychain.data
+        assert block_real_keychain.data[("swap-work", "account-2-b@example.com")] == "tok-work"
+        record = json.loads((temp_home / ".rota" / IMPORT_RECORD).read_text())
+        assert record["keychainService"] == "swap-work"
+
+    @pytest.mark.parametrize("value", [None, "", "   "])
+    def test_unset_or_blank_means_claude_swap(
+        self, temp_home, macos, monkeypatch, block_real_keychain, value
+    ):
+        if value is not None:
+            monkeypatch.setenv("ROTA_IMPORT_KEYCHAIN_SERVICE", value)
+        _seed_keychain(block_real_keychain)
+
+        result = self._import(temp_home, macos)
+
+        assert result is not None and result.keychain_items == 3
+        record = json.loads((temp_home / ".rota" / IMPORT_RECORD).read_text())
+        assert record["keychainService"] == LEGACY_KEYCHAIN_SERVICE
+
+    def test_a_locked_keychain_names_the_overridden_service(
+        self, temp_home, macos, monkeypatch, block_real_keychain
+    ):
+        monkeypatch.setenv("ROTA_IMPORT_KEYCHAIN_SERVICE", "swap-work")
+
+        def locked(service, account):
+            raise subprocess.TimeoutExpired("security", 5)
+
+        monkeypatch.setattr("claude_rotater.macos_keychain.get_password", locked)
+        with pytest.raises(MigrationError, match="'swap-work'"):
+            self._import(temp_home, macos)
+        assert not (temp_home / ".rota").exists()
+
+
 class TestFailureLeavesNothingBehind:
     def test_a_locked_keychain_aborts_and_the_next_run_retries(
         self, temp_home, macos, monkeypatch, block_real_keychain

@@ -511,6 +511,7 @@ def _isolate_real_home(request, tmp_path_factory, monkeypatch):
     monkeypatch.delenv("XDG_DATA_HOME", raising=False)
     monkeypatch.delenv("ROTA_HOME", raising=False)
     monkeypatch.delenv("ROTA_IMPORT_FROM", raising=False)
+    monkeypatch.delenv("ROTA_IMPORT_KEYCHAIN_SERVICE", raising=False)
     if "temp_home" in request.fixturenames:
         return  # temp_home provides its own isolated home
     if "tmp_keychain" in request.fixturenames:

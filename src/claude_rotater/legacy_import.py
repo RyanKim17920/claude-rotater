@@ -14,7 +14,9 @@ working beside rota:
 - macOS Keychain: every per-account backup item (and its ``.prev``
   generation) under upstream's ``claude-swap`` service is copied to this
   data dir's own service (:func:`paths.backup_keychain_service`). The
-  originals stay where they are.
+  originals stay where they are. A store that kept its items under another
+  service name (an upstream profile, for instance) names it in
+  ``$ROTA_IMPORT_KEYCHAIN_SERVICE``.
 
 Source: ``$ROTA_IMPORT_FROM`` when set; otherwise, for the default data dir
 only, the first of upstream's dirs (:func:`paths.get_legacy_backup_roots`)
@@ -47,6 +49,7 @@ from claude_rotater.paths import (
 )
 
 IMPORT_FROM_ENV = "ROTA_IMPORT_FROM"
+IMPORT_KEYCHAIN_SERVICE_ENV = "ROTA_IMPORT_KEYCHAIN_SERVICE"
 LEGACY_KEYCHAIN_SERVICE = "claude-swap"
 IMPORT_RECORD = ".imported-from.json"
 
@@ -113,6 +116,12 @@ def find_import_source(target: Path) -> Path | None:
     return None
 
 
+def legacy_keychain_service() -> str:
+    """The Keychain service the source store kept its backups under:
+    ``$ROTA_IMPORT_KEYCHAIN_SERVICE`` when set, else upstream's default."""
+    return os.environ.get(IMPORT_KEYCHAIN_SERVICE_ENV, "").strip() or LEGACY_KEYCHAIN_SERVICE
+
+
 def _legacy_backup_usernames(source: Path) -> list[str]:
     """Keychain account names of every backup the legacy store tracks."""
     try:
@@ -132,19 +141,20 @@ def _legacy_backup_usernames(source: Path) -> list[str]:
     return names
 
 
-def _copy_keychain_items(source: Path, service: str) -> int:
-    """Copy legacy backup items to ``service``. Never deletes the originals."""
+def _copy_keychain_items(source: Path, legacy_service: str, service: str) -> int:
+    """Copy legacy backup items from ``legacy_service`` to ``service``.
+    Never deletes the originals."""
     copied = 0
     for username in _legacy_backup_usernames(source):
         try:
-            secret = macos_keychain.get_password(LEGACY_KEYCHAIN_SERVICE, username)
+            secret = macos_keychain.get_password(legacy_service, username)
             if secret:
                 macos_keychain.set_password(service, username, secret)
                 copied += 1
         except macos_keychain.KEYCHAIN_ERRORS as exc:
             raise MigrationError(
                 f"could not copy the Keychain backup {username!r} from the "
-                f"{LEGACY_KEYCHAIN_SERVICE!r} service: {exc}. Unlock the "
+                f"{legacy_service!r} service: {exc}. Unlock the "
                 "Keychain and run rota again (nothing was imported yet)"
             ) from exc
     return copied
@@ -189,14 +199,16 @@ def import_legacy_data(target: Path, platform: Platform) -> ImportResult | None:
                 f"copying {source} into {target} failed: {exc}"
             ) from exc
         keychain_items = 0
+        legacy_service = legacy_keychain_service()
         if platform == Platform.MACOS:
             keychain_items = _copy_keychain_items(
-                source, backup_keychain_service(target)
+                source, legacy_service, backup_keychain_service(target)
             )
         record = {
             "source": str(source),
             "importedAt": get_timestamp(),
             "keychainItems": keychain_items,
+            "keychainService": legacy_service,
         }
         (staging / IMPORT_RECORD).write_text(
             json.dumps(record, indent=2) + "\n", encoding="utf-8"

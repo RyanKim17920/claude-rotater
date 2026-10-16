@@ -93,8 +93,11 @@ store does (`~/.claude-swap-backup`, or `~/.local/share/claude-swap` on
 Linux), rota copies its accounts, settings and usage cache, and copies the
 macOS Keychain backups to rota's service. The upstream store and its
 Keychain items are never moved, changed or deleted. A `ROTA_HOME` profile
-imports only when `ROTA_IMPORT_FROM` names the directory to copy from. To
-start empty instead, create the data dir first.
+imports only when `ROTA_IMPORT_FROM` names the directory to copy from. If
+the source store kept its Keychain items under a service other than
+`claude-swap` (an upstream profile, for instance), name it in
+`ROTA_IMPORT_KEYCHAIN_SERVICE`. To start empty instead, create the data dir
+first.
 
 To uninstall, run `uv tool uninstall claude-rotater`, delete `~/.rota`, and
 on macOS delete the `rota` items in Keychain Access.
