@@ -3614,7 +3614,7 @@ class TestPerformSwitchPostDisplay:
         config_path = temp_home / ".claude.json"
         config_path.write_text(json.dumps({
             "oauthAccount": {
-                "emailAddress": "realiti44@gmail.com",
+                "emailAddress": "dana@example.com",
                 "accountUuid": "",
                 "organizationUuid": None,
                 "organizationName": None,
@@ -3635,7 +3635,7 @@ class TestPerformSwitchPostDisplay:
                     "added": "2024-01-01T00:00:00Z",
                 },
                 "4": {
-                    "email": "realiti44@gmail.com",
+                    "email": "dana@example.com",
                     "uuid": "",
                     "organizationUuid": "",
                     "organizationName": "",
@@ -3651,13 +3651,13 @@ class TestPerformSwitchPostDisplay:
         })
         live_creds = json.dumps({
             "claudeAiOauth": {
-                "accessToken": "realiti-live-token",
-                "refreshToken": "realiti-live-refresh",
+                "accessToken": "dana-live-token",
+                "refreshToken": "dana-live-refresh",
             }
         })
         creds_store = {
             ("3", "onurcetinkol@gmail.com"): target_creds,
-            ("4", "realiti44@gmail.com"): "old-realiti-backup",
+            ("4", "dana@example.com"): "old-dana-backup",
         }
         configs_store = {
             ("3", "onurcetinkol@gmail.com"): json.dumps({
@@ -3668,7 +3668,7 @@ class TestPerformSwitchPostDisplay:
                     "organizationName": None,
                 }
             }),
-            ("4", "realiti44@gmail.com"): "old-realiti-config",
+            ("4", "dana@example.com"): "old-dana-config",
         }
         live_state = {"creds": live_creds}
         patches = self._install_store_patches(
@@ -3684,7 +3684,7 @@ class TestPerformSwitchPostDisplay:
                 "claude_rotater.oauth.fetch_oauth_profile",
                 return_value={
                     "uuid": "",
-                    "email": "realiti44@gmail.com",
+                    "email": "dana@example.com",
                     "organizationUuid": "",
                 },
             ):
@@ -3693,8 +3693,8 @@ class TestPerformSwitchPostDisplay:
             for p in patches:
                 p.stop()
 
-        assert creds_store[("4", "realiti44@gmail.com")] == live_creds
-        assert ("3", "realiti44@gmail.com") not in creds_store
+        assert creds_store[("4", "dana@example.com")] == live_creds
+        assert ("3", "dana@example.com") not in creds_store
         assert json.loads(live_state["creds"])["claudeAiOauth"]["accessToken"] == (
             "target-token"
         )
