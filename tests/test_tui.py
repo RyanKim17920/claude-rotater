@@ -1608,10 +1608,8 @@ class TestEngineHosting:
     async def test_threshold_edited_on_config_page_restarts_engine(
         self, tmp_path, fake_engine
     ):
-        """End to end: `c`, type a threshold, submit; the real ConfigScreen's
+        """End to end: `c`, type a threshold, enter; the real ConfigScreen's
         SettingChanged message reaches the app and the engine restarts."""
-        from textual.widgets import Input
-
         from claude_swap.tui.config import ConfigScreen
 
         app = make_app(three_accounts(tmp_path))
@@ -1621,16 +1619,42 @@ class TestEngineHosting:
             await pilot.pause()
             screen = app.screen
             assert isinstance(screen, ConfigScreen)
-            editor = screen.row("autoswitch.threshold").editor
-            assert isinstance(editor, Input)
-            editor.focus()
-            editor.value = ""
+            assert screen.settings_list.spec.dotted == "autoswitch.threshold"
             await pilot.press("8", "1", "enter")
+            await pilot.pause(ConfigScreen.NOTIFY_DELAY_S + 0.2)
             await settle(pilot)
             assert len(fake_engine.instances) == 2
             assert fake_engine.instances[0].stopped
             assert fake_engine.instances[1].settings.threshold == 81.0
             assert app.threshold_pct == 81.0
+
+    async def test_holding_right_on_config_restarts_engine_once(self, tmp_path, fake_engine):
+        """Every step is written, but the engine restarts once the keys stop."""
+        from claude_swap.settings import load_settings
+        from claude_swap.tui.config import ConfigScreen
+
+        app = make_app(three_accounts(tmp_path))
+        async with app.run_test(size=(120, 40)) as pilot:
+            await settle(pilot)
+            await pilot.press("c")
+            await pilot.pause()
+            await pilot.press(*["right"] * 5)
+            assert load_settings(tmp_path).threshold == 95.0
+            await pilot.pause(ConfigScreen.NOTIFY_DELAY_S + 0.2)
+            await settle(pilot)
+            assert len(fake_engine.instances) == 2
+            assert fake_engine.instances[1].settings.threshold == 95.0
+
+    async def test_leaving_config_flushes_pending_change(self, tmp_path, fake_engine):
+        app = make_app(three_accounts(tmp_path))
+        async with app.run_test(size=(120, 40)) as pilot:
+            await settle(pilot)
+            await pilot.press("c")
+            await pilot.pause()
+            await pilot.press("left", "escape")
+            await settle(pilot)
+            assert len(fake_engine.instances) == 2
+            assert app.threshold_pct == 89.0
 
     @pytest.mark.parametrize("key", [
         "autoswitch.pollSpareSeconds",

@@ -1,7 +1,9 @@
 """Pilot tests for the TUI Config page (tui/config.py).
 
-ConfigScreen runs inside a minimal host App (not CswapApp) over a tmp
-backup dir, so nothing touches the real ~/.claude-swap-backup.
+Every test drives the page only with the keys a user presses: ↑/↓ to move,
+←/→ (or -/+) to change, digits / enter / esc for exact values, ctrl+r to reset.
+No test focuses a widget or sets a value directly. ConfigScreen runs inside a
+minimal host App over a tmp backup dir, so nothing touches the real store.
 """
 
 from __future__ import annotations
@@ -11,34 +13,35 @@ from pathlib import Path
 
 import pytest
 from textual.app import App, ComposeResult
-from textual.widgets import Input, Select, Static, Switch
+from textual.widgets import Static
 
 from claude_swap.settings import SETTING_GROUPS, SETTING_SPECS, settings_path
-from claude_swap.tui.config import ConfigScreen, SettingRow, row_id, spec_detail
-
-EDITOR_FOR_KIND = {
-    "float": Input,
-    "int": Input,
-    "string": Input,
-    "bool": Switch,
-    "choice": Select,
-}
+from claude_swap.tui.config import (
+    ConfigScreen,
+    SettingsList,
+    clamp_typed,
+    spec_detail,
+    stepped,
+)
 
 
 class Host(App):
-    """Minimal host: a base screen with ConfigScreen pushed on top, recording
-    every SettingChanged that bubbles up to the app."""
+    """A base screen with ConfigScreen pushed on top, recording every
+    SettingChanged that reaches the app."""
 
-    def __init__(self, backup_dir: Path) -> None:
+    def __init__(self, backup_dir: Path, *, delay: float = 0.0) -> None:
         super().__init__()
         self.backup_dir = backup_dir
+        self.delay = delay
         self.changes: list[str] = []
 
     def compose(self) -> ComposeResult:
         yield Static("base", id="base")
 
     def on_mount(self) -> None:
-        self.push_screen(ConfigScreen(self.backup_dir))
+        screen = ConfigScreen(self.backup_dir)
+        screen.NOTIFY_DELAY_S = self.delay
+        self.push_screen(screen)
 
     def on_config_screen_setting_changed(self, message: ConfigScreen.SettingChanged) -> None:
         self.changes.append(message.key)
@@ -51,349 +54,288 @@ def read_file(backup_dir: Path) -> dict | None:
     return json.loads(path.read_text())
 
 
-def screen_of(app: Host) -> ConfigScreen:
+def section(backup_dir: Path, name: str) -> dict:
+    return (read_file(backup_dir) or {}).get(name, {})
+
+
+def lst(app: Host) -> SettingsList:
     assert isinstance(app.screen, ConfigScreen)
-    return app.screen
+    return app.screen.settings_list
 
 
-async def focus_editor(pilot, app: Host, key: str):
-    row = screen_of(app).row(key)
-    row.editor.focus()
-    await pilot.pause()
-    return row
+def footer(app: Host) -> str:
+    return str(app.screen.query_one("#config-detail", Static).render())
 
 
-async def type_into(pilot, app: Host, key: str, text: str, *, submit: bool = True):
-    row = await focus_editor(pilot, app, key)
-    editor = row.editor
-    assert isinstance(editor, Input)
-    editor.value = ""
-    await pilot.press(*text)
-    if submit:
-        await pilot.press("enter")
-    await pilot.pause()
-    return row
+def plain(app: Host) -> str:
+    return lst(app).render().plain
 
 
-def test_kind_map_covers_every_spec_kind():
-    # A new kind needs an editor before any spec can use it.
-    assert {spec.kind for spec in SETTING_SPECS.values()} <= set(EDITOR_FOR_KIND)
+async def go_to(pilot, app: Host, key: str) -> None:
+    """Walk down from the top with ↓ until ``key`` is selected."""
+    await pilot.press("home")
+    for _ in range(len(lst(app).specs)):
+        if lst(app).spec.dotted == key:
+            return
+        await pilot.press("down")
+    raise AssertionError(f"{key} not reachable with ↓")
 
 
-def test_spec_detail_mentions_range_and_default():
+def ordered_specs():
+    return [s for g, _t in SETTING_GROUPS for s in SETTING_SPECS.values() if s.group == g]
+
+
+# -- pure helpers ---------------------------------------------------------------
+
+
+def test_spec_detail_mentions_range_step_and_default():
     detail = spec_detail(SETTING_SPECS["autoswitch.threshold"])
-    assert "50-99.9" in detail and "default 90" in detail
-    assert "best | consume-first" in spec_detail(SETTING_SPECS["autoswitch.strategy"])
+    assert "autoswitch.threshold" in detail
+    assert "50-99.9" in detail and "step 1" in detail and "default 90" in detail
+
+
+@pytest.mark.parametrize("spec", list(SETTING_SPECS.values()), ids=lambda s: s.dotted)
+def test_every_spec_steps_or_is_text(spec):
+    """Generated UI guarantee: every kind has a ←/→ behaviour (or is text)."""
+    if spec.kind == "string":
+        assert stepped(spec, "x", 1) == "x"
+        return
+    new = stepped(spec, spec.default, 1)
+    if spec.kind in ("float", "int"):
+        assert spec.lo <= new <= spec.hi
+        assert new == min(spec.default + spec.step_size, spec.hi)
+    else:
+        assert new != spec.default
+
+
+def test_stepped_clamps_and_cycles():
+    thr = SETTING_SPECS["autoswitch.threshold"]
+    assert stepped(thr, 99.0, 1) == 99.9
+    assert stepped(thr, 99.9, 1) == 99.9
+    assert stepped(thr, 50.0, -1) == 50.0
+    strat = SETTING_SPECS["autoswitch.strategy"]
+    assert stepped(strat, "consume-first", 1) == "best"
+    assert stepped(strat, "best", -1) == "consume-first"
+
+
+def test_clamp_typed():
+    thr = SETTING_SPECS["autoswitch.threshold"]
+    assert clamp_typed(thr, "85") == ("85", None)
+    raw, note = clamp_typed(thr, "150")
+    assert raw == "99.9" and "clamped" in note
+    assert clamp_typed(thr, "abc") == ("abc", None)
+    ticks = SETTING_SPECS["autoswitch.unhealthyTicks"]
+    assert clamp_typed(ticks, "2.6")[0] == "3"
+
+
+# -- layout ---------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
 class TestLayout:
-    @pytest.mark.parametrize("key", list(SETTING_SPECS))
-    async def test_every_spec_gets_one_row_with_the_right_editor(self, tmp_path, key):
+    async def test_one_row_per_spec_under_group_headings(self, tmp_path):
         app = Host(tmp_path)
         async with app.run_test(size=(120, 40)) as pilot:
             await pilot.pause()
-            spec = SETTING_SPECS[key]
-            rows = app.screen.query(f"#{row_id(spec)}")
-            assert len(rows) == 1
-            row = rows.first()
-            assert isinstance(row.editor, EDITOR_FOR_KIND[spec.kind])
-            assert row.query_one(".setting-label", Static).content == spec.label
-            # The row sits in its group's bordered section.
-            assert row.parent.id == f"group-{spec.group}"
+            text = plain(app)
+            for spec in SETTING_SPECS.values():
+                assert spec.label in text
+            headings = [t for _g, t in SETTING_GROUPS]
+            positions = [text.index(h) for h in headings]
+            assert positions == sorted(positions)
+            assert [s.dotted for s in lst(app).specs] == [s.dotted for s in ordered_specs()]
 
-    async def test_sections_follow_setting_groups_order(self, tmp_path):
+    async def test_list_owns_focus_and_first_row_selected(self, tmp_path):
         app = Host(tmp_path)
         async with app.run_test(size=(120, 40)) as pilot:
             await pilot.pause()
-            sections = list(app.screen.query(".setting-group"))
-            assert [s.border_title for s in sections] == [t for _, t in SETTING_GROUPS]
-            assert len(app.screen.query(SettingRow)) == len(SETTING_SPECS)
+            assert app.focused is lst(app)
+            assert lst(app).spec.dotted == ordered_specs()[0].dotted
+            assert footer(app) == spec_detail(ordered_specs()[0])
 
-    async def test_defaults_shown_with_default_marker(self, tmp_path):
+    async def test_bool_renders_as_text_not_a_widget(self, tmp_path):
         app = Host(tmp_path)
         async with app.run_test(size=(120, 40)) as pilot:
             await pilot.pause()
-            screen = screen_of(app)
-            row = screen.row("autoswitch.threshold")
-            assert row.editor.value == "90"
-            assert not row.has_class("-custom")
-            assert str(row.query_one(".setting-marker", Static).content) == "default"
-            assert screen.row("autoswitch.model").editor.value == ""
-            assert screen.row("ui.theme").editor.value == "auto"
-            assert screen.row("autoswitch.includeApiKeyAccounts").editor.value is False
+            line = next(l for l in plain(app).splitlines() if "Include API-key" in l)
+            assert "○ off" in line
 
-    async def test_existing_file_values_loaded_as_custom(self, tmp_path):
-        settings_path(tmp_path).write_text(json.dumps(
-            {"autoswitch": {"threshold": 75, "includeApiKeyAccounts": True,
-                            "strategy": "consume-first"},
-             "ui": {"theme": "light"}}
-        ))
+    async def test_defaults_and_custom_markers(self, tmp_path):
+        settings_path(tmp_path).write_text(json.dumps({"autoswitch": {"threshold": 80}}))
         app = Host(tmp_path)
         async with app.run_test(size=(120, 40)) as pilot:
             await pilot.pause()
-            screen = screen_of(app)
-            row = screen.row("autoswitch.threshold")
-            assert row.editor.value == "75"
-            assert row.has_class("-custom")
-            assert screen.row("autoswitch.includeApiKeyAccounts").editor.value is True
-            assert screen.row("autoswitch.strategy").editor.value == "consume-first"
-            assert screen.row("ui.theme").editor.value == "light"
-        # Opening the page never writes.
-        assert app.changes == []
+            lines = plain(app).splitlines()
+            thr = next(l for l in lines if "Threshold" in l)
+            cool = next(l for l in lines if "Cooldown" in l)
+            assert "80" in thr and "custom" in thr
+            assert "default" in cool
 
-    async def test_first_editor_focused_and_detail_shown(self, tmp_path):
+    @pytest.mark.parametrize("size", [(80, 24), (60, 20)])
+    async def test_narrow_terminal_footer_wraps_full_help(self, tmp_path, size):
         app = Host(tmp_path)
-        async with app.run_test(size=(120, 40)) as pilot:
+        async with app.run_test(size=size) as pilot:
             await pilot.pause()
-            screen = screen_of(app)
-            first = next(iter(screen.query(SettingRow)))
-            assert app.focused is first.editor
-            detail = str(screen.query_one("#config-detail", Static).content)
-            assert first.spec.dotted in detail
+            detail = app.screen.query_one("#config-detail", Static)
+            full = spec_detail(lst(app).spec)
+            assert detail.size.height >= 2  # wrapped, not cut
+            assert footer(app) == full
+            assert all(len(l) <= size[0] for l in plain(app).splitlines())
 
-    async def test_renders_at_80x24(self, tmp_path):
+    async def test_selection_scrolls_into_view_at_80x24(self, tmp_path):
         app = Host(tmp_path)
         async with app.run_test(size=(80, 24)) as pilot:
             await pilot.pause()
-            # Every row is laid out on a single line.
-            for row in app.screen.query(SettingRow):
-                assert row.size.height == 1
+            await pilot.press("end")
+            await pilot.pause()
+            body = app.screen.query_one("#config-body")
+            line = lst(app).line_of(lst(app).cursor)
+            assert body.scroll_offset.y <= line < body.scroll_offset.y + body.size.height
+
+
+# -- navigation -------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
 class TestNavigation:
-    async def test_tab_and_arrows_walk_editors_not_reset_buttons(self, tmp_path):
+    async def test_up_down_move_and_stop_at_ends(self, tmp_path):
         app = Host(tmp_path)
         async with app.run_test(size=(120, 40)) as pilot:
             await pilot.pause()
-            editors = [row.editor for row in app.screen.query(SettingRow)]
-            assert app.focused is editors[0]
-            await pilot.press("tab")
-            assert app.focused is editors[1]
-            await pilot.press("down")
-            assert app.focused is editors[2]
+            specs = ordered_specs()
             await pilot.press("up")
-            assert app.focused is editors[1]
-            await pilot.press("shift+tab")
-            assert app.focused is editors[0]
+            assert lst(app).cursor == 0
+            await pilot.press("down", "down")
+            assert lst(app).spec.dotted == specs[2].dotted
+            assert footer(app) == spec_detail(specs[2])
+            await pilot.press(*["down"] * (len(specs) + 3))
+            assert lst(app).cursor == len(specs) - 1
+            await pilot.press("k")
+            assert lst(app).cursor == len(specs) - 2
 
-    async def test_down_on_select_moves_instead_of_opening(self, tmp_path):
+    async def test_down_crosses_section_heading(self, tmp_path):
         app = Host(tmp_path)
         async with app.run_test(size=(120, 40)) as pilot:
             await pilot.pause()
-            row = await focus_editor(pilot, app, "autoswitch.strategy")
-            await pilot.press("down")
-            assert app.focused is not row.editor
-            assert not row.editor.expanded
+            specs = ordered_specs()
+            last_auto = max(i for i, s in enumerate(specs) if s.group == "autoswitch")
+            await pilot.press(*["down"] * (last_auto + 1))
+            assert lst(app).spec.group == specs[last_auto + 1].group != "autoswitch"
 
-    async def test_focus_updates_detail_line(self, tmp_path):
-        app = Host(tmp_path)
-        async with app.run_test(size=(120, 40)) as pilot:
-            await pilot.pause()
-            await focus_editor(pilot, app, "ui.theme")
-            detail = str(app.screen.query_one("#config-detail", Static).content)
-            assert detail == spec_detail(SETTING_SPECS["ui.theme"])
-
-    @pytest.mark.parametrize("key", ["escape", "q", "c"])
+    @pytest.mark.parametrize("key", ["escape", "c", "q"])
     async def test_close_keys_pop_back(self, tmp_path, key):
         app = Host(tmp_path)
         async with app.run_test(size=(120, 40)) as pilot:
             await pilot.pause()
-            # Focus a non-text editor so q/c are not typed into an Input.
-            await focus_editor(pilot, app, "ui.theme")
             await pilot.press(key)
             await pilot.pause()
             assert not isinstance(app.screen, ConfigScreen)
-            assert app.screen.query_one("#base")
 
-    async def test_q_in_text_field_is_typed_not_close(self, tmp_path):
+    async def test_click_selects_row(self, tmp_path):
         app = Host(tmp_path)
         async with app.run_test(size=(120, 40)) as pilot:
             await pilot.pause()
-            row = await focus_editor(pilot, app, "autoswitch.model")
-            await pilot.press("q")
-            assert isinstance(app.screen, ConfigScreen)
-            assert row.editor.value == "q"
+            target = 3
+            y = lst(app).line_of(target)
+            await pilot.click(SettingsList, offset=(5, y))
+            assert lst(app).cursor == target
+
+
+# -- stepping with ←/→ -----------------------------------------------------------------
 
 
 @pytest.mark.asyncio
-class TestEditing:
-    async def test_valid_float_persists_and_posts_change(self, tmp_path):
+class TestStepping:
+    async def test_right_steps_threshold_and_saves_immediately(self, tmp_path):
         app = Host(tmp_path)
         async with app.run_test(size=(120, 40)) as pilot:
             await pilot.pause()
-            row = await type_into(pilot, app, "autoswitch.threshold", "80")
-            assert read_file(tmp_path)["autoswitch"]["threshold"] == 80.0
-            assert app.changes == ["autoswitch.threshold"]
-            assert row.has_class("-custom")
-            assert not row.has_class("-error")
-            assert row.query_one(".setting-reset").visible
+            await go_to(pilot, app, "autoswitch.threshold")
+            await pilot.press("right")
+            assert section(tmp_path, "autoswitch") == {"threshold": 91.0}
+            await pilot.press("plus")
+            assert section(tmp_path, "autoswitch") == {"threshold": 92.0}
+            await pilot.press("minus", "left")
+            assert read_file(tmp_path).get("autoswitch") is None  # back at default: key removed
+            await pilot.pause()
+            assert app.changes.count("autoswitch.threshold") == 4
 
-    async def test_valid_int_persists(self, tmp_path):
+    async def test_holding_right_clamps_at_max(self, tmp_path):
         app = Host(tmp_path)
         async with app.run_test(size=(120, 40)) as pilot:
             await pilot.pause()
-            await type_into(pilot, app, "autoswitch.unhealthyTicks", "5")
-            assert read_file(tmp_path)["autoswitch"]["unhealthyTicks"] == 5
-            assert app.changes == ["autoswitch.unhealthyTicks"]
+            await go_to(pilot, app, "autoswitch.threshold")
+            await pilot.press(*["right"] * 40)
+            assert section(tmp_path, "autoswitch") == {"threshold": 99.9}
+            assert "‹ 99.9 ›" in plain(app)
+            app.changes.clear()
+            await pilot.press("right")
+            await pilot.pause()
+            assert app.changes == []  # at the bound: nothing written or posted
 
-    @pytest.mark.parametrize("text, message", [
-        ("abc", "expects a number"),
-        ("150", "between 50 and 99.9"),
-        ("10", "between 50 and 99.9"),
-    ])
-    async def test_invalid_float_shows_error_and_writes_nothing(self, tmp_path, text, message):
+    async def test_holding_left_clamps_at_min(self, tmp_path):
         app = Host(tmp_path)
         async with app.run_test(size=(120, 40)) as pilot:
             await pilot.pause()
-            row = await type_into(pilot, app, "autoswitch.threshold", text)
-            assert read_file(tmp_path) is None
-            assert app.changes == []
-            assert row.has_class("-error")
-            assert message in str(row.query_one(".setting-help", Static).content)
-            detail = app.screen.query_one("#config-detail", Static)
-            assert detail.has_class("-error")
-            assert message in str(detail.content)
-            # The bad text stays so it can be fixed in place.
-            assert row.editor.value == text
+            await go_to(pilot, app, "autoswitch.threshold")
+            await pilot.press(*["left"] * 60)
+            assert section(tmp_path, "autoswitch") == {"threshold": 50.0}
 
-    async def test_invalid_value_leaves_existing_file_unchanged(self, tmp_path):
-        original = json.dumps({"autoswitch": {"threshold": 70}, "other": {"x": 1}})
-        settings_path(tmp_path).write_text(original)
+    async def test_seconds_step_by_thirty(self, tmp_path):
         app = Host(tmp_path)
         async with app.run_test(size=(120, 40)) as pilot:
             await pilot.pause()
-            await type_into(pilot, app, "autoswitch.threshold", "999")
-            assert settings_path(tmp_path).read_text() == original
+            await go_to(pilot, app, "autoswitch.cooldownSeconds")
+            await pilot.press("right", "right")
+            assert section(tmp_path, "autoswitch") == {"cooldownSeconds": 360.0}
+            await pilot.press(*["left"] * 20)
+            assert section(tmp_path, "autoswitch") == {"cooldownSeconds": 0.0}
 
-    async def test_fixing_an_error_clears_it(self, tmp_path):
+    async def test_int_steps_stay_ints(self, tmp_path):
         app = Host(tmp_path)
         async with app.run_test(size=(120, 40)) as pilot:
             await pilot.pause()
-            row = await type_into(pilot, app, "autoswitch.threshold", "x")
-            assert row.has_class("-error")
-            row = await type_into(pilot, app, "autoswitch.threshold", "85")
-            assert not row.has_class("-error")
-            assert str(row.query_one(".setting-help", Static).content) == row.spec.help
-            assert read_file(tmp_path)["autoswitch"]["threshold"] == 85.0
+            await go_to(pilot, app, "autoswitch.unhealthyTicks")
+            await pilot.press("right")
+            value = section(tmp_path, "autoswitch")["unhealthyTicks"]
+            assert value == 4 and isinstance(value, int)
 
-    async def test_int_rejects_fraction(self, tmp_path):
+    async def test_bool_flips_both_ways_and_enter_flips(self, tmp_path):
         app = Host(tmp_path)
         async with app.run_test(size=(120, 40)) as pilot:
             await pilot.pause()
-            row = await type_into(pilot, app, "autoswitch.unhealthyTicks", "2.5")
-            assert row.has_class("-error")
-            assert read_file(tmp_path) is None
+            await go_to(pilot, app, "autoswitch.includeApiKeyAccounts")
+            await pilot.press("right")
+            assert section(tmp_path, "autoswitch") == {"includeApiKeyAccounts": True}
+            assert "● on" in plain(app)
+            await pilot.press("left")
+            assert read_file(tmp_path).get("autoswitch") is None
+            await pilot.press("enter")
+            assert section(tmp_path, "autoswitch") == {"includeApiKeyAccounts": True}
 
-    async def test_blur_commits_typed_value(self, tmp_path):
+    async def test_choice_cycles(self, tmp_path):
         app = Host(tmp_path)
         async with app.run_test(size=(120, 40)) as pilot:
             await pilot.pause()
-            await type_into(pilot, app, "autoswitch.cooldownSeconds", "120", submit=False)
-            assert read_file(tmp_path) is None
-            await pilot.press("tab")
-            await pilot.pause()
-            assert read_file(tmp_path)["autoswitch"]["cooldownSeconds"] == 120.0
-            assert app.changes == ["autoswitch.cooldownSeconds"]
+            await go_to(pilot, app, "autoswitch.strategy")
+            await pilot.press("right")
+            assert section(tmp_path, "autoswitch") == {"strategy": "consume-first"}
+            await pilot.press("right")
+            assert read_file(tmp_path).get("autoswitch") is None  # wrapped to default
+            await go_to(pilot, app, "ui.theme")
+            await pilot.press("left")
+            assert section(tmp_path, "ui") == {"theme": "light"}
 
-    async def test_close_commits_pending_valid_value(self, tmp_path):
-        app = Host(tmp_path)
-        async with app.run_test(size=(120, 40)) as pilot:
-            await pilot.pause()
-            await type_into(pilot, app, "autoswitch.hysteresisPct", "20", submit=False)
-            await pilot.press("escape")
-            await pilot.pause()
-            assert not isinstance(app.screen, ConfigScreen)
-            assert read_file(tmp_path)["autoswitch"]["hysteresisPct"] == 20.0
-
-    async def test_close_with_invalid_pending_value_writes_nothing(self, tmp_path):
-        app = Host(tmp_path)
-        async with app.run_test(size=(120, 40)) as pilot:
-            await pilot.pause()
-            await type_into(pilot, app, "autoswitch.hysteresisPct", "99", submit=False)
-            await pilot.press("escape")
-            await pilot.pause()
-            assert not isinstance(app.screen, ConfigScreen)
-            assert read_file(tmp_path) is None
-            assert app.changes == []
-
-    async def test_unchanged_value_is_a_noop(self, tmp_path):
-        app = Host(tmp_path)
-        async with app.run_test(size=(120, 40)) as pilot:
-            await pilot.pause()
-            await type_into(pilot, app, "autoswitch.threshold", "90.0")
-            assert read_file(tmp_path) is None
-            assert app.changes == []
-
-    async def test_string_persists_and_empty_unsets(self, tmp_path):
-        app = Host(tmp_path)
-        async with app.run_test(size=(120, 40)) as pilot:
-            await pilot.pause()
-            await type_into(pilot, app, "autoswitch.model", "Fable")
-            assert read_file(tmp_path)["autoswitch"]["model"] == "Fable"
-            row = await type_into(pilot, app, "autoswitch.model", "")
-            assert "autoswitch" not in read_file(tmp_path)
-            assert not row.has_class("-custom")
-            assert app.changes == ["autoswitch.model", "autoswitch.model"]
-
-    async def test_empty_numeric_field_unsets(self, tmp_path):
-        settings_path(tmp_path).write_text(json.dumps({"autoswitch": {"threshold": 70}}))
-        app = Host(tmp_path)
-        async with app.run_test(size=(120, 40)) as pilot:
-            await pilot.pause()
-            row = await type_into(pilot, app, "autoswitch.threshold", "")
-            assert "autoswitch" not in read_file(tmp_path)
-            assert row.editor.value == "90"
-            assert app.changes == ["autoswitch.threshold"]
-
-    async def test_bool_switch_persists(self, tmp_path):
-        app = Host(tmp_path)
-        async with app.run_test(size=(120, 40)) as pilot:
-            await pilot.pause()
-            await focus_editor(pilot, app, "autoswitch.includeApiKeyAccounts")
-            await pilot.press("space")
-            await pilot.pause()
-            assert read_file(tmp_path)["autoswitch"]["includeApiKeyAccounts"] is True
-            await pilot.press("space")
-            await pilot.pause()
-            assert read_file(tmp_path)["autoswitch"]["includeApiKeyAccounts"] is False
-            assert app.changes == ["autoswitch.includeApiKeyAccounts"] * 2
-
-    async def test_choice_select_persists(self, tmp_path):
-        app = Host(tmp_path)
-        async with app.run_test(size=(120, 40)) as pilot:
-            await pilot.pause()
-            row = await focus_editor(pilot, app, "autoswitch.strategy")
-            await pilot.press("enter")  # open the menu
-            await pilot.pause()
-            assert row.editor.expanded
-            await pilot.press("down", "enter")
-            await pilot.pause()
-            assert read_file(tmp_path)["autoswitch"]["strategy"] == "consume-first"
-            assert app.changes == ["autoswitch.strategy"]
-            assert row.has_class("-custom")
-
-    async def test_theme_select_persists_to_ui_section(self, tmp_path):
-        app = Host(tmp_path)
-        async with app.run_test(size=(120, 40)) as pilot:
-            await pilot.pause()
-            row = screen_of(app).row("ui.theme")
-            row.editor.value = "dark"
-            await pilot.pause()
-            assert read_file(tmp_path)["ui"]["theme"] == "dark"
-            assert app.changes == ["ui.theme"]
-
-    async def test_unknown_keys_survive_a_write(self, tmp_path):
+    async def test_unknown_keys_survive_a_step(self, tmp_path):
         settings_path(tmp_path).write_text(json.dumps(
-            {"autoswitch": {"futureKey": 1}, "other": {"x": 2}}
-        ))
+            {"autoswitch": {"futureKey": 1}, "other": {"x": 2}}))
         app = Host(tmp_path)
         async with app.run_test(size=(120, 40)) as pilot:
             await pilot.pause()
-            await type_into(pilot, app, "autoswitch.threshold", "80")
+            await go_to(pilot, app, "autoswitch.threshold")
+            await pilot.press("left")
         raw = read_file(tmp_path)
-        assert raw["autoswitch"] == {"futureKey": 1, "threshold": 80.0}
+        assert raw["autoswitch"] == {"futureKey": 1, "threshold": 89.0}
         assert raw["other"] == {"x": 2}
 
     async def test_corrupt_file_shows_error_and_is_not_overwritten(self, tmp_path):
@@ -401,62 +343,155 @@ class TestEditing:
         app = Host(tmp_path)
         async with app.run_test(size=(120, 40)) as pilot:
             await pilot.pause()
-            row = await type_into(pilot, app, "autoswitch.threshold", "80")
-            assert row.has_class("-error")
-            assert "not valid JSON" in str(row.query_one(".setting-help", Static).content)
+            await go_to(pilot, app, "autoswitch.threshold")
+            await pilot.press("right")
+            await pilot.pause()
+            assert "not valid JSON" in footer(app)
+            assert app.screen.query_one("#config-detail").has_class("-error")
         assert settings_path(tmp_path).read_text() == "{not json"
         assert app.changes == []
 
 
+# -- exact values ----------------------------------------------------------------------
+
+
 @pytest.mark.asyncio
-class TestReset:
-    async def test_ctrl_r_unsets_focused_setting(self, tmp_path):
+class TestExactEntry:
+    async def test_digits_open_edit_and_enter_commits(self, tmp_path):
+        app = Host(tmp_path)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            await go_to(pilot, app, "autoswitch.threshold")
+            await pilot.press("8")
+            assert lst(app).editing == "8"
+            assert "8▏" in plain(app)
+            await pilot.press("5", "enter")
+            assert lst(app).editing is None
+            assert section(tmp_path, "autoswitch") == {"threshold": 85.0}
+
+    async def test_enter_opens_edit_with_current_value(self, tmp_path):
+        app = Host(tmp_path)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            await go_to(pilot, app, "autoswitch.cooldownSeconds")
+            await pilot.press("enter")
+            assert lst(app).editing == "300"
+            await pilot.press("backspace", "backspace", "backspace", "4", "5", "enter")
+            assert section(tmp_path, "autoswitch") == {"cooldownSeconds": 45.0}
+
+    async def test_out_of_range_clamps_with_note(self, tmp_path):
+        app = Host(tmp_path)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            await go_to(pilot, app, "autoswitch.threshold")
+            await pilot.press("1", "5", "0", "enter")
+            assert section(tmp_path, "autoswitch") == {"threshold": 99.9}
+            await pilot.pause()
+            assert "clamped to 99.9" in footer(app)
+
+    async def test_garbage_keeps_editing_writes_nothing_then_esc_cancels(self, tmp_path):
+        app = Host(tmp_path)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            await go_to(pilot, app, "autoswitch.threshold")
+            await pilot.press("8", "x", "enter")
+            await pilot.pause()
+            assert lst(app).editing == "8x"
+            assert app.screen.query_one("#config-detail").has_class("-error")
+            assert read_file(tmp_path) is None
+            await pilot.press("escape")
+            assert lst(app).editing is None
+            assert isinstance(app.screen, ConfigScreen)  # esc cancelled, did not close
+            assert "‹ 90 ›" in plain(app)
+            assert footer(app) == spec_detail(lst(app).spec)
+
+    async def test_down_commits_and_moves(self, tmp_path):
+        app = Host(tmp_path)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            await go_to(pilot, app, "autoswitch.threshold")
+            start = lst(app).cursor
+            await pilot.press("7", "0", "down")
+            assert section(tmp_path, "autoswitch") == {"threshold": 70.0}
+            assert lst(app).cursor == start + 1
+
+    async def test_arrows_do_not_step_while_editing(self, tmp_path):
+        app = Host(tmp_path)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            await go_to(pilot, app, "autoswitch.threshold")
+            await pilot.press("7", "right", "left")
+            assert lst(app).editing == "7"
+            assert read_file(tmp_path) is None
+
+    async def test_string_edit_and_empty_unsets(self, tmp_path):
+        app = Host(tmp_path)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            await go_to(pilot, app, "autoswitch.model")
+            await pilot.press("right")  # strings do not step
+            assert read_file(tmp_path) is None
+            await pilot.press("enter", "F", "a", "b", "l", "e", "enter")
+            assert section(tmp_path, "autoswitch") == {"model": "Fable"}
+            await pilot.press("enter", *["backspace"] * 5, "enter")
+            assert read_file(tmp_path).get("autoswitch") is None
+
+    async def test_q_and_c_are_typed_while_editing(self, tmp_path):
+        app = Host(tmp_path)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            await go_to(pilot, app, "autoswitch.model")
+            await pilot.press("enter", "q", "c")
+            assert isinstance(app.screen, ConfigScreen)
+            assert lst(app).editing == "qc"
+
+    async def test_letters_on_a_number_do_not_start_editing(self, tmp_path):
+        app = Host(tmp_path)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            await go_to(pilot, app, "autoswitch.threshold")
+            await pilot.press("x")
+            assert lst(app).editing is None
+
+
+# -- reset and notifications ---------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+class TestResetAndNotify:
+    async def test_ctrl_r_resets(self, tmp_path):
         settings_path(tmp_path).write_text(json.dumps({"autoswitch": {"threshold": 70}}))
         app = Host(tmp_path)
         async with app.run_test(size=(120, 40)) as pilot:
             await pilot.pause()
-            row = await focus_editor(pilot, app, "autoswitch.threshold")
+            await go_to(pilot, app, "autoswitch.threshold")
             await pilot.press("ctrl+r")
             await pilot.pause()
-            assert "autoswitch" not in read_file(tmp_path)
-            assert row.editor.value == "90"
-            assert not row.has_class("-custom")
+            assert read_file(tmp_path).get("autoswitch") is None
+            assert app.changes == ["autoswitch.threshold"]
+            await pilot.press("ctrl+r")  # already default: no write, no message
+            await pilot.pause()
             assert app.changes == ["autoswitch.threshold"]
 
-    async def test_reset_button_click_unsets(self, tmp_path):
-        settings_path(tmp_path).write_text(json.dumps({"ui": {"theme": "light"}}))
-        app = Host(tmp_path)
+    async def test_notifications_are_debounced_per_key(self, tmp_path):
+        app = Host(tmp_path, delay=0.15)
         async with app.run_test(size=(120, 40)) as pilot:
             await pilot.pause()
-            row = screen_of(app).row("ui.theme")
-            await pilot.click(row.query_one(".setting-reset"))
-            await pilot.pause()
-            assert "ui" not in read_file(tmp_path)
-            assert row.editor.value == "auto"
-            assert app.changes == ["ui.theme"]
-
-    async def test_reset_of_unset_setting_is_a_noop(self, tmp_path):
-        app = Host(tmp_path)
-        async with app.run_test(size=(120, 40)) as pilot:
-            await pilot.pause()
-            row = await focus_editor(pilot, app, "autoswitch.threshold")
-            assert not row.query_one(".setting-reset").visible
-            await pilot.press("ctrl+r")
-            await pilot.pause()
-            assert read_file(tmp_path) is None
+            await go_to(pilot, app, "autoswitch.threshold")
+            await pilot.press(*["right"] * 12)
+            assert section(tmp_path, "autoswitch") == {"threshold": 99.9}  # written at once
             assert app.changes == []
+            await pilot.pause(0.4)
+            assert app.changes == ["autoswitch.threshold"]
 
-    async def test_reset_bool_restores_switch_without_rewriting(self, tmp_path):
-        settings_path(tmp_path).write_text(
-            json.dumps({"autoswitch": {"includeApiKeyAccounts": True}})
-        )
-        app = Host(tmp_path)
+    async def test_closing_flushes_pending_notifications(self, tmp_path):
+        app = Host(tmp_path, delay=10.0)
         async with app.run_test(size=(120, 40)) as pilot:
             await pilot.pause()
-            row = await focus_editor(pilot, app, "autoswitch.includeApiKeyAccounts")
-            await pilot.press("ctrl+r")
+            await go_to(pilot, app, "autoswitch.threshold")
+            await pilot.press("right", "down", "right", "escape")
             await pilot.pause()
-            assert row.editor.value is False
-            # The programmatic switch flip must not write the default back.
-            assert read_file(tmp_path) == {"schemaVersion": 1}
-            assert app.changes == ["autoswitch.includeApiKeyAccounts"]
+            assert not isinstance(app.screen, ConfigScreen)
+            assert sorted(app.changes) == sorted(
+                ["autoswitch.threshold", ordered_specs()[1].dotted]
+            )

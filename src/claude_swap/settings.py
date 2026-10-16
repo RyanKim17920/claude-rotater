@@ -102,6 +102,12 @@ class SettingSpec:
     # _DEFAULT_SOURCES key owning the field; empty means the section's own
     # dataclass (AutoSwitchSettings / UiSettings).
     source_key: str = ""
+    step: float | None = None  # Config page ←/→ increment for float/int kinds
+
+    @property
+    def step_size(self) -> float:
+        """The ←/→ increment: the explicit ``step``, else 1."""
+        return self.step if self.step is not None else 1.0
 
     @property
     def dotted(self) -> str:
@@ -143,6 +149,7 @@ def _cadence_specs() -> tuple[SettingSpec, ...]:
             help=_CADENCE_TEXT[json_key][1],
             group="polling", label=_CADENCE_TEXT[json_key][0],
             source_key="cadence",
+            step=30.0 if json_key.endswith("Seconds") else 1.0,
         )
         for json_key, (field, kind, lo, hi) in CADENCE_SETTING_KEYS.items()
     )
@@ -156,17 +163,17 @@ SETTING_SPECS: dict[str, SettingSpec] = {
         SettingSpec(
             "autoswitch", "threshold", "threshold", "float", 50.0, 99.9,
             help="Switch when the binding 5h/7d window reaches this pct",
-            group="autoswitch", label="Threshold %",
+            group="autoswitch", label="Threshold %", step=1.0,
         ),
         SettingSpec(
             "autoswitch", "cooldownSeconds", "cooldown_seconds", "float", 0.0, 86400.0,
             help="Minimum seconds between proactive switches",
-            group="autoswitch", label="Cooldown (s)",
+            group="autoswitch", label="Cooldown (s)", step=30.0,
         ),
         SettingSpec(
             "autoswitch", "hysteresisPct", "hysteresis_pct", "float", 0.0, 50.0,
             help="A target must beat the active account by this many pct",
-            group="autoswitch", label="Hysteresis %",
+            group="autoswitch", label="Hysteresis %", step=1.0,
         ),
         SettingSpec(
             "autoswitch", "strategy", "strategy", "choice",
@@ -182,7 +189,7 @@ SETTING_SPECS: dict[str, SettingSpec] = {
         SettingSpec(
             "autoswitch", "unhealthyTicks", "unhealthy_ticks", "int", 1, 100,
             help="Consecutive failed polls before an account is unhealthy",
-            group="autoswitch", label="Unhealthy after (polls)",
+            group="autoswitch", label="Unhealthy after (polls)", step=1.0,
         ),
         SettingSpec(
             "autoswitch", "model", "model", "string",
@@ -198,7 +205,7 @@ SETTING_SPECS: dict[str, SettingSpec] = {
         SettingSpec(
             "ui", "loginWarnDays", "login_warn_days", "int", 0, 60,
             help="Warn when an account's login ends within this many days (0 = never)",
-            group="ui", label="Login warning (days)",
+            group="ui", label="Login warning (days)", step=1.0,
         ),
     )
 }
