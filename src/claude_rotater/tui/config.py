@@ -278,10 +278,10 @@ class SettingsList(Widget, can_focus=True):
             ("custom" if is_set else "default").ljust(_MARKER_W),
             style=f"bold {palette.accent}" if is_set else palette.muted,
         )
-        help_w = width - row.cell_len - 2
+        help_w = width - row.cell_len - 4
         if width >= HELP_COLUMN_MIN_WIDTH and help_w > 0:
             text = spec.help if len(spec.help) <= help_w else spec.help[: help_w - 1] + "…"
-            row.append(text, style=palette.muted)
+            row.append("  " + text, style=palette.muted)
         if selected:
             row.pad_right(max(0, width - 2 - row.cell_len))
             theme = self.app.current_theme
