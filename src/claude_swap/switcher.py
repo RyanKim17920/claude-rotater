@@ -13,7 +13,9 @@ import sys
 import tempfile
 import time
 from concurrent.futures import ThreadPoolExecutor
+from functools import partial
 from pathlib import Path
+from typing import Callable
 
 from claude_swap import macos_keychain
 
@@ -3029,7 +3031,14 @@ class ClaudeAccountSwitcher:
         ``_reject_foreign_credential_capture`` exists to close, so the guard
         must not widen it.
         """
-        config_path = self._get_claude_config_path()
+        return self._read_identity_triple(self._get_claude_config_path())
+
+    def _read_identity_triple(
+        self, config_path: Path
+    ) -> tuple[str, str, str] | None:
+        """``(email, org_uuid, account_uuid)`` from one read of any
+        ``.claude.json``: the live one, or a login staged in a temp profile
+        (``add_account(source_dir=...)``)."""
         if not config_path.exists():
             return None
         data = self._read_json(config_path)
@@ -3170,7 +3179,7 @@ class ClaudeAccountSwitcher:
         return "api_key" if record.get("kind") == "api_key" else "oauth"
 
     def _reject_identity_drift_since_verify(
-        self, verified: tuple[str, str, str]
+        self, verified: tuple[str, str, str], config_path: Path | None = None
     ) -> None:
         """Refuse when the active identity moved during the ownership check.
 
@@ -3182,7 +3191,11 @@ class ClaudeAccountSwitcher:
         door. BOTH write paths need this: ``slot=None`` on a registered account
         is the branch the menu bar, the TUI and a bare ``--add-account`` take.
         """
-        now = self._get_current_identity_triple()
+        now = (
+            self._get_current_identity_triple()
+            if config_path is None
+            else self._read_identity_triple(config_path)
+        )
         if now == verified:
             return
         raise ConfigError(
@@ -3192,7 +3205,9 @@ class ClaudeAccountSwitcher:
         )
 
 
-    def _reject_credential_drift_since_verify(self, verified: str) -> None:
+    def _reject_credential_drift_since_verify(
+        self, verified: str, read_creds: Callable[[], str | None] | None = None
+    ) -> None:
         """Refuse when the credential store rotated during the ownership check.
 
         The identity guard sees a ``/login`` because that moves
@@ -3211,7 +3226,7 @@ class ClaudeAccountSwitcher:
         ownership guard already treats that way.
         """
         try:
-            now = self._read_capture_credentials()
+            now = (read_creds or self._read_capture_credentials)()
         except Exception:  # noqa: BLE001 -- unreadable is unverifiable
             return
         if not now:
@@ -3546,8 +3561,20 @@ class ClaudeAccountSwitcher:
         slot: int | None = None,
         assume_yes: bool = False,
         alias: str | None = None,
+        *,
+        source_dir: str | None = None,
     ) -> None:
         """Add current account to managed accounts.
+
+        ``source_dir`` captures from a staged login profile instead of the
+        live store: the identity and config come from ``<source_dir>/.claude.json``
+        and the credential from that profile's store (its hashed keychain item
+        on macOS, its ``.credentials.json`` elsewhere), read through
+        ``session.read_config_dir_credentials`` with the EXACT string that was
+        exported as ``CLAUDE_CONFIG_DIR``. The active account is never touched:
+        ``activeAccountNumber`` stays put, and a staged login of the account
+        that is active right now is refused (its live copy is Claude Code's,
+        and a second lineage in the backup would fork it).
 
         Args:
             slot: Specify the slot number to store the account in.
@@ -3570,10 +3597,41 @@ class ClaudeAccountSwitcher:
             except ValueError as e:
                 raise ValidationError(str(e)) from e
 
-        identity = self._get_current_identity_triple()
+        # The live store and a staged profile differ only in where the three
+        # reads land; the drift guards re-read the same place (``staged`` is
+        # empty for the live store, so its calls stay exactly as they were).
+        if source_dir is None:
+            config_path = self._get_claude_config_path()
+            read_creds = self._read_capture_credentials
+            identity = self._get_current_identity_triple()
+            staged_identity: dict = {}
+            staged_creds: dict = {}
+        else:
+            from claude_swap.session import read_config_dir_credentials
+
+            config_path = Path(source_dir) / ".claude.json"
+            read_creds = partial(
+                read_config_dir_credentials, source_dir, strict_keychain=True
+            )
+            identity = self._read_identity_triple(config_path)
+            staged_identity = {"config_path": config_path}
+            staged_creds = {"read_creds": read_creds}
         if identity is None:
+            if source_dir is not None:
+                raise ConfigError(
+                    "The login finished but recorded no account "
+                    f"(no oauthAccount in {config_path})."
+                )
             raise ConfigError("No active Claude account found. Please log in first.")
         current_email, current_org_uuid, current_account_uuid = identity
+        if source_dir is not None and self._live_identity_matches(
+            current_email, current_org_uuid
+        ):
+            raise ValidationError(
+                f"{current_email} is the active account; its live login belongs "
+                "to Claude Code. Log in again inside Claude Code (/login), then "
+                "run 'cswap add' to update the stored copy. Nothing was changed."
+            )
 
         # When no slot specified and account already exists, refresh credentials in place
         if slot is None and self._account_exists(current_email, current_org_uuid):
@@ -3588,7 +3646,7 @@ class ClaudeAccountSwitcher:
                         f"Alias '{alias}' is already used by account {conflict}"
                     )
 
-            current_creds = self._read_capture_credentials()
+            current_creds = read_creds()
             if current_creds is None:
                 raise CredentialReadError("Failed to read credentials for current account")
             if not current_creds:
@@ -3598,9 +3656,8 @@ class ClaudeAccountSwitcher:
                 current_creds, current_email, current_org_uuid,
                 current_account_uuid,
             )
-            self._reject_credential_drift_since_verify(current_creds)
+            self._reject_credential_drift_since_verify(current_creds, **staged_creds)
 
-            config_path = self._get_claude_config_path()
             try:
                 current_config = config_path.read_text(encoding="utf-8")
             except FileNotFoundError:
@@ -3619,7 +3676,7 @@ class ClaudeAccountSwitcher:
             # describes no real account -- so the guard would compare it against
             # a fresh read, never match, and refuse every time instead of only
             # on a race.
-            self._reject_identity_drift_since_verify(identity)
+            self._reject_identity_drift_since_verify(identity, **staged_identity)
 
             self._write_account_credentials(account_num, current_email, current_creds)
             self._write_account_config(account_num, current_email, current_config)
@@ -3630,7 +3687,8 @@ class ClaudeAccountSwitcher:
             if alias is not None:
                 seq["accounts"][account_num]["alias"] = alias
 
-            seq["activeAccountNumber"] = int(account_num)
+            if source_dir is None:
+                seq["activeAccountNumber"] = int(account_num)
             seq["lastUpdated"] = get_timestamp()
             self._write_json(self.sequence_file, seq)
 
@@ -3715,7 +3773,7 @@ class ClaudeAccountSwitcher:
                 )
 
         # Read new account credentials BEFORE any destructive operations
-        current_creds = self._read_capture_credentials()
+        current_creds = read_creds()
         if current_creds is None:
             raise CredentialReadError("Failed to read credentials for current account")
         if not current_creds:
@@ -3724,9 +3782,8 @@ class ClaudeAccountSwitcher:
         current_creds = self._reject_foreign_credential_capture(
             current_creds, current_email, current_org_uuid, current_account_uuid
         )
-        self._reject_credential_drift_since_verify(current_creds)
+        self._reject_credential_drift_since_verify(current_creds, **staged_creds)
 
-        config_path = self._get_claude_config_path()
         try:
             current_config = config_path.read_text(encoding="utf-8")
         except FileNotFoundError:
@@ -3741,7 +3798,7 @@ class ClaudeAccountSwitcher:
         organization_uuid = oauth_data.get("organizationUuid", "") or ""
         organization_name = oauth_data.get("organizationName", "") or ""
 
-        self._reject_identity_drift_since_verify(identity)
+        self._reject_identity_drift_since_verify(identity, **staged_identity)
 
         # Now safe to perform destructive cleanup (new account data is in memory)
         if displace_slot:
@@ -3785,7 +3842,8 @@ class ClaudeAccountSwitcher:
         if int(account_num) not in data["sequence"]:
             data["sequence"].append(int(account_num))
             data["sequence"].sort()
-        data["activeAccountNumber"] = int(account_num)
+        if source_dir is None:
+            data["activeAccountNumber"] = int(account_num)
         data["lastUpdated"] = get_timestamp()
 
         self._write_json(self.sequence_file, data)

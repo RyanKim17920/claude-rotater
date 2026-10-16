@@ -253,12 +253,14 @@ def _keychain_account_name() -> str:
     return macos_keychain.keychain_account_name()
 
 
-def delete_macos_keychain_entry(session_dir: Path) -> None:
+def delete_macos_keychain_entry(session_dir: Path | str) -> None:
     """Best-effort delete of a session profile's hashed keychain entry.
 
     No-op off macOS. Needed before seeding (Claude reads the keychain before
     the plaintext file, so a stale entry would shadow a fresh seed) and on
     profile removal (once the dir is gone the hashed name is unrecoverable).
+    Pass a ``str`` to hash the exact value that was exported as
+    ``CLAUDE_CONFIG_DIR`` (see :func:`keychain_service_name`).
     """
     if Platform.detect() != Platform.MACOS:
         return
