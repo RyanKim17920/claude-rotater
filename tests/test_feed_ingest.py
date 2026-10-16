@@ -144,7 +144,7 @@ class TestAttribute:
         # One live window is enough.
         assert verdict(rec(reset5=NOW - 5)).slot == "1"
 
-    def test_cswap_run_session_goes_to_its_slot(self):
+    def test_rota_run_session_goes_to_its_slot(self):
         record = rec(config_dir=str(SESSIONS / "2-b_example.com"), reset5=R5 + 7200)
         v = verdict(record, last_switch_at=NOW - 1)  # no grace: never switches
         assert (v.slot, v.reason) == ("2", ACCEPTED_SESSION)
@@ -330,7 +330,7 @@ class TestIngest:
         assert result.rejected == {"switch-grace": 1}
         assert entry(h).last_good is None
 
-    def test_cswap_run_session_feeds_its_own_slot(self, h):
+    def test_rota_run_session_feeds_its_own_slot(self, h):
         from claude_rotater.session import session_dir_for
 
         ing = FeedIngestor(h.switcher, clock=h.clock)

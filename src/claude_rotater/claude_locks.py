@@ -60,7 +60,7 @@ TOUCH_INTERVAL_S = 3.0
 # sequentially, so its worst case is ~2x this value.
 DEFAULT_TIMEOUT_S = 9.0
 
-_logger = logging.getLogger("claude-swap")
+_logger = logging.getLogger("rota")
 
 
 def credentials_lock_dir() -> Path:
@@ -161,7 +161,7 @@ def claude_credentials_lock(*, timeout: float | None = None):
     2.1.218 takes ``<config-home>/.oauth_refresh.lock`` first, then the
     legacy ``~/.claude.lock``; on legacy contention it releases the primary
     before retrying. Mirroring both the pair and the order means a waiting
-    cswap and a waiting Claude Code can never deadlock against each other,
+    rota and a waiting Claude Code can never deadlock against each other,
     and exclusion holds even after CC drops the legacy lock. Both use CC's
     60s staleness — never steal a lock a live CC may still hold.
     """

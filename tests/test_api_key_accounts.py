@@ -3,7 +3,7 @@
 Covers kind detection, ``--add-token`` auto-detection, the cross-kind collision
 guard, the ``add_account`` live-key guard, kind+platform-aware active credential
 read/write with OAuth↔API-key mutual exclusion, the "API key — no quota" usage
-display, the ``cswap run`` session guard, and the managed-key paths.
+display, the ``rota run`` session guard, and the managed-key paths.
 """
 
 from __future__ import annotations
@@ -457,7 +457,7 @@ class TestAnUnreadableGlobalConfigIsNotAnEmptyOne:
         cfg.chmod(0o000)
         try:
             caplog.clear()
-            with caplog.at_level(logging.WARNING, logger="claude-swap"):
+            with caplog.at_level(logging.WARNING, logger="rota"):
                 s._store._clear_managed_key()  # must not raise
         finally:
             cfg.chmod(0o600)
@@ -488,7 +488,7 @@ class TestAnUnreadableGlobalConfigIsNotAnEmptyOne:
             cfg.unlink()
 
         caplog.clear()
-        with caplog.at_level(logging.WARNING, logger="claude-swap"):
+        with caplog.at_level(logging.WARNING, logger="rota"):
             s._store._clear_managed_key()
 
         assert not cfg.exists(), "a genuinely absent config must not be created"
@@ -508,7 +508,7 @@ class TestATornConfigSurvivesAnOrdinarySwitch:
     file, reporting `switched: True`.
 
     Strictly worse than the bug the refusal closed: it needs no API-key slot,
-    it is what a plain `cswap switch` does, and the success line is what makes
+    it is what a plain `rota switch` does, and the success line is what makes
     it invisible.
     """
 
@@ -934,7 +934,7 @@ class TestTheSalvageKeepsItsPromise:
         """`copy2` preserves the SOURCE mode, and the source is often 0644.
 
         Measured before this: the replacement got 0600 from `_write_json` while
-        the salvage kept 0644 and held `primaryApiKey` — cswap created a
+        the salvage kept 0644 and held `primaryApiKey` — rota created a
         world-readable copy of the user's secret. Asserts the MODE, because a
         salvage that exists and leaks is worse than none.
 
@@ -985,7 +985,7 @@ class TestTheSalvageKeepsItsPromise:
         filename character on Linux, so a behavioural test is green here and
         red only on the platform nobody runs locally. The forbidden set is
         Windows', a superset of POSIX's — a name legal there is legal
-        everywhere cswap runs.
+        everywhere rota runs.
 
         The codebase already had two answers and neither was reused:
         `credentials.py:1372`'s `.corrupt-{int(time.time())}` and

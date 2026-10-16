@@ -1,6 +1,6 @@
 """Path resolution for Claude Code config and credential files.
 
-Mirrors claude-code's own resolution so cswap reads and writes the same files
+Mirrors claude-code's own resolution so rota reads and writes the same files
 claude-code does. Key rules (from claude-code source):
 
 - Config home: ``CLAUDE_CONFIG_DIR`` if set, else ``~/.claude``.
@@ -11,7 +11,7 @@ claude-code does. Key rules (from claude-code source):
   ``.claude.json`` sits at homedir by default, not inside ``.claude/``.
 - Credentials: ``<config_home>/.credentials.json``.
 
-Also resolves the cswap backup root, which on Linux/WSL follows the XDG Base
+Also resolves the rota backup root, which on Linux/WSL follows the XDG Base
 Directory Specification (``$XDG_DATA_HOME/claude-swap``) and falls back to the
 legacy ``~/.claude-swap-backup`` on macOS/Windows.
 
@@ -103,7 +103,7 @@ def get_legacy_backup_root() -> Path:
 
 
 def get_backup_root() -> Path:
-    """Return the cswap backup root for the current platform.
+    """Return the rota backup root for the current platform.
 
     Linux/WSL: ``$XDG_DATA_HOME/claude-swap`` (default ``~/.local/share/claude-swap``).
     macOS/Windows/unknown: ``~/.claude-swap-backup`` (legacy layout).
@@ -123,12 +123,12 @@ def get_backup_root() -> Path:
     return get_legacy_backup_root()
 
 
-# Names that any prior cswap run may have created in the backup root without
+# Names that any prior rota run may have created in the backup root without
 # user data being present (logger output, update-check + usage cache). The
 # migration treats a target containing only these as effectively empty, since
 # wiping them loses no real state.
 _THROWAWAY_NAMES = {"cache"}
-_THROWAWAY_PREFIXES = ("claude-swap.log",)
+_THROWAWAY_PREFIXES = ("rota.log",)
 
 
 def _target_has_meaningful_data(target: Path) -> bool:
@@ -184,7 +184,7 @@ def migrate_legacy_backup_dir(target: Path) -> bool:
       clean the flag; just unlink it.
     * No flag, both paths exist → genuine collision, refuse — *unless* the
       target only holds throwaway artifacts (cache/, log files) that any
-      prior cswap run may have laid down before legacy reappeared (e.g.
+      prior rota run may have laid down before legacy reappeared (e.g.
       first run on a fresh box, then legacy synced in from another machine).
       In that case wipe the artifacts and migrate normally.
 

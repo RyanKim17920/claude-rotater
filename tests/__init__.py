@@ -1,1 +1,1 @@
-"""Tests for Claude Switch."""
+"""Tests for rota."""

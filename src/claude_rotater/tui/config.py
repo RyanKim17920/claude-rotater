@@ -507,7 +507,7 @@ class ConfigScreen(Screen):
         self._pending: dict[str, object] = {}  # dotted key -> debounce timer
 
     def compose(self) -> ComposeResult:
-        yield Static("claude-swap · config", id="config-title")
+        yield Static("rota · config", id="config-title")
         body = VerticalScroll(id="config-body")
         body.can_focus = False
         with body:

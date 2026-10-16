@@ -496,7 +496,7 @@ class TestBootstrap:
 
         `legacy_location=True` is the upgrade path: the marker moved to a
         SIBLING of the profile dir (a child could not be written by the fault
-        that motivates it), and a profile marked by an older cswap on this
+        that motivates it), and a profile marked by an older rota on this
         machine has a pending re-bootstrap that the move must not drop.
         """
         session_dir, _, _ = manager.setup_session("2", share=False)
@@ -540,7 +540,7 @@ class TestBootstrap:
         self, manager, seeded_switcher, auth_status_tracks_seed, refresh_rotates,
         legacy_location: bool,
     ):
-        """A second `cswap run` joining a live session must not invalidate
+        """A second `rota run` joining a live session must not invalidate
         under the running claude; the marker survives for later."""
         session_dir, _, _ = manager.setup_session("2", share=False)
         (session_dir / ".credentials.json").write_text("live lineage")
@@ -1387,7 +1387,7 @@ class TestRun:
             manager.run("2", [])
 
         # Warned, and the overrides are scrubbed from the launched env —
-        # `cswap run 2` means account 2, not whatever the API key resolves to.
+        # `rota run 2` means account 2, not whatever the API key resolves to.
         out = capsys.readouterr().out
         assert "Ignoring ANTHROPIC_API_KEY, ANTHROPIC_AUTH_TOKEN" in out
         assert "ANTHROPIC_API_KEY" not in exc.value.env
@@ -1592,7 +1592,7 @@ class TestGuards:
     ):
         """Re-login + --add-account (or any backup cred write) must force the
         non-live session profile to re-bootstrap — otherwise the documented
-        recovery path leaves `cswap run` on stale credentials that still pass
+        recovery path leaves `rota run` on stale credentials that still pass
         the local reuse check."""
         session_dir = session_dir_for(
             seeded_switcher.backup_dir, ACCOUNT_NUM, ACCOUNT_EMAIL
@@ -1697,7 +1697,7 @@ class TestGuards:
             denied_dir.chmod(0o500)
         import logging
 
-        with caplog.at_level(logging.DEBUG, logger="claude-swap"):
+        with caplog.at_level(logging.DEBUG, logger="rota"):
             try:
                 seeded_switcher._delete_session_profile(ACCOUNT_NUM, ACCOUNT_EMAIL)
             finally:
@@ -1747,7 +1747,7 @@ class TestGuards:
         if not marker_lands:
             session_dir.parent.chmod(0o500)
         try:
-            with caplog.at_level(logging.WARNING, logger="claude-swap"):
+            with caplog.at_level(logging.WARNING, logger="rota"):
                 seeded_switcher._write_account_credentials(
                     ACCOUNT_NUM, ACCOUNT_EMAIL, ROTATED_CREDS
                 )
@@ -1777,7 +1777,7 @@ class TestGuards:
     def test_list_skips_refresh_for_live_session_accounts(
         self, seeded_switcher, monkeypatch
     ):
-        """cswap --list must not proactively refresh an account that is live in
+        """rota --list must not proactively refresh an account that is live in
         a session — rotating the backup copy's token could invalidate the
         session's copy."""
         session_dir = session_dir_for(
@@ -2425,7 +2425,7 @@ class TestCaptureCredentials:
 
         def locked(service: str, account: str) -> str | None:
             if not service.startswith("Claude Code-credentials-"):
-                return fake_store_read(service, account)  # cswap's own backup store
+                return fake_store_read(service, account)  # rota's own backup store
             calls.append(service)
             raise error
 
@@ -2448,7 +2448,7 @@ class TestCaptureCredentials:
 
         def flaky(service: str, account: str) -> str | None:
             if not service.startswith("Claude Code-credentials-"):
-                return fake_store_read(service, account)  # cswap's own backup store
+                return fake_store_read(service, account)  # rota's own backup store
             outcome = next(outcomes)
             if outcome == "busy":
                 raise macos_keychain.KeychainError("busy")
@@ -2664,7 +2664,7 @@ class TestAConsumedGrantIsNotSpentOnAProfileThatWonBootstrap:
     """A one-time grant consumed for THIS pass must reach the profile it was for.
 
     The consume runs before the bootstrap lock (it POSTs, and must never hold
-    one). The under-lock re-check then returns early when another `cswap run`
+    one). The under-lock re-check then returns early when another `rota run`
     bootstrapped while we waited — at which point this pass has already burned
     a one-time refresh token whose successor nobody uses for the session it was
     fetched for. The successor is persisted to the BACKUP, so nothing is lost;

@@ -8,13 +8,13 @@ usage polling: each one is refreshed ``LEAD_S`` before its ``expiresAt``.
 
 Rules:
 
-- Never the active account, and never one held by a live ``cswap run``
+- Never the active account, and never one held by a live ``rota run``
   session. Refresh tokens rotate: consuming one retires the copy Claude Code
   is holding, which would log that process out. Both are re-checked right
   before each refresh, not only when the plan was made.
 - Every refresh goes through ``switcher.consume_backup_grant``, the gate that
   serializes grant consumption per slot (re-read, POST, fingerprint CAS), so
-  this can race the auto engine, the collector or another cswap safely.
+  this can race the auto engine, the collector or another rota safely.
 - ``invalid_grant`` / ``no_refresh_token`` mean the login is dead: the strike
   is recorded in the usage store (the row shows "re-login needed") and that
   credential is never retried. A new login replaces the credential, which
@@ -40,12 +40,12 @@ from claude_rotater.usage_store import FetchRecord
 if TYPE_CHECKING:
     from claude_rotater.switcher import ClaudeAccountSwitcher
 
-_logger = logging.getLogger("claude-swap")
+_logger = logging.getLogger("rota")
 
 LEAD_S = 30 * 60.0  # refresh this long before the access token expires
 RETRY_S = 5 * 60.0  # after a transient failure (network, locked keychain)
 BUSY_RETRY_S = 60.0  # another gate is consuming this slot right now
-HELD_RECHECK_S = 10 * 60.0  # a live `cswap run` session holds the slot
+HELD_RECHECK_S = 10 * 60.0  # a live `rota run` session holds the slot
 MAX_SLEEP_S = 15 * 60.0
 _NEVER = float("inf")
 DEAD_ERRORS = frozenset({"invalid_grant", "no_refresh_token"})
@@ -69,7 +69,7 @@ class RefreshEvent:
     detail: str = ""
 
     def to_json(self, ts: float) -> dict:
-        """One ``cswap auto --json`` line: ``event`` is ``token-<kind>``."""
+        """One ``rota auto --json`` line: ``event`` is ``token-<kind>``."""
         return {
             "schemaVersion": SCHEMA_VERSION,
             "event": f"token-{self.kind}",
@@ -84,9 +84,9 @@ class RefreshEvent:
         if self.kind == "refreshed":
             return f"refreshed {who}'s token ahead of expiry"
         if self.kind == "dead":
-            return f"{who} needs a re-login: its refresh token is dead (press l in cswap)"
+            return f"{who} needs a re-login: its refresh token is dead (press l in rota)"
         if self.kind == "held":
-            return f"left {who} alone: a cswap run session is using it"
+            return f"left {who} alone: a rota run session is using it"
         return f"could not refresh {who} ({self.detail}); will retry"
 
 

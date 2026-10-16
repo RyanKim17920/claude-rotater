@@ -223,7 +223,7 @@ class TestFetchUsage:
 
     def test_http_error_logs_in_debug_mode(self, capsys):
         import logging
-        logger = logging.getLogger("claude-swap")
+        logger = logging.getLogger("rota")
         logger.setLevel(logging.DEBUG)
         handler = logging.StreamHandler()
         logger.addHandler(handler)
@@ -745,8 +745,8 @@ class TestFetchUsageForAccount:
         """Active account with expired token must NOT trigger a refresh POST.
 
         Claude Code owns the active account's credentials and coordinates its
-        own refresh via a lockfile on ~/.claude/ that cswap doesn't honor, so
-        cswap must never touch the active account's tokens.
+        own refresh via a lockfile on ~/.claude/ that rota doesn't honor, so
+        rota must never touch the active account's tokens.
         """
         now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
         credentials = self._make_credentials(expires_at=now_ms - 1_000)
@@ -807,7 +807,7 @@ class TestFetchUsageForAccount:
 
     def test_persist_failure_logs_warning_with_recovery_hint(self, caplog, capsys):
         """If the persist callback raises, _persist logs at WARNING level with
-        a recovery hint (re-run `cswap --add-account`), not debug, AND prints
+        a recovery hint (re-run `rota --add-account`), not debug, AND prints
         a user-visible warning to stderr, so a ``--json`` payload on stdout
         stays one parseable object.
         """
@@ -816,24 +816,24 @@ class TestFetchUsageForAccount:
         def boom(acct_num, acct_email, creds):
             raise RuntimeError("disk exploded")
 
-        with caplog.at_level(logging.WARNING, logger="claude-swap"):
+        with caplog.at_level(logging.WARNING, logger="rota"):
             oauth._persist(boom, "1", "test@example.com", "{}")
 
         warning_records = [
             r for r in caplog.records
-            if r.levelno == logging.WARNING and r.name == "claude-swap"
+            if r.levelno == logging.WARNING and r.name == "rota"
         ]
         assert len(warning_records) == 1
         msg = warning_records[0].getMessage()
         assert "failed to persist" in msg
-        assert "press l in cswap" in msg
+        assert "press l in rota" in msg
         assert "1" in msg
         assert "test@example.com" in msg
 
         # Also verify the user-visible printed warning, and that stdout stays clean
         captured = capsys.readouterr()
         assert "failed to save refreshed token" in captured.err
-        assert "press l in cswap" in captured.err
+        assert "press l in rota" in captured.err
         assert captured.out == ""
 
 
@@ -947,7 +947,7 @@ class TestTryFetchUsageOutcome:
         )
         with (
             patch("claude_rotater.oauth.urllib.request.urlopen", side_effect=err),
-            caplog.at_level(logging.WARNING, logger="claude-swap"),
+            caplog.at_level(logging.WARNING, logger="rota"),
         ):
             outcome = oauth.try_fetch_usage_for_account(
                 "1", "a@b.c", self._make_credentials(), is_active=False,
@@ -965,7 +965,7 @@ class TestTryFetchUsageOutcome:
         assert "retry-after 42s" in line
         assert "a@b.c" not in line
         # Any 429 = the usage endpoint's own budget, which cumulative polling
-        # across cswap surfaces can drain — the log says what is happening.
+        # across rota surfaces can drain — the log says what is happening.
         # Deliberately not scoped to the token in the wording: the budget is
         # account/org-scoped (see poll_policy), so a re-login does not clear it.
         assert "usage-endpoint budget" in line
@@ -981,7 +981,7 @@ class TestTryFetchUsageOutcome:
         )
         with (
             patch("claude_rotater.oauth.urllib.request.urlopen", side_effect=err),
-            caplog.at_level(logging.WARNING, logger="claude-swap"),
+            caplog.at_level(logging.WARNING, logger="rota"),
         ):
             outcome = oauth.try_fetch_usage_for_account(
                 "1", "a@b.c", self._make_credentials(), is_active=False,
@@ -1344,7 +1344,7 @@ class TestFetchOauthProfile:
         )
         with patch(
             "claude_rotater.oauth.urllib.request.urlopen", side_effect=err,
-        ), caplog.at_level(logging.WARNING, logger="claude-swap"):
+        ), caplog.at_level(logging.WARNING, logger="rota"):
             assert oauth.fetch_oauth_profile("sk-live") is None
         assert any(
             "401" in r.message and "pre-fix" in r.message

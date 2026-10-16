@@ -1,4 +1,4 @@
-"""``cswap feed``: live usage from Claude Code's statusline, at no API cost.
+"""``rota feed``: live usage from Claude Code's statusline, at no API cost.
 
 Claude Code pipes a JSON document to its statusline command on every
 refresh. Since 2.1 it carries ``rate_limits.five_hour`` and
@@ -7,8 +7,8 @@ seconds), read from the rate-limit headers of the session's own API
 responses. That is the active account's usage, current to the last request,
 and it costs no request against the usage endpoint's ~30/hour budget.
 
-``cswap feed`` turns each refresh into one compact JSON line appended to
-``<backup>/cache/feed/statusline.jsonl``. The engine (TUI, ``cswap auto``)
+``rota feed`` turns each refresh into one compact JSON line appended to
+``<backup>/cache/feed/statusline.jsonl``. The engine (TUI, ``rota auto``)
 watches that directory and ingests new lines
 (:mod:`claude_rotater.feed_ingest`), so the active account no longer needs
 polling while a session is running.
@@ -21,7 +21,7 @@ that patches it (a second profile with its own backup dir) is honored.
 
 Record shape (keys with no value are omitted)::
 
-    {"t": 1760000000.123,                 # when cswap feed ran (epoch s)
+    {"t": 1760000000.123,                 # when rota feed ran (epoch s)
      "session_id": "...",
      "config_dir": "/Users/me/.claude",   # the session's CLAUDE_CONFIG_DIR
      "five_hour": {"pct": 42.0, "resets_at": 1760003600.0},
@@ -275,7 +275,7 @@ def read_new(path: str, cursor: FeedCursor | None) -> tuple[list[dict], FeedCurs
 
 # -- command --------------------------------------------------------------------
 
-_USAGE = """usage: cswap feed [--tee]
+_USAGE = """usage: rota feed [--tee]
 
 Record the usage Claude Code reports to its statusline. Reads the statusline
 JSON on stdin and appends a compact record to the feed the auto-switcher
@@ -294,7 +294,7 @@ def _drain(stdin, stdout) -> None:
 
 
 def main(argv: list[str], stdin=None, stdout=None, *, now: float | None = None) -> int:
-    """Entry point for ``cswap feed``. Always returns 0."""
+    """Entry point for ``rota feed``. Always returns 0."""
     if "-h" in argv or "--help" in argv:
         try:
             sys.stdout.write(_USAGE)
@@ -329,7 +329,7 @@ def main(argv: list[str], stdin=None, stdout=None, *, now: float | None = None) 
 
         backup_root = paths.get_backup_root()
         if not os.path.isdir(backup_root):
-            return 0  # cswap is not set up for this profile: nothing to feed
+            return 0  # rota is not set up for this profile: nothing to feed
         append_record(feed_path(backup_root), record)
     except Exception:
         pass

@@ -1,8 +1,8 @@
 """Tests for claude_rotater.paths resolver helpers.
 
-These tests verify that cswap resolves Claude Code config/credential paths the
+These tests verify that rota resolves Claude Code config/credential paths the
 same way claude-code itself does. If these drift from claude-code's behavior,
-cswap will read the wrong files and misattribute accounts (see issue #16).
+rota will read the wrong files and misattribute accounts (see issue #16).
 """
 
 from __future__ import annotations
@@ -240,7 +240,7 @@ class TestMigrateLegacyBackupDir:
         """Run-1 created cache/log in target; legacy appears later → migrate anyway.
 
         Regression: pre-fix this raised "Both legacy and new exist" because
-        any prior cswap invocation laid down cache/ + claude-swap.log in the
+        any prior rota invocation laid down cache/ + claude-swap.log in the
         XDG path even when no real data was present.
         """
         legacy = isolated_home / LEGACY_BACKUP_DIRNAME
@@ -250,15 +250,15 @@ class TestMigrateLegacyBackupDir:
         target = isolated_home / ".local" / "share" / "claude-swap"
         (target / "cache").mkdir(parents=True)
         (target / "cache" / "update_check.json").write_text("{}")
-        (target / "claude-swap.log").write_text("noise")
-        (target / "claude-swap.log.1").write_text("rotated")
+        (target / "rota.log").write_text("noise")
+        (target / "rota.log.1").write_text("rotated")
 
         assert migrate_legacy_backup_dir(target) is True
         assert not legacy.exists()
         assert (target / "sequence.json").read_text() == '{"src": "legacy"}'
         # Throwaway artifacts were replaced by legacy contents.
         assert not (target / "cache").exists()
-        assert not (target / "claude-swap.log").exists()
+        assert not (target / "rota.log").exists()
 
     def test_target_with_real_data_alongside_artifacts_still_collides(
         self, isolated_home: Path
@@ -270,7 +270,7 @@ class TestMigrateLegacyBackupDir:
 
         target = isolated_home / ".local" / "share" / "claude-swap"
         (target / "cache").mkdir(parents=True)
-        (target / "claude-swap.log").write_text("noise")
+        (target / "rota.log").write_text("noise")
         (target / "sequence.json").write_text('{"src": "target"}')
 
         with pytest.raises(MigrationError, match="Refusing to merge"):

@@ -1,4 +1,4 @@
-"""The claude-swap Textual application.
+"""The rota Textual application.
 
 Owns the snapshot poll loop, the always-on auto-switch engine, the usage
 estimates, and every mutating action (switch/add/remove), so the main page
@@ -47,7 +47,7 @@ from claude_rotater.tui.config import ConfigScreen
 from claude_rotater.tui.data import ActionResult, SnapshotSource, format_duration, run_action
 from claude_rotater.tui.main import AutoStatus, MainScreen
 from claude_rotater.tui.modals import AddTokenModal, ConfirmModal, OutputModal, TokenForm
-from claude_rotater.tui.theme import CSWAP_DARK, CSWAP_LIGHT
+from claude_rotater.tui.theme import ROTA_DARK, ROTA_LIGHT
 from claude_rotater.usage_history import Point
 
 
@@ -80,11 +80,11 @@ def default_refresher_factory(switcher, on_event) -> TokenRefresher:
     return TokenRefresher(switcher, on_event=on_event)
 
 
-class CswapApp(App):
-    """claude-swap interactive TUI: one main page plus the config page."""
+class RotaApp(App):
+    """rota interactive TUI: one main page plus the config page."""
 
-    TITLE = "claude-swap"
-    CSS_PATH = "cswap.tcss"
+    TITLE = "rota"
+    CSS_PATH = "rota.tcss"
     ENABLE_COMMAND_PALETTE = False
     BINDINGS = [Binding("ctrl+t", "toggle_theme", "Theme")]
 
@@ -149,11 +149,11 @@ class CswapApp(App):
         self.models: tuple[str, ...] = parse_model_names(self.settings.model)
 
     def on_mount(self) -> None:
-        self.register_theme(CSWAP_DARK)
-        self.register_theme(CSWAP_LIGHT)
+        self.register_theme(ROTA_DARK)
+        self.register_theme(ROTA_LIGHT)
         resolved = self._resolved_theme()
         # We own the theme; $TEXTUAL_THEME is intentionally not honoured.
-        self.theme = f"cswap-{resolved}"
+        self.theme = f"rota-{resolved}"
         printer.set_theme(resolved)
         self.push_screen(self.main_screen)
         self._start_engine()
@@ -371,7 +371,7 @@ class CswapApp(App):
 
     def _read_last_switch_at(self) -> float | None:
         """The engine's shared ``lastSwitchAt``: covers switches made by
-        another process (``cswap auto``, ``cswap switch``). Lock-free read."""
+        another process (``rota auto``, ``rota switch``). Lock-free read."""
         try:
             raw = json.loads(
                 (self.switcher.backup_dir / STATE_FILENAME).read_text(encoding="utf-8")
@@ -590,7 +590,7 @@ class CswapApp(App):
             )
 
     LOGIN_BANNER = (
-        "\nclaude-swap: logging in {who} in a separate profile.\n"
+        "\nrota: logging in {who} in a separate profile.\n"
         "Your active account is not touched. Ctrl+C cancels.\n"
     )
 
@@ -690,7 +690,7 @@ class CswapApp(App):
         detection (never re-probes mid-session)."""
         self._theme_name = name
         resolved = self._resolved_theme()
-        self.theme = f"cswap-{resolved}"
+        self.theme = f"rota-{resolved}"
         printer.set_theme(resolved)
         if not persist:
             return

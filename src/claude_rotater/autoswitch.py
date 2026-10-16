@@ -23,7 +23,7 @@ active account's own usage becomes unreadable for ``unhealthy_ticks``
 consecutive ticks, the engine fails over to any healthy candidate.
 
 Cooldown and quarantine persist in ``<backup_root>/autoswitch_state.json``
-(so cron-driven ``cswap auto --once`` ticks behave across processes), mutated
+(so cron-driven ``rota auto --once`` ticks behave across processes), mutated
 read-modify-write under a dedicated file lock.
 """
 
@@ -60,7 +60,7 @@ if TYPE_CHECKING:
 STATE_FILENAME = "autoswitch_state.json"
 STATE_SCHEMA_VERSION = 1
 
-_logger = logging.getLogger("claude-swap")
+_logger = logging.getLogger("rota")
 
 # Systemic freshen refusals, MOST ACTIONABLE FIRST. Deterministic conditions
 # that every candidate hits identically, so the tick reports one of them —
@@ -74,13 +74,13 @@ _logger = logging.getLogger("claude-swap")
 # cause of the only slot that had one beats "(network?)".
 _SYSTEMIC_MESSAGES = {
     "store-unmirrored": "CLAUDE_SECURESTORAGE_CONFIG_DIR is set — unset it or "
-                        "run cswap from a normal shell",
-    "invalid_client": "cswap's OAuth client was rejected — systemic, not this "
+                        "run rota from a normal shell",
+    "invalid_client": "rota's OAuth client was rejected — systemic, not this "
                       "account",
     "stash-unreadable": "a stashed successor is unreadable — unlock the "
                         "keychain or fix the file, then retry (stash files "
-                        "are .unclaimed-*.enc in cswap's credentials folder)",
-    "consume-busy": "another cswap surface holds the slot — retries next pass",
+                        "are .unclaimed-*.enc in rota's credentials folder)",
+    "consume-busy": "another rota surface holds the slot — retries next pass",
 }
 # Insertion order IS the precedence order, so the remedy and its rank cannot
 # drift apart.
@@ -427,7 +427,7 @@ class QuarantineEvent(AutoSwitchEvent):
     def human(self) -> str:
         return (
             f"Account-{self.number} ({self.email}) quarantined: {self.reason}. "
-            "Log in to it again to recover: open cswap and press l."
+            "Log in to it again to recover: open rota and press l."
         )
 
 
@@ -686,7 +686,7 @@ def note_manual_switch(
     """Stamp a user-initiated switch into the shared engine state.
 
     Sets ``lastSwitchAt`` so every engine sharing the state file (TUI,
-    ``cswap auto``) holds off proactive switching for its cooldown
+    ``rota auto``) holds off proactive switching for its cooldown
     instead of bouncing straight back off the account the user just chose.
     Failover still ignores the cooldown, as it does after an engine switch.
     ``lastSwitchTo`` becomes the chosen slot and the engine's no-return
@@ -762,7 +762,7 @@ class AutoSwitchEngine:
         # Set by wake() (not by feed changes), so a feed-only wake can be
         # coalesced while an explicit one is honored at once.
         self._explicit_wake = threading.Event()
-        # Live usage from Claude Code's statusline (``cswap feed``): ingested
+        # Live usage from Claude Code's statusline (``rota feed``): ingested
         # at the top of every tick, and watched by run_loop so a refresh
         # wakes the loop. None disables both.
         self.feed = feed
@@ -879,7 +879,7 @@ class AutoSwitchEngine:
         if self.switcher.account_kind_for(number) == "api_key":
             return "ok"  # API keys don't expire/refresh
         if self.switcher.live_session_pids_for(number, email):
-            # A live `cswap run` session owns this account's token in its own
+            # A live `rota run` session owns this account's token in its own
             # profile. Auto-activating it as the default login too would put
             # one rotating refresh token in two config dirs (the stale-copy
             # failure class) with nobody reading the warning — and its quota
@@ -1012,19 +1012,19 @@ class AutoSwitchEngine:
                 PollEvent(active=None, headroom={}, threshold=settings.threshold)
             )
             if self.switcher.has_live_login():
-                # Live login exists but cswap doesn't manage it: never act —
+                # Live login exists but rota doesn't manage it: never act —
                 # a switch would overwrite it without a backup.
                 self._emit(
                     NoSwitchEvent(
                         reason="unmanaged-active-account",
-                        detail="open cswap and press a to include it in rotation",
+                        detail="open rota and press a to include it in rotation",
                     )
                 )
             else:
                 self._emit(
                     NoSwitchEvent(
                         reason="no-active-account",
-                        detail="log in first: open cswap and press l",
+                        detail="log in first: open rota and press l",
                     )
                 )
             return TickOutcome.NO_ACTION
@@ -2211,7 +2211,7 @@ class AutoSwitchEngine:
         # sequence so two concurrent engines (loop + cron --once) make one
         # serialized decision: the loser re-reads the winner's lastSwitchAt
         # and backs off instead of double-switching. No deadlock cycle: the
-        # switch path (cswap FileLock + Claude Code locks) never takes the
+        # switch path (rota FileLock + Claude Code locks) never takes the
         # state lock.
         with self._state_lock():
             state = self._read_state()

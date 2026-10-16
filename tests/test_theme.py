@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from claude_rotater.tui import theme
-from claude_rotater.tui.theme import CSWAP_DARK, CSWAP_LIGHT, Palette
+from claude_rotater.tui.theme import ROTA_DARK, ROTA_LIGHT, Palette
 
 
 def test_dark_palette_matches_constants():
@@ -19,7 +19,7 @@ def test_dark_palette_matches_constants():
 
 
 def test_from_theme_reads_theme_object_including_track():
-    p = Palette.from_theme(CSWAP_LIGHT)
+    p = Palette.from_theme(ROTA_LIGHT)
     assert p.accent == theme.ACCENT_LIGHT
     assert p.sev_crit == theme.SEV_CRIT_LIGHT
     assert p.track == theme.TRACK_LIGHT  # from Theme.variables["track"], not app cache
@@ -34,9 +34,9 @@ def test_severity_ramp_and_none():
 
 
 def test_both_themes_expose_track_variable():
-    assert CSWAP_DARK.variables["track"] == theme.TRACK
-    assert CSWAP_LIGHT.variables["track"] == theme.TRACK_LIGHT
-    assert CSWAP_LIGHT.dark is False
+    assert ROTA_DARK.variables["track"] == theme.TRACK
+    assert ROTA_LIGHT.variables["track"] == theme.TRACK_LIGHT
+    assert ROTA_LIGHT.dark is False
 
 
 def _contrast(hex_a: str, hex_b: str) -> float:

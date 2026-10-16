@@ -19,7 +19,7 @@ OAUTH_EXPIRY_BUFFER_MS = 5 * 60 * 1000
 OAUTH_TOKEN_URL = "https://platform.claude.com/v1/oauth/token"
 OAUTH_CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
 
-_logger = logging.getLogger("claude-swap")
+_logger = logging.getLogger("rota")
 
 
 def extract_access_token(credentials: str) -> str | None:
@@ -174,7 +174,7 @@ def try_refresh_oauth_credentials(
             data=body,
             headers={
                 "Content-Type": "application/json",
-                "User-Agent": "claude-swap/1.0",
+                "User-Agent": "rota/1.0",
             },
             method="POST",
         )
@@ -279,7 +279,7 @@ def fetch_oauth_profile(access_token: str) -> dict | None:
     headers = {
         "Authorization": f"Bearer {access_token}",
         "Content-Type": "application/json",
-        "User-Agent": "claude-swap/1.0",
+        "User-Agent": "rota/1.0",
     }
     req = urllib.request.Request(url, headers=headers)
     try:
@@ -377,7 +377,7 @@ def request_usage_data(access_token: str) -> dict:
     headers = {
         "Authorization": f"Bearer {access_token}",
         "anthropic-beta": OAUTH_BETA_HEADER,
-        "User-Agent": "claude-swap/1.0",
+        "User-Agent": "rota/1.0",
     }
     req = urllib.request.Request(url, headers=headers)
     with urllib.request.urlopen(req, timeout=5) as resp:
@@ -769,7 +769,7 @@ def _persist(
         _logger.warning(
             "Refreshed OAuth token for account %s (%s) but failed to persist it: %r. "
             "The refresh token on disk may now be stale; if the next refresh fails "
-            "with invalid_grant, log in again (press l in cswap).",
+            "with invalid_grant, log in again (press l in rota).",
             account_num,
             email,
             e,
@@ -778,6 +778,6 @@ def _persist(
         # stdout is one machine-readable object.
         print_warning(
             f"Warning: failed to save refreshed token for account {account_num} ({email}). "
-            "If the next refresh fails, log in again (press l in cswap).",
+            "If the next refresh fails, log in again (press l in rota).",
             file=sys.stderr,
         )

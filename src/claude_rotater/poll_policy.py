@@ -54,7 +54,7 @@ outlasts an hour *past* that margin.
 
 Plans computed here are persisted per account in the usage store
 (``nextPollAt``/``pollIntervalS``) by whichever collector fetched, so every
-surface — ``cswap status``, the TUI, the auto engine — inherits
+surface — ``rota status``, the TUI, the auto engine — inherits
 the same cadence no matter how often it repaints.
 
 If a future probe revises the measured shape, adjust the constants in this
@@ -87,7 +87,7 @@ MIN_INTERVAL_S = 180.0
 
 # The one baseline, for every account: ten minutes, 6 requests/hour. The
 # active account's live usage comes from Claude Code's statusline
-# (``cswap feed``) at no request cost, and while that feed is fresh the
+# (``rota feed``) at no request cost, and while that feed is fresh the
 # account is held off polling entirely (see FEED_STALE_S); it is polled like
 # a spare only once the feed goes quiet. A DEFAULT; the effective value comes
 # from settings (see PollCadence).

@@ -1,7 +1,7 @@
 """Multi-account switcher for Claude Code.
 
 The package attributes resolve lazily (PEP 562): importing any submodule runs
-this file first, and ``cswap feed`` runs on every statusline refresh, where
+this file first, and ``rota feed`` runs on every statusline refresh, where
 pulling in the switcher (and with it the HTTP and Keychain stacks) would cost
 over 100 ms per call for nothing.
 """

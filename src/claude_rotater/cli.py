@@ -20,9 +20,9 @@ def _prog_name() -> str:
 
     argparse otherwise defaults to ``os.path.basename(sys.argv[0])``, which for
     an installed entry-point shim renders as an ugly absolute path (e.g.
-    ``python.exe C:\\Users\\me\\.local\\bin\\cswap``). We strip that down to the
-    bare command the user typed (``cswap`` / ``claude-swap``), falling back to
-    ``cswap`` for ``python -m claude_rotater`` and odd launchers.
+    ``python.exe C:\\Users\\me\\.local\\bin\\rota``). We strip that down to the
+    bare command the user typed (``rota`` / ``rota``), falling back to
+    ``rota`` for ``python -m claude_rotater`` and odd launchers.
     """
     name = os.path.basename(sys.argv[0] or "")
     for ext in (".exe", ".pyw", ".py"):
@@ -30,17 +30,17 @@ def _prog_name() -> str:
             name = name[: -len(ext)]
             break
     if not name or name in {"__main__", "python", "python3", "py"}:
-        return "cswap"
+        return "rota"
     return name
 
 
 def _run_command(argv: list[str]) -> None:
-    """Handle `cswap run NUM|EMAIL [--no-share] [-- <claude args>]`.
+    """Handle `rota run NUM|EMAIL [--no-share] [-- <claude args>]`.
 
     Pre-dispatched before the main parser is built so everything after
     ``--`` reaches claude untouched. Limitation: `run` must be the first
-    argument (`cswap --debug run 2` is not supported; use
-    `cswap run 2 --debug`).
+    argument (`rota --debug run 2` is not supported; use
+    `rota run 2 --debug`).
 
     On POSIX this execs claude and never returns; on Windows it exits with
     claude's return code.
@@ -62,12 +62,12 @@ def _run_command(argv: list[str]) -> None:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  cswap run 2
-  cswap run user@example.com
-  cswap run 2 --no-share
-  cswap run 2 --share-history
-  cswap run 2 --require-session
-  cswap run 2 -- --resume
+  rota run 2
+  rota run user@example.com
+  rota run 2 --no-share
+  rota run 2 --share-history
+  rota run 2 --require-session
+  rota run 2 -- --resume
         """,
     )
     parser.add_argument(
@@ -144,7 +144,7 @@ def _guard_root(switcher: ClaudeAccountSwitcher) -> None:
 
 
 def _auto_command(argv: list[str]) -> None:
-    """Handle `cswap auto [--once] [--json] [...]`.
+    """Handle `rota auto [--once] [--json] [...]`.
 
     Pre-dispatched before the main parser is built, like `run` (and with the
     same limitation: `auto` must be the first argument). Runs the auto-switch
@@ -157,13 +157,13 @@ def _auto_command(argv: list[str]) -> None:
     import time as _time
 
     parser = argparse.ArgumentParser(
-        prog="cswap auto",
+        prog="rota auto",
         description=(
             "Automatically switch accounts when the active one nears its "
             "5h/7d rate limit. Runs a foreground polling loop; use --once "
-            "for a single tick (cron-friendly). The TUI (bare cswap) runs "
+            "for a single tick (cron-friendly). The TUI (bare rota) runs "
             "this same engine live while it is open, so you only need "
-            "cswap auto for headless use."
+            "rota auto for headless use."
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
@@ -174,12 +174,12 @@ Exit codes with --once:
   3  blocked: wanted to switch but no viable target / all exhausted
 
 Examples:
-  cswap auto                       # foreground loop, switch at 90%% used
-  cswap auto --threshold 80        # switch earlier
-  cswap auto --model Fable         # also switch when the Fable weekly limit is hit
-  cswap auto --json                # one JSON event per line (for scripts)
-  cswap auto --once; echo $?       # single tick, outcome in exit code
-  cswap auto --dry-run             # log decisions, never actually switch
+  rota auto                       # foreground loop, switch at 90%% used
+  rota auto --threshold 80        # switch earlier
+  rota auto --model Fable         # also switch when the Fable weekly limit is hit
+  rota auto --json                # one JSON event per line (for scripts)
+  rota auto --once; echo $?       # single tick, outcome in exit code
+  rota auto --dry-run             # log decisions, never actually switch
 
 Defaults live in settings.json in the backup root; flags override them.
         """,
@@ -278,7 +278,7 @@ Defaults live in settings.json in the backup root; flags override them.
 
         if args.interval is not None:
             print(
-                "cswap auto: --interval is no longer used (polling follows "
+                "rota auto: --interval is no longer used (polling follows "
                 "each account's plan and the statusline feed); ignoring it",
                 file=sys.stderr,
             )
@@ -330,9 +330,9 @@ Defaults live in settings.json in the backup root; flags override them.
 
 
 def _start_token_refresher(switcher: ClaudeAccountSwitcher, json_mode: bool):
-    """Run a TokenRefresher on a daemon thread, reporting like ``cswap auto``.
+    """Run a TokenRefresher on a daemon thread, reporting like ``rota auto``.
 
-    Safe beside a TUI or another ``cswap auto``: every refresh goes through
+    Safe beside a TUI or another ``rota auto``: every refresh goes through
     ``consume_backup_grant``, which serializes grant use per slot.
     """
     import threading
@@ -527,7 +527,7 @@ def main() -> None:
     args = parser.parse_args(argv)
     _validate(parser, args)
     if args.command is None and not (sys.stdout.isatty() and sys.stdin.isatty()):
-        # Bare `cswap` opens the TUI (like lazygit/k9s), but only on a
+        # Bare `rota` opens the TUI (like lazygit/k9s), but only on a
         # terminal: scripts and pipes get the usage error instead.
         parser.error(f"no command given — try '{_prog_name()} -h'")
     json_mode = bool(getattr(args, "json", False))

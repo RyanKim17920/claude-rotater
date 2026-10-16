@@ -24,7 +24,7 @@ import sys
 import threading
 from collections.abc import Callable
 
-_logger = logging.getLogger("claude-swap")
+_logger = logging.getLogger("rota")
 
 POLL_S = 5.0
 
@@ -80,7 +80,7 @@ class FeedWatcher:
         if self.backend != "poll":
             self._pipe = os.pipe()
         self._thread = threading.Thread(
-            target=self._run, name="cswap-feed-watch", daemon=True
+            target=self._run, name="rota-feed-watch", daemon=True
         )
         self._thread.start()
 

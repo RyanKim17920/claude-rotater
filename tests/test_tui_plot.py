@@ -16,7 +16,7 @@ from claude_rotater.tui.plot import (
     line_plot,
     sparkline,
 )
-from claude_rotater.tui.theme import CSWAP_LIGHT, SEV_CRIT, Palette
+from claude_rotater.tui.theme import ROTA_LIGHT, SEV_CRIT, Palette
 from claude_rotater.usage_history import Point
 
 NOW = 1_700_000_000.0
@@ -105,8 +105,8 @@ class TestSparkline:
     def test_severity_colors_follow_palette(self):
         text = sparkline([Point(NOW, 95.0, None)], 1)
         assert any(SEV_CRIT in str(span.style) for span in text.spans)
-        light = sparkline([Point(NOW, 95.0, None)], 1, palette=Palette.from_theme(CSWAP_LIGHT))
-        assert any(CSWAP_LIGHT.error in str(span.style) for span in light.spans)
+        light = sparkline([Point(NOW, 95.0, None)], 1, palette=Palette.from_theme(ROTA_LIGHT))
+        assert any(ROTA_LIGHT.error in str(span.style) for span in light.spans)
 
 
 class TestLinePlot:

@@ -1,8 +1,8 @@
-"""Custom exceptions for Claude Switch."""
+"""Custom exceptions for rota."""
 
 
 class ClaudeSwitchError(Exception):
-    """Base exception for Claude Switch errors."""
+    """Base exception for rota errors."""
 
     pass
 

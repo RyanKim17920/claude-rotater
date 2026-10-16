@@ -1,6 +1,6 @@
 """Console-script entry point.
 
-``cswap feed`` runs on every Claude Code statusline refresh, so it is
+``rota feed`` runs on every Claude Code statusline refresh, so it is
 dispatched here before ``claude_rotater.cli`` (which imports the switcher and
 its HTTP/Keychain stack) is loaded. Everything else goes to the CLI.
 """

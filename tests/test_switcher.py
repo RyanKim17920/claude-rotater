@@ -945,7 +945,7 @@ class TestFetchAccountUsageSessionProfile:
         assert switcher.read_account_credentials("2", "test@example.com") == backup
 
     def test_lock_contention_keeps_the_profile_read_only(self, temp_home: Path):
-        """cswap's lock held elsewhere: adoption cannot be decided this pass,
+        """rota's lock held elsewhere: adoption cannot be decided this pass,
         and the fetch reads the profile's credential read-only instead of
         refreshing the backup underneath whatever holds the lock."""
         switcher = ClaudeAccountSwitcher()
@@ -1011,7 +1011,7 @@ class TestFetchAccountUsageSessionProfile:
         assert kwargs.get("refresh_via") is not None  # consume gate replaces persist
 
     def test_exited_session_rejected_backup_still_refreshes(self, temp_home: Path):
-        """With nobody live the backup is cswap's to refresh: a 401 stays an
+        """With nobody live the backup is rota's to refresh: a 401 stays an
         error for the store's own retry-and-strike accounting."""
         switcher = ClaudeAccountSwitcher()
         backup = _oauth_creds("sk-backup", 7200)
@@ -1169,7 +1169,7 @@ class TestAdoptSessionCredential:
         assert switcher.read_account_credentials("2", self.EMAIL) == backup
 
     def test_stale_marked_profile_is_not_adopted(self, temp_home: Path):
-        """The backup moved under this profile while it was live; cswap has
+        """The backup moved under this profile while it was live; rota has
         already decided the profile re-bootstraps, and the marker stays."""
         backup = _oauth_creds("sk-backup", -3600)
         profile = _oauth_creds("sk-session", 7200)
@@ -1412,7 +1412,7 @@ class TestListAccountsUsage:
         """While Claude Code owns the active account, list never writes live creds.
 
         Refreshing the live credential in parallel would race with Claude Code's own
-        refresh (which coordinates via a ~/.claude/ lockfile cswap doesn't honor) and
+        refresh (which coordinates via a ~/.claude/ lockfile rota doesn't honor) and
         could trip refresh-token reuse detection. The active row stays hands-off
         (is_active=True) whenever an owner is detected; only inactive backups refresh.
         """
@@ -1721,7 +1721,7 @@ class TestListAccountsUsage:
         )
         with patch.object(
             switcher._usage_store, "set_poll_plan", side_effect=OSError("disk full")
-        ), caplog.at_level(logging.WARNING, logger="claude-swap"):
+        ), caplog.at_level(logging.WARNING, logger="rota"):
             switcher._replan_new_active("1", "a@x.com", "")
         assert any(
             "switch itself succeeded" in r.getMessage() for r in caplog.records
@@ -2071,7 +2071,7 @@ class TestActiveAccountRefresh:
     def test_filelock_contention_defers_instead_of_raising(
         self, temp_home: Path, mock_claude_config: Path, sample_sequence_data: dict
     ):
-        """cswap's own account FileLock contending (another cswap operation in
+        """rota's own account FileLock contending (another rota operation in
         flight) must defer like a CC lock timeout — _fetch_account_usage's
         never-raises contract is what keeps the collect pass alive."""
         from claude_rotater.exceptions import LockError
@@ -2610,7 +2610,7 @@ class TestActiveAccountRefresh:
             "organizationUuid": None,
         }
 
-        with caplog.at_level(logging.WARNING, logger="claude-swap"):
+        with caplog.at_level(logging.WARNING, logger="rota"):
             first, write_backup, mock_probe = self._fresh_drift_pass(
                 switcher, foreign
             )
@@ -3057,7 +3057,7 @@ class TestActiveAccountRefresh:
     def test_foreign_live_credential_under_the_lock_is_never_consumed(
         self, temp_home: Path, mock_claude_config: Path, sample_sequence_data: dict
     ):
-        """TOCTOU guard: a `cswap switch` completing between the pre-lock
+        """TOCTOU guard: a `rota switch` completing between the pre-lock
         provenance check and lock acquisition replaces the live credential
         with another slot's. The under-lock re-read must re-verify lineage —
         POSTing the foreign grant would rotate the other slot's lineage and
@@ -3932,7 +3932,7 @@ class TestSwitchToSelfSlotAndForce:
         assert live["creds"] == self.LIVE_1
         out = capsys.readouterr().out
         assert "Already on" in out and "Account-1" in out
-        assert "cswap switch 1 --force" in out
+        assert "rota switch 1 --force" in out
 
     def test_force_self_activation_restores_imported_creds(
         self,
@@ -6571,7 +6571,7 @@ class TestProvenanceGuard:
     def test_byte_identical_live_skips_credential_backup(
         self, temp_home, mock_claude_config, sample_sequence_data,
     ):
-        """Nothing rotated since cswap's own write → nothing to capture."""
+        """Nothing rotated since rota's own write → nothing to capture."""
         switcher, creds_store, configs_store = self._setup_two_accounts(
             temp_home, sample_sequence_data,
         )
@@ -6754,7 +6754,7 @@ class TestProvenanceGuard:
         self, temp_home, mock_claude_config, sample_sequence_data,
     ):
         """Resolved to no managed slot: preserve, warn, proceed — the message
-        can't name a slot, so it recommends a plain `cswap add`."""
+        can't name a slot, so it recommends a plain `rota add`."""
         switcher, creds_store, configs_store = self._setup_two_accounts(
             temp_home, sample_sequence_data,
         )
@@ -7500,7 +7500,7 @@ class TestStashAndRetentionStore:
         caplog.clear()
         enc.chmod(0o000)
         try:
-            with caplog.at_level(logging.WARNING, logger="claude-swap"):
+            with caplog.at_level(logging.WARNING, logger="rota"):
                 store._retain_previous_backup("1", "a@b.c", "gen-2")
         finally:
             enc.chmod(0o600)
@@ -7778,7 +7778,7 @@ class TestSharedOAuthCredentialPreservation:
     def test_account_bound_and_unknown_siblings_stay_target_owned(
         self, temp_home
     ):
-        # trustedDeviceToken is enrolled per-account, and a field cswap does
+        # trustedDeviceToken is enrolled per-account, and a field rota does
         # not recognize could be too — neither may cross an account switch.
         # Only the SHARED_CREDENTIAL_KEYS allowlist is taken from live.
         switcher = ClaudeAccountSwitcher()
@@ -8289,7 +8289,7 @@ class TestAddAccountAlias:
         assert data["accounts"]["1"]["alias"] == "dev"
 
     def test_readd_without_alias_preserves_existing(self, temp_home: Path):
-        """Re-running `cswap add` (refresh-in-place) without --alias must not
+        """Re-running `rota add` (refresh-in-place) without --alias must not
         wipe a previously set alias."""
         fake_creds = json.dumps({"claudeAiOauth": {"accessToken": "tok"}})
         switcher = self._config_switcher(temp_home, "a@x.com")
@@ -8669,7 +8669,7 @@ class TestDegradedReadProvenance:
         store._pin_file_mode(residual_cleared=True)
         assert store._read_active_credentials().degraded is False, (
             "a self-pinned file mode reads as a degraded keychain read, so "
-            "cswap stops refreshing the active token for this process"
+            "rota stops refreshing the active token for this process"
         )
 
     def _macos_switcher(self) -> ClaudeAccountSwitcher:
@@ -8755,7 +8755,7 @@ class TestDegradedReadProvenance:
         self, temp_home: Path, mock_claude_config: Path,
         sample_sequence_data: dict, monkeypatch,
     ):
-        """`cswap --status` must arm the same guard the collect pass does.
+        """`rota --status` must arm the same guard the collect pass does.
 
         _build_accounts_info copies BOTH active.keychain_unavailable and
         active.degraded onto the switcher; _active_account_usage copies only
@@ -9093,7 +9093,7 @@ class TestSwitchUnreadableBackup:
         self, temp_home: Path, sample_sequence_data: dict, monkeypatch,
         block_real_keychain,
     ):
-        """The SAME promise on the ordinary `cswap switch`.
+        """The SAME promise on the ordinary `rota switch`.
 
         _perform_switch has two target-read sites. The M1 test above lands on
         the DIRECT-ACTIVATION branch, because its fixture's live identity
@@ -9603,7 +9603,7 @@ class TestConsumeGate:
         store, so an absent re-read really does mean removed.
         """
         s = self._switcher(sample_sequence_data)
-        # No stored credential for slot 1: `cswap remove` landed first.
+        # No stored credential for slot 1: `rota remove` landed first.
         posted = []
 
         def mock_refresh(credentials, **kw):
@@ -9766,7 +9766,7 @@ class TestStrikeUnbindsInCollector:
 
 
 class TestStoreResolutionParity:
-    """M4: when CC resolves its credential store somewhere cswap does not
+    """M4: when CC resolves its credential store somewhere rota does not
     mirror, consuming/mutating operations refuse instead of operating on a
     store CC no longer uses."""
 
@@ -10348,7 +10348,7 @@ class TestGateUltraReviewFixes:
         The loser used to return "transient", which autoswitch renders as
         "could not freshen any candidate (network?)" — sending the user to
         check a connection that is fine, for a condition no network change can
-        affect. On a machine where the collector and a manual `cswap switch`
+        affect. On a machine where the collector and a manual `rota switch`
         overlap this is routine, not an edge.
         """
         s = self._switcher(sample_sequence_data)
@@ -11059,7 +11059,7 @@ class TestGateUltraReviewFixes:
         try:
             for d in chmodded:
                 d.chmod(0o500)
-            with caplog.at_level(logging.WARNING, logger="claude-swap"):
+            with caplog.at_level(logging.WARNING, logger="rota"):
                 s._write_account_credentials("1", "test@example.com", self._NEW)
         finally:
             for d in reversed(chmodded):
@@ -11086,7 +11086,7 @@ class TestGateUltraReviewFixes:
                 "DEFECT: the invalidation was denied and NO stale marker "
                 "landed — the marker's own write target was the directory "
                 "that denied it. The profile's token is unexpired, so the "
-                "local reuse check passes and `cswap run` launches claude on "
+                "local reuse check passes and `rota run` launches claude on "
                 "the spent generation, silently"
             )
         else:

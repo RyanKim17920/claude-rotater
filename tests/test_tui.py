@@ -327,9 +327,9 @@ def fake_refresher(monkeypatch):
 
 
 def make_app(fake: FakeSwitcher):
-    from claude_rotater.tui.app import CswapApp
+    from claude_rotater.tui.app import RotaApp
 
-    return CswapApp(fake)
+    return RotaApp(fake)
 
 
 async def settle(pilot) -> None:
@@ -370,8 +370,8 @@ class TestFormatting:
         assert tui_data.format_age(None) is None
         assert tui_data.format_age(400) == "· 6m ago"
 
-    def test_sentinel_labels_match_cswap_list(self):
-        # The TUI must describe sentinel states with the exact wording `cswap
+    def test_sentinel_labels_match_rota_list(self):
+        # The TUI must describe sentinel states with the exact wording `rota
         # list` prints — owned-and-expired means Claude Code refreshes the
         # active account, not that the user must re-login.
         assert (
@@ -384,9 +384,9 @@ class TestFormatting:
             assert tui_data.sentinel_label(sentinel) == note
         assert tui_data.sentinel_label("unknown state") == "unknown state"
 
-    def test_sentinel_card_shows_last_seen_like_cswap_list(self):
+    def test_sentinel_card_shows_last_seen_like_rota_list(self):
         # A sentinel is a live overlay — the entry can still carry the last
-        # good measurement, and `cswap list` prints it as a "last seen" line.
+        # good measurement, and `rota list` prints it as a "last seen" line.
         # The card must too (except for API-key accounts, which have no quota).
         from claude_rotater.tui.widgets import account_card_text
 
@@ -416,11 +416,11 @@ class TestFormatting:
         assert "last seen" not in api_key
 
     def test_account_card_uses_light_palette_when_passed(self):
-        from claude_rotater.tui.theme import ACCENT_LIGHT, CSWAP_LIGHT, Palette
+        from claude_rotater.tui.theme import ACCENT_LIGHT, ROTA_LIGHT, Palette
         from claude_rotater.tui.widgets import account_card_text
 
         acc = make_account(1, active=True, entry=make_entry(pct5=95.0))
-        text = account_card_text(acc, 100, palette=Palette.from_theme(CSWAP_LIGHT))
+        text = account_card_text(acc, 100, palette=Palette.from_theme(ROTA_LIGHT))
         styles = {str(span.style) for span in text.spans}
         assert any(ACCENT_LIGHT in s for s in styles)  # active marker uses light accent
 
@@ -466,7 +466,7 @@ class TestSnapshotSource:
 
     def test_every_pass_is_store_governed(self, tmp_path):
         # Pacing lives in the usage store (poll plans + freshness + atomic
-        # reservation), so every take is the same on-demand pass `cswap list`
+        # reservation), so every take is the same on-demand pass `rota list`
         # runs — including the user's explicit refresh, which cannot bypass
         # the store's per-account cadence.
         fake, source = self._source(tmp_path)
@@ -1040,7 +1040,7 @@ class TestMainPage:
         async with app.run_test(size=(120, 40)) as pilot:
             await settle(pilot)
             status = painted(app, "#status")
-            assert "claude-swap" in status and "AUTO ●" in status
+            assert "rota" in status and "AUTO ●" in status
             assert "thr 90%" in status
             labels = [str(b.label) for b in app.screen.query(Button)]
             for word in ("switch", "add", "token", "disable", "remove", "config", "quit"):
@@ -1322,11 +1322,11 @@ class FakeStage:
 def login_app(fake, monkeypatch, *, fail=None, suspend_ok=True):
     import contextlib
 
-    from claude_rotater.tui.app import CswapApp
+    from claude_rotater.tui.app import RotaApp
     from textual.app import SuspendNotSupported
 
     FakeStage.instances = []
-    app = CswapApp(fake, login_factory=lambda d: FakeStage(d, fail=fail))
+    app = RotaApp(fake, login_factory=lambda d: FakeStage(d, fail=fail))
     suspended: list[bool] = []
 
     @contextlib.contextmanager
@@ -1731,7 +1731,7 @@ class TestEngineHosting:
             (tmp_path / "settings.json").write_text(json.dumps({"ui": {"theme": "dark"}}))
             app.on_settings_changed("ui.theme")
             await pilot.pause()
-            assert app.theme == "cswap-dark"
+            assert app.theme == "rota-dark"
             assert len(fake_engine.instances) == 1
 
     async def test_unmount_stops_engine_and_clears_poll_inputs(self, tmp_path, fake_engine):
@@ -1765,14 +1765,14 @@ class TestEventText:
 
     def test_event_text_uses_light_accent_for_switch(self):
         from claude_rotater.tui.main import event_text
-        from claude_rotater.tui.theme import ACCENT_LIGHT, CSWAP_LIGHT, Palette
+        from claude_rotater.tui.theme import ACCENT_LIGHT, ROTA_LIGHT, Palette
 
         event = SwitchEvent(
             trigger="proactive",
             from_ref={"number": 1, "email": "a@x.com"},
             to_ref={"number": 2, "email": "b@x.com"},
         )
-        text = event_text(event, palette=Palette.from_theme(CSWAP_LIGHT))
+        text = event_text(event, palette=Palette.from_theme(ROTA_LIGHT))
         assert any(ACCENT_LIGHT in str(s.style) for s in text.spans)
 
 
@@ -1823,7 +1823,7 @@ class TestBareInvocation:
             launched["switcher"] = switcher
             return 0
 
-        monkeypatch.setattr(sys, "argv", ["cswap"])
+        monkeypatch.setattr(sys, "argv", ["rota"])
         monkeypatch.setattr(sys.stdout, "isatty", lambda: True)
         monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
         monkeypatch.setattr(tui, "run", fake_run)
@@ -1835,7 +1835,7 @@ class TestBareInvocation:
     def test_bare_non_tty_keeps_usage_error(self, monkeypatch, temp_home):
         import claude_rotater.cli as cli
 
-        monkeypatch.setattr(sys, "argv", ["cswap"])
+        monkeypatch.setattr(sys, "argv", ["rota"])
         monkeypatch.setattr(sys.stdout, "isatty", lambda: False)
         monkeypatch.setattr(sys.stdin, "isatty", lambda: False)
         with pytest.raises(SystemExit) as excinfo:
@@ -1856,41 +1856,41 @@ class TestThemeWiring:
         app = make_app(fake)
         async with app.run_test() as pilot:
             await settle(pilot)
-            assert app.theme == "cswap-light"
+            assert app.theme == "rota-light"
 
     async def test_auto_setting_uses_detected_light(self, tmp_path):
         (tmp_path / "settings.json").write_text(json.dumps({"ui": {"theme": "auto"}}))
         fake = FakeSwitcher([make_account("1", active=True)], tmp_path)
-        from claude_rotater.tui.app import CswapApp
-        app = CswapApp(fake, detected="light")
+        from claude_rotater.tui.app import RotaApp
+        app = RotaApp(fake, detected="light")
         async with app.run_test() as pilot:
             await settle(pilot)
-            assert app.theme == "cswap-light"
+            assert app.theme == "rota-light"
 
     async def test_auto_setting_no_detection_falls_back_to_dark(self, tmp_path):
         (tmp_path / "settings.json").write_text(json.dumps({"ui": {"theme": "auto"}}))
         fake = FakeSwitcher([make_account("1", active=True)], tmp_path)
-        from claude_rotater.tui.app import CswapApp
-        app = CswapApp(fake, detected=None)
+        from claude_rotater.tui.app import RotaApp
+        app = RotaApp(fake, detected=None)
         async with app.run_test() as pilot:
             await settle(pilot)
-            assert app.theme == "cswap-dark"
+            assert app.theme == "rota-dark"
 
     async def test_toggle_cycles_dark_light_auto(self, tmp_path):
         (tmp_path / "settings.json").write_text(json.dumps({"ui": {"theme": "dark"}}))
         fake = FakeSwitcher([make_account("1", active=True)], tmp_path)
-        from claude_rotater.tui.app import CswapApp
-        app = CswapApp(fake, detected="light")
+        from claude_rotater.tui.app import RotaApp
+        app = RotaApp(fake, detected="light")
         async with app.run_test() as pilot:
             await settle(pilot)
-            assert app.theme == "cswap-dark"          # setting dark
+            assert app.theme == "rota-dark"          # setting dark
             app.action_toggle_theme(); await pilot.pause()
-            assert app.theme == "cswap-light"          # → light
+            assert app.theme == "rota-light"          # → light
             app.action_toggle_theme(); await pilot.pause()
-            assert app.theme == "cswap-light"          # → auto, detected=light
+            assert app.theme == "rota-light"          # → auto, detected=light
             assert json.loads((tmp_path / "settings.json").read_text())["ui"]["theme"] == "auto"
             app.action_toggle_theme(); await pilot.pause()
-            assert app.theme == "cswap-dark"           # → back to dark
+            assert app.theme == "rota-dark"           # → back to dark
 
     async def test_ctrl_t_cycles_theme(self, tmp_path):
         (tmp_path / "settings.json").write_text(json.dumps({"ui": {"theme": "dark"}}))
@@ -1900,4 +1900,4 @@ class TestThemeWiring:
             await settle(pilot)
             await pilot.press("ctrl+t")
             await pilot.pause()
-            assert app.theme == "cswap-light"
+            assert app.theme == "rota-light"

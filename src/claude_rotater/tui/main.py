@@ -45,7 +45,7 @@ from claude_rotater.usage_history import Point
 from claude_rotater.usage_store import STALE_OK_S
 
 if TYPE_CHECKING:
-    from claude_rotater.tui.app import CswapApp
+    from claude_rotater.tui.app import RotaApp
 
 # ---------------------------------------------------------------------------
 # Engine event log lines
@@ -85,7 +85,7 @@ class AutoStatus:
     """What the status line knows about the engine, folded from its events.
 
     ``last_switch_at`` may also come from the shared state file, so a switch
-    made by another process (``cswap auto``, ``cswap switch``) still shows its
+    made by another process (``rota auto``, ``rota switch``) still shows its
     cooldown here.
     """
 
@@ -102,9 +102,9 @@ class AutoStatus:
 def status_text(
     status: AutoStatus, *, now: float, width: int, palette: Palette = Palette.DARK
 ) -> Text:
-    """``claude-swap  AUTO ● thr 90% · cooldown 4m · next 1m 20s   14:02 2 → 1``."""
+    """``rota  AUTO ● thr 90% · cooldown 4m · next 1m 20s   14:02 2 → 1``."""
     left = Text(no_wrap=True, overflow="ellipsis")
-    left.append("claude-swap  ", style=f"bold {palette.foreground}")
+    left.append("rota  ", style=f"bold {palette.foreground}")
     if status.running:
         left.append("AUTO ●", style=f"bold {palette.accent}")
     else:
@@ -580,7 +580,7 @@ class MainScreen(Screen):
         Binding("k", "cursor_up", show=False),
     ]
 
-    app: "CswapApp"
+    app: "RotaApp"
 
     def compose(self) -> ComposeResult:
         yield _Painted("status_line", id="status")

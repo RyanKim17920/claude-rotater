@@ -1,4 +1,4 @@
-"""One-time, run-once data migrations for claude-swap.
+"""One-time, run-once data migrations for rota.
 
 A small, boring home for compatibility migrations so they don't pollute the
 core switch/read/write flow in :mod:`claude_rotater.switcher`. Each migration:
@@ -253,7 +253,7 @@ def migrate_windows_keyring_to_files(switcher: "ClaudeAccountSwitcher") -> bool:
 
     if migrated:
         print(
-            f"claude-swap: migrated {migrated} Windows credential(s) from "
+            f"rota: migrated {migrated} Windows credential(s) from "
             "Credential Manager to files",
             file=sys.stderr,
         )
@@ -479,7 +479,7 @@ def migrate_macos_keyring_to_security(switcher: "ClaudeAccountSwitcher") -> bool
 
     if migrated:
         print(
-            f"claude-swap: migrated {migrated} macOS credential(s) from the keyring "
+            f"rota: migrated {migrated} macOS credential(s) from the keyring "
             "into the Keychain via security",
             file=sys.stderr,
         )

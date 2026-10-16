@@ -1,7 +1,7 @@
 """A user-initiated switch starts the auto engine's cooldown.
 
 Before this, only the engine stamped ``lastSwitchAt``, so an engine
-running beside the TUI (or ``cswap auto`` beside a manual ``cswap switch``)
+running beside the TUI (or ``rota auto`` beside a manual ``rota switch``)
 could proactively switch straight back off the account the user had just
 chosen."""
 

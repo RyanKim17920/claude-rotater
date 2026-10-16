@@ -1,4 +1,4 @@
-"""The "cswap-dark" Textual theme and shared color constants.
+"""The "rota-dark" Textual theme and shared color constants.
 
 A subtle modern dark theme: neutral charcoal backgrounds in the VS Code
 register, one warm terracotta accent (the same xterm-173 tone printer.py has
@@ -78,8 +78,8 @@ class Palette:
         )
 
 
-CSWAP_DARK = Theme(
-    name="cswap-dark",
+ROTA_DARK = Theme(
+    name="rota-dark",
     primary=ACCENT,
     secondary=MUTED,
     accent=ACCENT,
@@ -113,8 +113,8 @@ SEV_WARN_LIGHT = "#795911"  # deep ochre — deepened for AA on panel
 SEV_CRIT_LIGHT = "#ad3128"  # brick red — deepened for AA on panel
 TRACK_LIGHT = "#cec7ba"
 
-CSWAP_LIGHT = Theme(
-    name="cswap-light",
+ROTA_LIGHT = Theme(
+    name="rota-light",
     primary=ACCENT_LIGHT,
     secondary=MUTED_LIGHT,
     accent=ACCENT_LIGHT,

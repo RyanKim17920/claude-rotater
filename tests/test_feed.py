@@ -1,4 +1,4 @@
-"""``cswap feed``: statusline payload parsing, the bounded JSONL writer, the
+"""``rota feed``: statusline payload parsing, the bounded JSONL writer, the
 incremental reader, and the never-fail command contract."""
 
 from __future__ import annotations
@@ -321,7 +321,7 @@ class TestMain:
 
     def test_help(self, capsys):
         assert feed.main(["--help"], io.BytesIO(), io.BytesIO()) == 0
-        assert "cswap feed" in capsys.readouterr().out
+        assert "rota feed" in capsys.readouterr().out
 
 
 class TestEntryPoint:
@@ -334,7 +334,7 @@ class TestEntryPoint:
             "import sys, io\n"
             "from claude_rotater import paths\n"
             f"paths.get_backup_root = lambda: {str(backup)!r}\n"
-            "sys.argv = ['cswap', 'feed']\n"
+            "sys.argv = ['rota', 'feed']\n"
             f"sys.stdin = io.TextIOWrapper(io.BytesIO({raw()!r}))\n"
             "from claude_rotater import entry\n"
             "try:\n"
@@ -359,7 +359,7 @@ class TestEntryPoint:
         backup = tmp_path / "work"
         backup.mkdir()
         monkeypatch.setattr(paths, "get_backup_root", lambda: backup)
-        monkeypatch.setattr(sys, "argv", ["cswap", "feed"])
+        monkeypatch.setattr(sys, "argv", ["rota", "feed"])
         monkeypatch.setattr(sys, "stdin", io.TextIOWrapper(io.BytesIO(raw())))
         with pytest.raises(SystemExit) as exc:
             cli.main()
@@ -369,7 +369,7 @@ class TestEntryPoint:
     def test_feed_is_hidden_from_help(self, monkeypatch, capsys):
         from claude_rotater import cli
 
-        monkeypatch.setattr(sys, "argv", ["cswap", "--help"])
+        monkeypatch.setattr(sys, "argv", ["rota", "--help"])
         with pytest.raises(SystemExit):
             cli.main()
         assert "feed" not in capsys.readouterr().out

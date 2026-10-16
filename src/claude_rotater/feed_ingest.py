@@ -1,13 +1,13 @@
-"""Ingest the statusline feed (``cswap feed``) into the usage store and history.
+"""Ingest the statusline feed (``rota feed``) into the usage store and history.
 
 A feed record is the usage Claude Code saw on its last API response, but the
 record does not say which account that response was for. This module decides
 (:func:`attribute`), then writes accepted readings through
 :meth:`UsageStore.adopt` with a hold, which keeps every collector (engine,
-TUI, ``cswap status``) from polling that account while the feed is
+TUI, ``rota status``) from polling that account while the feed is
 fresh, and into the usage history so the estimator and plots see them.
 
-**Attribution.** What a running session does after ``cswap switch``: it keeps
+**Attribution.** What a running session does after ``rota switch``: it keeps
 its old token until it next reads the credential store (on its next request
 on Linux/Windows, where credentials are a watched file; up to ~30 s later on
 macOS, where the Keychain read is cached), and its statusline keeps showing
@@ -19,7 +19,7 @@ order:
 1. Too old (past ``feedStaleSeconds``) or from the future: dropped.
 2. Profile: the record's config dir (from Claude Code's own transcript path)
    must be this profile's config home, else it belongs to a different
-   profile and is dropped. A ``cswap run`` session dir
+   profile and is dropped. A ``rota run`` session dir
    (``<backup>/sessions/<slot>-<email slug>``) is attributed to that slot:
    its account never changes under it.
 3. A record for the active account stamped before the last switch, or
@@ -57,7 +57,7 @@ from claude_rotater.estimator import RESET_DROP_PCT, RESET_MATCH_S
 if TYPE_CHECKING:
     from claude_rotater.switcher import ClaudeAccountSwitcher
 
-_logger = logging.getLogger("claude-swap")
+_logger = logging.getLogger("rota")
 
 # After a switch, a running session keeps its old token until it re-reads
 # the credential store (~30 s Keychain cache on macOS) and keeps showing the
@@ -162,7 +162,7 @@ def _consistency(windows: dict[str, dict], stored_usage: dict | None, t: float) 
 def _session_slot(
     config_dir: str, sessions_dir: Path, identities: dict[str, tuple[str, str]]
 ) -> str | None:
-    """The slot a ``cswap run`` session dir belongs to, or None."""
+    """The slot a ``rota run`` session dir belongs to, or None."""
     from claude_rotater.session import session_dir_for
 
     name = os.path.basename(config_dir.rstrip("/\\"))

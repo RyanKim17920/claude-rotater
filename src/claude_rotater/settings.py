@@ -1,6 +1,6 @@
 """Tool settings persisted at ``<backup_root>/settings.json``.
 
-One versioned JSON file for user-tunable claude-swap preferences, written
+One versioned JSON file for user-tunable rota preferences, written
 atomically with the backup dir's 0600/0700 modes. v1 carries the
 ``autoswitch`` and ``ui`` sections; other sections can be added additively.
 Unknown keys (future fields, other tools' experiments) survive a round trip.
@@ -27,12 +27,12 @@ from claude_rotater.poll_policy import CADENCE_SETTING_KEYS, PollCadence, load_c
 SETTINGS_SCHEMA_VERSION = 1
 SETTINGS_FILENAME = "settings.json"
 
-_logger = logging.getLogger("claude-swap")
+_logger = logging.getLogger("rota")
 
 
 @dataclass(frozen=True)
 class AutoSwitchSettings:
-    """Policy knobs for the auto-switch engine (``cswap auto``).
+    """Policy knobs for the auto-switch engine (``rota auto``).
 
     ``threshold`` is binding-window utilization (max of the 5h/7d percentages):
     at or above it the engine looks for a better account. 90 rather than 95
@@ -137,7 +137,7 @@ _CADENCE_TEXT: dict[str, tuple[str, str]] = {
     ),
     "feedStaleSeconds": (
         "Feed stale after (s)",
-        "Poll the active account again once cswap feed has been quiet this long",
+        "Poll the active account again once rota feed has been quiet this long",
     ),
 }
 
@@ -368,7 +368,7 @@ def parse_setting_value(spec: SettingSpec, raw_value: str):
 
     Unlike the forgiving clamp on load, out-of-range or mistyped values raise
     ConfigError so the user learns about the problem when setting the value,
-    not by silently degraded behavior at `cswap auto` time.
+    not by silently degraded behavior at `rota auto` time.
     """
     if spec.kind == "bool":
         # Never bool(str): bool("false") is True.
@@ -390,7 +390,7 @@ def parse_setting_value(spec: SettingSpec, raw_value: str):
         if not value:
             raise ConfigError(
                 f"{spec.dotted} expects a non-empty value; press ctrl+r on "
-                "cswap's config page (c) to clear it"
+                "rota's config page (c) to clear it"
             )
         return value
     try:
@@ -543,7 +543,7 @@ def atomic_write_json(path: Path, data: dict) -> None:
     - The temp file is created beside the RESOLVED target, so the rename
       stays on one filesystem and remains atomic (beside the LINK it would
       hit EXDEV whenever the target lives on another mount).
-    - The 0700 hardening stays on the directory cswap owns. Applying it to
+    - The 0700 hardening stays on the directory rota owns. Applying it to
       the resolved parent would narrow a directory belonging to something
       else, and raise ``PermissionError`` outright when that parent is not
       ours to chmod. The written file still gets 0600, and ``mkstemp``

@@ -1,4 +1,4 @@
-"""Credential storage layer for claude-swap.
+"""Credential storage layer for rota.
 
 Owns *where* credentials live and *how* they are read/written — the macOS
 Keychain-vs-file routing, per-process capability detection and sticky fallback,
@@ -41,7 +41,7 @@ from claude_rotater.paths import (
     get_global_config_path,
 )
 
-_logger = logging.getLogger("claude-swap")
+_logger = logging.getLogger("rota")
 
 
 def _active_profile_is_default() -> bool:
@@ -218,7 +218,7 @@ SHARED_CREDENTIAL_KEYS = frozenset({
     "pluginSecrets",
 })
 
-# Account-scoped siblings cswap knows about, named so the unrecognized-key
+# Account-scoped siblings rota knows about, named so the unrecognized-key
 # probe below doesn't flag them: claudeAiOauth is the login itself,
 # trustedDeviceToken is enrolled per (device, account) at /login.
 ACCOUNT_CREDENTIAL_KEYS = frozenset({
@@ -241,14 +241,14 @@ def shared_credential_fields(credentials: str | None) -> dict | None:
     if data is None:
         return None
     if "claudeAiOauth" in data:
-        # A sibling key cswap doesn't know defaults to slot-owned (fails
+        # A sibling key rota doesn't know defaults to slot-owned (fails
         # safe), but silently: if Claude Code grows a new *shared* key,
         # that default quietly reintroduces the stale-restore papercut for
         # it — leave a trace so it gets noticed.
         unrecognized = data.keys() - SHARED_CREDENTIAL_KEYS - ACCOUNT_CREDENTIAL_KEYS
         if unrecognized:
             _logger.debug(
-                "Live credential has sibling keys cswap does not recognize "
+                "Live credential has sibling keys rota does not recognize "
                 "(a newer Claude Code?), treating them as slot-owned: %s",
                 sorted(unrecognized),
             )
