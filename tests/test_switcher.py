@@ -5012,88 +5012,6 @@ class TestAddAccountSlot:
         assert data["sequence"] == [2, 5]
 
 
-class TestPurgeLegacyCleanup:
-    """``purge`` must remove a stale legacy directory if it ever reappears.
-
-    Migration normally consumes the legacy path on init, but a partial
-    pre-migration state or external recreation could leave it behind.
-    Purge is the user's last-resort "remove everything" hammer, so it must
-    cover that case explicitly.
-    """
-
-    def _ensure_linux_layout(self, monkeypatch):
-        # Tests must observe the post-migration two-path world. On macOS in
-        # CI the backup root and the legacy root are the same directory, so
-        # there's nothing distinct to clean — pin to LINUX semantics.
-        monkeypatch.setattr(Platform, "detect", staticmethod(lambda: Platform.LINUX))
-
-    def _make_switcher_then_recreate_legacy(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> tuple[ClaudeAccountSwitcher, Path, Path]:
-        """Construct a switcher with no legacy present, then recreate it.
-
-        Mirrors the realistic state where migration completed (or never had
-        anything to migrate) and a stale legacy directory subsequently
-        reappeared — e.g. a user manually backing up to the old path, or a
-        third-party tool restoring a snapshot.
-        """
-        from claude_swap.paths import get_backup_root, get_legacy_backup_root
-
-        self._ensure_linux_layout(monkeypatch)
-        backup_dir = get_backup_root()
-        backup_dir.mkdir(parents=True, exist_ok=True)
-
-        # Instantiate while legacy is absent → init succeeds.
-        switcher = ClaudeAccountSwitcher()
-
-        # Now legacy reappears after init.
-        legacy = get_legacy_backup_root()
-        legacy.mkdir(parents=True, exist_ok=True)
-        return switcher, backup_dir, legacy
-
-    def test_purge_removes_stale_legacy_directory(
-        self, temp_home: Path, monkeypatch: pytest.MonkeyPatch
-    ):
-        switcher, backup_dir, legacy = self._make_switcher_then_recreate_legacy(monkeypatch)
-        (legacy / "ghost.txt").write_text("should be removed")
-
-        with patch("builtins.input", return_value="y"):
-            switcher.purge()
-
-        assert not legacy.exists()
-        assert not backup_dir.exists()
-
-    def test_purge_prompt_lists_legacy_when_present(
-        self, temp_home: Path, monkeypatch: pytest.MonkeyPatch, capsys
-    ):
-        switcher, backup_dir, legacy = self._make_switcher_then_recreate_legacy(monkeypatch)
-
-        with patch("builtins.input", return_value="n"):
-            switcher.purge()
-
-        out = capsys.readouterr().out
-        assert str(backup_dir) in out
-        assert str(legacy) in out
-
-    def test_purge_prompt_omits_legacy_when_absent(
-        self, temp_home: Path, monkeypatch: pytest.MonkeyPatch, capsys
-    ):
-        from claude_swap.paths import get_backup_root, get_legacy_backup_root
-
-        self._ensure_linux_layout(monkeypatch)
-        backup_dir = get_backup_root()
-        backup_dir.mkdir(parents=True, exist_ok=True)
-        legacy = get_legacy_backup_root()
-        assert not legacy.exists()
-
-        switcher = ClaudeAccountSwitcher()
-        with patch("builtins.input", return_value="n"):
-            switcher.purge()
-
-        out = capsys.readouterr().out
-        assert "Legacy backup directory" not in out
-
-
 class TestAddAccountFromToken:
     """Tests for add_account_from_token (--add-token flow)."""
 
@@ -5358,48 +5276,6 @@ class TestAddAccountFromToken:
 
         data = switcher._get_sequence_data()
         assert data["accounts"]["2"]["email"] == "me@example.com"
-
-
-class TestPurge:
-    """Tests for purge cleanup."""
-
-    def test_purge_removes_legacy_none_keychain_entry(self, temp_home):
-        """Purge should clean account-None-* entries from older buggy runs — from
-        the new security service and best-effort from the legacy keyring."""
-        switcher = ClaudeAccountSwitcher()
-        switcher.platform = Platform.MACOS
-        switcher._setup_directories()
-        switcher._write_json(switcher.sequence_file, {
-            "activeAccountNumber": 1,
-            "lastUpdated": "2024-01-01T00:00:00Z",
-            "sequence": [1],
-            "accounts": {
-                "1": {
-                    "email": "user@example.com",
-                    "uuid": "",
-                    "organizationUuid": "",
-                    "organizationName": "",
-                    "added": "2024-01-01T00:00:00Z",
-                }
-            },
-        })
-
-        mock_keyring = MagicMock()
-        with patch("builtins.input", return_value="y"), \
-             patch("claude_swap.switcher.macos_keychain") as mock_kc, \
-             patch.dict(sys.modules, {"keyring": mock_keyring}):
-            switcher.purge()
-
-        # New security service: account + legacy account-None both cleaned.
-        mock_kc.delete_password.assert_has_calls([
-            call("claude-swap", "account-1-user@example.com"),
-            call("claude-swap", "account-None-user@example.com"),
-        ])
-        # Best-effort legacy keyring cleanup of the old claude-code service.
-        mock_keyring.delete_password.assert_has_calls([
-            call("claude-code", "account-1-user@example.com"),
-            call("claude-code", "account-None-user@example.com"),
-        ])
 
 
 # ---------------------------------------------------------------------------
@@ -12189,13 +12065,3 @@ class TestSessionShellGuardCoversEveryMutator:
         assert s._get_sequence_data()["sequence"] == [1, 2], (
             "the roster was mutated from inside a session shell"
         )
-
-    def test_purge_refuses_inside_a_session_shell(
-        self, temp_home: Path, mock_claude_config: Path,
-        sample_sequence_data: dict, monkeypatch,
-    ):
-        """Must refuse at the guard, BEFORE the confirmation prompt — a
-        prompt is not a guard, and purge deletes everything."""
-        s = self._switcher(sample_sequence_data, monkeypatch)
-        with pytest.raises(SwitchError):
-            s.purge()

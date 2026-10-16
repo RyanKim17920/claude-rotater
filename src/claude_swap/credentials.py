@@ -1364,7 +1364,7 @@ class CredentialStore:
         Removes the ``.enc`` file(s) and, on macOS, the Keychain item(s). The
         Keychain delete is best-effort: if it's locked the item may linger as
         harmless unreferenced cruft (the slot is gone from sequence.json; a re-add
-        overwrites it via ``-U``; purge sweeps it). Includes the legacy
+        overwrites it via ``-U``). Includes the legacy
         ``account-None-{email}`` alias.
         """
         nums = [account_num]

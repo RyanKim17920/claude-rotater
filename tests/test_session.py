@@ -1496,35 +1496,6 @@ class TestGuards:
         with pytest.raises(SessionError, match="live session-mode"):
             seeded_switcher._delete_account_files(ACCOUNT_NUM, ACCOUNT_EMAIL)
 
-    def test_purge_refused_while_live(self, seeded_switcher, monkeypatch):
-        session_dir = session_dir_for(
-            seeded_switcher.backup_dir, ACCOUNT_NUM, ACCOUNT_EMAIL
-        )
-        make_live(session_dir)
-        monkeypatch.setattr(
-            "builtins.input", lambda *a: pytest.fail("prompt must not be reached")
-        )
-        with pytest.raises(SessionError, match="Exit them first"):
-            seeded_switcher.purge()
-        assert seeded_switcher.backup_dir.exists()
-
-    def test_purge_sweeps_session_keychain_entries(
-        self, seeded_switcher, monkeypatch, block_real_keychain
-    ):
-        session_dir = session_dir_for(
-            seeded_switcher.backup_dir, ACCOUNT_NUM, ACCOUNT_EMAIL
-        )
-        session_dir.mkdir(parents=True)
-        service = keychain_service_name(session_dir)
-        account = session_mod._keychain_account_name()
-        block_real_keychain.set_password(service, account, "creds")
-
-        monkeypatch.setattr("builtins.input", lambda *a: "y")
-        seeded_switcher.purge()
-
-        assert block_real_keychain.get_password(service, account) is None
-        assert not seeded_switcher.backup_dir.exists()
-
     def test_switch_warns_on_live_target_but_completes(
         self, seeded_switcher, monkeypatch, capsys
     ):

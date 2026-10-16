@@ -532,7 +532,7 @@ def block_real_keychain(request, monkeypatch):
 
     Replaces the ``security``-CLI wrapper (``claude_swap.macos_keychain``) with an
     in-memory fake and injects a fake ``keyring`` module (for the lazy
-    ``import keyring`` paths in purge/migrations). Tests marked
+    ``import keyring`` paths in migrations). Tests marked
     ``@pytest.mark.no_keychain_fake`` opt out — either because they mock
     ``subprocess`` themselves (the wrapper's own unit tests) or because they run
     against a temporary keychain on GitHub Actions.

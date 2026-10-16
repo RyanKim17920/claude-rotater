@@ -391,31 +391,6 @@ class TestWindowsFileBackend:
 
 
 # ---------------------------------------------------------------------------
-# purge() best-effort legacy keyring cleanup on Windows
-# ---------------------------------------------------------------------------
-
-
-class TestPurgeWindows:
-    def test_purge_removes_files_and_legacy_keyring(self, temp_home):
-        switcher = _make_windows_switcher(temp_home)
-        _seed_sequence(switcher, {"1": {"email": "a@example.com"}})
-        switcher._write_account_credentials("1", "a@example.com", "secret")
-        cred_file = switcher.credentials_dir / ".creds-1-a@example.com.enc"
-        assert cred_file.exists()
-
-        # purge()'s Windows branch lazily `import keyring`, so inject the fake via
-        # sys.modules (patching switcher.keyring would not intercept it).
-        fake = FakeKeyring()
-        with _patch_keyring(fake), patch("builtins.input", return_value="y"):
-            switcher.purge()
-
-        # File backend cleaned up.
-        assert not cred_file.exists()
-        # Best-effort legacy Credential Manager cleanup attempted.
-        assert (KEYRING_SERVICE, "account-1-a@example.com") in fake.deleted
-
-
-# ---------------------------------------------------------------------------
 # macOS keyring → security service migration
 # ---------------------------------------------------------------------------
 
@@ -547,7 +522,7 @@ class TestMacosKeyringToSecurity:
         assert switcher._read_account_credentials("1", "a@example.com") == "sekret"
         # Data is safely in the new service; the legacy item is deliberately LEFT
         # behind in the keyring-unavailable fallback (deleting via security could
-        # raise a second prompt). It's harmless cruft that purge can mop up.
+        # raise a second prompt). It's harmless cruft.
         assert (KEYRING_SERVICE, "account-1-a@example.com") in block_real_keychain.data
 
     def test_locked_keyring_does_not_fall_back(self, temp_home, block_real_keychain):

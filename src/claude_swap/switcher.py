@@ -17,7 +17,6 @@ from functools import partial
 from pathlib import Path
 from typing import Callable
 
-from claude_swap import macos_keychain
 
 from claude_swap.exceptions import (
     AccountNotFoundError,
@@ -284,29 +283,6 @@ def _same_directory(left: Path, right: Path) -> bool:
         return left.resolve() == right.resolve()
     except OSError:  # unreadable mount / permission — compare as written
         return left == right
-
-
-def _sweep_legacy_keyring(usernames: list[str], removed_items: list[str]) -> None:
-    """Best-effort purge of legacy ``KEYRING_SERVICE`` entries via ``keyring``.
-
-    Used only during ``purge()`` to mop up entries a never-completed
-    keyring → file/security migration left behind. Never raises: keyring being
-    unavailable or an entry being absent just means nothing to clean up.
-    """
-    try:
-        import keyring  # noqa: PLC0415 - legacy cleanup only
-
-        for username in usernames:
-            try:
-                keyring.delete_password(KEYRING_SERVICE, username)
-                removed_items.append(f"Legacy keyring credential: {username}")
-            except Exception:
-                pass  # Doesn't exist / other error — ignore
-    except Exception:
-        pass  # keyring unavailable — nothing to clean up
-
-
-
 
 
 class ClaudeAccountSwitcher:
@@ -2205,8 +2181,8 @@ class ClaudeAccountSwitcher:
             delete_macos_keychain_entry(session_dir)
             shutil.rmtree(session_dir, ignore_errors=True)
         # NOT under that `if`. The marker lives OUTSIDE the dir, so it
-        # outlives it: `purge` removes profile dirs (`iterdir()` + `is_dir()`)
-        # and leaves the dot-file beside them by design. Early-returning on
+        # outlives it: a profile dir removed by anything else leaves the
+        # dot-file beside it by design. Early-returning on
         # the missing dir left that marker for the next profile in this slot,
         # which then re-bootstraps on a flag nothing set for it.
         cleared = clear_session_stale(session_dir)
@@ -6085,10 +6061,9 @@ class ClaudeAccountSwitcher:
         Called by every entry point that mutates the live store or the
         roster. There is no single chokepoint to hang this on: the one it
         used to claim was `_perform_switch`, which covers the switch family
-        only, so `remove_account`, `swap_accounts`, `move_account`, `purge`
-        and the alias setters all ran happily inside a session shell —
-        `remove_account` deleting the session profile of the very shell it
-        was running in. Nine call sites is the honest cost of that.
+        only, so `remove_account` once ran happily inside a session shell,
+        deleting the session profile of the very shell it was running in.
+        One call per mutating entry point is the honest cost of that.
         """
         cfg_dir = os.environ.get("CLAUDE_CONFIG_DIR")
         if not cfg_dir:
@@ -6729,155 +6704,3 @@ class ClaudeAccountSwitcher:
             ))
         else:
             print(dimmed("New account is active on your next message — no restart needed."))
-
-    def purge(self) -> None:
-        """Remove all traces of claude-swap from the system.
-
-        This removes:
-        - All stored account credentials (``.enc`` files on Linux/WSL/Windows; on
-          macOS both the Keychain items via ``security`` and any fallback ``.enc``
-          files), plus a best-effort sweep of any pre-migration keyring / Windows
-          Credential Manager entries left behind
-        - The active backup directory (XDG path on Linux/WSL, ~/.claude-swap-backup elsewhere)
-        - Any stale legacy ~/.claude-swap-backup directory left around from
-          before the XDG migration
-        """
-        self._refuse_session_shell()
-        legacy = get_legacy_backup_root()
-        legacy_distinct = legacy != self.backup_dir
-
-        # Refuse while any session-mode claude is running: purging would pull
-        # its profile (and keychain entry) out from under a live process.
-        sessions_root = self.backup_dir / "sessions"
-        session_dirs = (
-            [d for d in sessions_root.iterdir() if d.is_dir()]
-            if sessions_root.is_dir()
-            else []
-        )
-        from claude_swap.session import scan_live_sessions
-
-        live = {}
-        unreadable = {}
-        for d in session_dirs:
-            sessions, bad = scan_live_sessions(d)
-            if sessions:
-                live[d.name] = [s.pid for s in sessions]
-            elif bad:
-                unreadable[d.name] = bad
-        if live:
-            details = "; ".join(
-                f"{name} (PID {', '.join(map(str, pids))})"
-                for name, pids in live.items()
-            )
-            raise SessionError(
-                f"Live session-mode Claude instance(s) found: {details}. "
-                "Exit them first, then retry --purge."
-            )
-        if unreadable:
-            details = "; ".join(
-                f"{name} ({n} record(s))" for name, n in unreadable.items()
-            )
-            raise SessionError(
-                f"Session records that could not be read: {details}. Whether a "
-                "Claude instance is live cannot be determined, and purging "
-                "would pull a live profile out from under it. Repair or remove "
-                "them, then retry --purge."
-            )
-
-        warning("This will remove ALL claude-swap data from your system:")
-        print(f"  - Backup directory: {self.backup_dir}")
-        if legacy_distinct and legacy.exists():
-            print(f"  - Legacy backup directory: {legacy}")
-        if self.platform == Platform.MACOS:
-            print("  - All stored account credentials (macOS Keychain and/or files)")
-        else:
-            print("  - All stored account credential files")
-        if session_dirs:
-            print("  - All session profiles and their Keychain entries")
-        print()
-        print(dimmed("Note: This does NOT affect your current Claude Code login."))
-        print()
-
-        confirm = input("Are you sure you want to purge all data? [y/N] ")
-        if confirm.lower() != "y":
-            print(dimmed("Cancelled"))
-            return
-
-        removed_items = []
-
-        # Remove credentials. On macOS backups may be in the Keychain and/or .enc
-        # files (auto-fallback), so clean both; Linux/WSL/Windows are file-only.
-        data = self._get_sequence_data()
-        if data:
-            for account_num, account_info in data.get("accounts", {}).items():
-                email = account_info.get("email", "")
-                nums = [account_num]
-                if str(account_num) != "None":
-                    nums.append("None")
-                usernames = [f"account-{num}-{email}" for num in nums]
-
-                # .enc files (Linux/WSL/Windows always; macOS fallback copies).
-                for num in nums:
-                    cred_file = self.credentials_dir / f".creds-{num}-{email}.enc"
-                    try:
-                        if cred_file.exists():
-                            cred_file.unlink()
-                            removed_items.append(f"Credential file: {cred_file.name}")
-                    except Exception:
-                        pass  # Ignore errors during purge
-
-                # macOS Keychain items via `security` (current macOS backend).
-                if self.platform == Platform.MACOS:
-                    for username in usernames:
-                        try:
-                            macos_keychain.delete_password(SECURITY_SERVICE, username)
-                            removed_items.append(f"Credential: {username}")
-                        except Exception:
-                            pass  # Ignore errors during purge
-
-                # Best-effort sweep of any pre-migration keyring / Credential
-                # Manager entries left behind by an incomplete keyring → files
-                # (Windows) or keyring → security (macOS) migration. Linux/WSL
-                # never used a keyring backend.
-                if self.platform in (Platform.MACOS, Platform.WINDOWS):
-                    _sweep_legacy_keyring(usernames, removed_items)
-
-        # Session-profile keychain entries must go BEFORE the backup dir:
-        # the hashed service names are derived from the dir paths and can't
-        # be recomputed once the directories are deleted.
-        if session_dirs:
-            from claude_swap.session import delete_macos_keychain_entry
-
-            for d in session_dirs:
-                delete_macos_keychain_entry(d)
-            removed_items.append(
-                f"Session profiles: {', '.join(d.name for d in session_dirs)}"
-            )
-
-        # Remove backup directory
-        if self.backup_dir.exists():
-            # Close log handlers before deleting (required on Windows)
-            for handler in self._logger.handlers[:]:
-                handler.close()
-                self._logger.removeHandler(handler)
-
-            shutil.rmtree(self.backup_dir)
-            removed_items.append(f"Directory: {self.backup_dir}")
-
-        # Also clean a stale legacy directory if it somehow still exists
-        # (e.g. a partial pre-migration state, or files re-created after init).
-        if legacy_distinct and legacy.exists():
-            try:
-                shutil.rmtree(legacy)
-                removed_items.append(f"Legacy directory: {legacy}")
-            except OSError:
-                pass
-
-        if removed_items:
-            print(f"\n{accent('Removed:')}")
-            for item in removed_items:
-                print(f"  {dimmed('-')} {item}")
-        else:
-            print(f"\n{dimmed('No claude-swap data found to remove.')}")
-
-        print(f"\n{accent('Purge complete.')}")

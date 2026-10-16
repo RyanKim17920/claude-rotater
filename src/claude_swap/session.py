@@ -125,8 +125,8 @@ def stale_marker_for(session_dir: Path) -> Path:
     recording it. The parent (``<backup>/sessions/``) is ours and is not what
     a per-profile EACCES denied.
 
-    Sibling of the DIR, so ``purge``'s ``iterdir()`` (dirs only) and
-    ``_delete_session_profile``'s ``rmtree`` both still see what they expect.
+    Sibling of the DIR, so ``_delete_session_profile``'s ``rmtree`` still
+    sees what it expects.
     """
     return session_dir.parent / f".{session_dir.name}{STALE_MARKER}"
 

@@ -112,8 +112,7 @@ def _delete_keyring_quietly(
     """Best-effort delete of a keyring entry; never raises.
 
     Used for cleanup *after* data has been safely relocated to a file, so a
-    failure here is cosmetic (the entry is no longer read, and ``purge`` mops
-    up any leftovers).
+    failure here is cosmetic (the entry is no longer read).
 
     Note: ``PasswordDeleteError`` is deliberately silent, but it covers more
     than "entry doesn't exist" — keyring's macOS backend also raises it when
@@ -395,7 +394,7 @@ def migrate_macos_keyring_to_security(switcher: "ClaudeAccountSwitcher") -> bool
         In the keyring-unavailable fallback we deliberately leave the legacy item
         behind: deleting it via ``security`` could raise a *second* Keychain prompt
         (the item was created by a different app), and the data is already safely
-        in the new service. The orphan is harmless cruft (``purge`` mops it up)."""
+        in the new service. The orphan is harmless cruft."""
         if keyring is not None:
             _delete_keyring_quietly(
                 keyring, switcher, username, context="macos_keyring_to_security"
@@ -474,7 +473,7 @@ def migrate_macos_keyring_to_security(switcher: "ClaudeAccountSwitcher") -> bool
             switcher._logger.warning(
                 f"macos_keyring_to_security: legacy keyring entry {source_username} "
                 "was left behind (delete failed or was denied); harmless — "
-                "remove manually or via purge"
+                "remove it manually with Keychain Access"
             )
         migrated += 1
 
