@@ -1187,6 +1187,78 @@ class TestAutoCommand:
         assert "nope" in capsys.readouterr().err  # printer.error -> stderr
 
 
+class TestTuiDispatch:
+    """`tui`, `watch` and the legacy flags all open the one-page TUI.
+
+    `watch` used to open a dedicated watch page (``start="watch"``); live
+    usage is now the TUI's main page, so every spelling calls ``run(switcher)``
+    with no start argument.
+    """
+
+    def _launch(self, argv: list[str]):
+        import claude_swap.tui as tui
+
+        calls = []
+
+        def fake_run(*args, **kwargs):
+            calls.append((args, kwargs))
+            return 0
+
+        with patch("claude_swap.cli.ClaudeAccountSwitcher") as switcher_cls, \
+             patch.object(tui, "run", fake_run), \
+             patch.object(sys, "argv", ["claude-swap", *argv]), \
+             patch("os.geteuid", return_value=1000, create=True), \
+             patch("claude_swap.update_check.check_for_update", return_value=None):
+            with pytest.raises(SystemExit) as excinfo:
+                cli.main()
+        return excinfo.value.code, calls, switcher_cls.return_value
+
+    @pytest.mark.parametrize("argv", [["tui"], ["watch"], ["--tui"], ["--watch"]])
+    def test_every_spelling_opens_tui_without_start(self, argv):
+        code, calls, switcher = self._launch(argv)
+        assert code == 0
+        assert calls == [((switcher,), {})]
+
+    def test_tui_exit_code_propagates(self):
+        import claude_swap.tui as tui
+
+        with patch("claude_swap.cli.ClaudeAccountSwitcher"), \
+             patch.object(tui, "run", lambda switcher: 3), \
+             patch.object(sys, "argv", ["claude-swap", "watch"]), \
+             patch("os.geteuid", return_value=1000, create=True), \
+             patch("claude_swap.update_check.check_for_update", return_value=None):
+            with pytest.raises(SystemExit) as excinfo:
+                cli.main()
+        assert excinfo.value.code == 3
+
+    def test_watch_with_extra_positional_is_rejected(self, capsys):
+        # An alias, not a new parser: `watch` takes no arguments.
+        with patch("claude_swap.cli.ClaudeAccountSwitcher"), \
+             patch.object(sys, "argv", ["claude-swap", "watch", "extra"]):
+            with pytest.raises(SystemExit) as excinfo:
+                cli.main()
+        assert excinfo.value.code == 2
+
+    def test_main_help_lists_watch_as_alias(self, capsys):
+        with patch.object(sys, "argv", ["claude-swap", "--help"]):
+            with pytest.raises(SystemExit) as excinfo:
+                cli.main()
+        assert excinfo.value.code == 0
+        out = capsys.readouterr().out
+        watch_line = next(ln for ln in out.splitlines() if " watch " in ln)
+        assert "alias of tui" in watch_line
+        assert "watch page" not in out
+        assert "--watch" not in out  # the legacy flag stays hidden
+
+    def test_auto_help_says_tui_runs_the_same_engine(self, capsys):
+        with patch.object(sys, "argv", ["claude-swap", "auto", "--help"]):
+            with pytest.raises(SystemExit):
+                cli.main()
+        out = " ".join(capsys.readouterr().out.split())
+        assert "runs this same engine live" in out
+        assert "--dry-run" in out and "--once" in out
+
+
 class TestUnclaimedCommand:
     """Minor 2: the operator escape hatch for a stash row.
 

@@ -66,7 +66,9 @@ _SUBCOMMAND_FLAGS = {
     "upgrade": "--upgrade",
     "update": "--upgrade",
     "tui": "--tui",
-    "watch": "--watch",
+    # `watch` predates the single-page TUI (it opened a dedicated watch
+    # page); live usage is now the TUI's main page, so it is an alias.
+    "watch": "--tui",
     "menubar": "--menubar",
 }
 
@@ -593,7 +595,9 @@ def _auto_command(argv: list[str]) -> None:
         description=(
             "Automatically switch accounts when the active one nears its "
             "5h/7d rate limit. Runs a foreground polling loop; use --once "
-            "for a single tick (cron-friendly)."
+            "for a single tick (cron-friendly). The TUI (cswap tui) runs "
+            "this same engine live while it is open, so you only need "
+            "cswap auto for headless use."
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
@@ -1063,8 +1067,8 @@ Commands:
   %(prog)s export <path>              export accounts
   %(prog)s import <path>              import accounts
   %(prog)s import-usage <path>        adopt usage another machine read (list --json)
-  %(prog)s tui                        interactive dashboard (also: bare %(prog)s)
-  %(prog)s watch                      dashboard, opened on the live watch page
+  %(prog)s tui                        dashboard + live auto-switch (also: bare %(prog)s)
+  %(prog)s watch                      alias of tui
   %(prog)s menubar                    macOS menu bar app
   %(prog)s menubar --install-service  keep the menu bar running via launchd
   %(prog)s upgrade                    self-upgrade to latest
@@ -1468,14 +1472,12 @@ The original flag spellings (%(prog)s --switch, %(prog)s --list, ...) keep worki
             from claude_swap.transfer import import_usage
 
             import_usage(switcher, args.import_usage, hold_s=args.hold)
-        elif args.tui:
+        elif args.tui or args.watch:
+            # --watch is the hidden legacy spelling of `cswap watch`, kept so
+            # old scripts and shell aliases still open the TUI.
             from claude_swap.tui import run as tui_run
 
             sys.exit(tui_run(switcher))
-        elif args.watch:
-            from claude_swap.tui import run as tui_run
-
-            sys.exit(tui_run(switcher, start="watch"))
         elif args.menubar:
             if sys.platform != "darwin":
                 error("The menu bar is only available on macOS.")
