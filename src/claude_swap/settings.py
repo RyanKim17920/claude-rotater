@@ -22,6 +22,7 @@ from pathlib import Path
 
 from claude_swap.exceptions import ConfigError
 from claude_swap.fsutil import replace_with_retry
+from claude_swap.poll_policy import CADENCE_SETTING_KEYS, PollCadence, load_cadence
 
 SETTINGS_SCHEMA_VERSION = 1
 SETTINGS_FILENAME = "settings.json"
@@ -67,7 +68,14 @@ class UiSettings:
     theme: str = "auto"
 
 
-_SECTION_DEFAULT_SOURCES = {"autoswitch": AutoSwitchSettings, "ui": UiSettings}
+# Where each spec's default (and effective value) lives, by ``SettingSpec.source``.
+# The poll cadence keys sit in the ``autoswitch`` JSON section but are owned
+# by ``poll_policy.PollCadence``, so their defaults are never restated here.
+_DEFAULT_SOURCES = {
+    "autoswitch": AutoSwitchSettings,
+    "ui": UiSettings,
+    "cadence": PollCadence,
+}
 
 
 @dataclass(frozen=True)
@@ -81,7 +89,7 @@ class SettingSpec:
 
     section: str  # top-level JSON section ("autoswitch", "ui")
     json_key: str  # camelCase key inside the section
-    field: str  # snake_case AutoSwitchSettings field
+    field: str  # snake_case field on the source dataclass
     kind: str  # "float" | "int" | "bool" | "choice"
     lo: float | None = None
     hi: float | None = None
@@ -89,14 +97,56 @@ class SettingSpec:
     help: str = ""
     group: str = ""  # SETTING_GROUPS key: the Config page section it renders in
     label: str = ""  # short UI name shown on the Config page
+    # _DEFAULT_SOURCES key owning the field; empty means the section's own
+    # dataclass (AutoSwitchSettings / UiSettings).
+    source_key: str = ""
 
     @property
     def dotted(self) -> str:
         return f"{self.section}.{self.json_key}"
 
     @property
+    def source(self) -> str:
+        return self.source_key or self.section
+
+    @property
     def default(self):
-        return getattr(_SECTION_DEFAULT_SOURCES[self.section](), self.field)
+        return getattr(_DEFAULT_SOURCES[self.source](), self.field)
+
+
+# Config page text for the poll cadence keys. Field, kind and bounds come from
+# poll_policy.CADENCE_SETTING_KEYS (the lenient loader's table), so the strict
+# `config set` validation and the clamp on load share one range.
+_CADENCE_TEXT: dict[str, tuple[str, str]] = {
+    "pollActiveSeconds": (
+        "Active poll (s)",
+        "Seconds between usage polls of the active account, away from the threshold",
+    ),
+    "pollSpareSeconds": (
+        "Spare poll (s)",
+        "Seconds between usage polls of each spare account",
+    ),
+    "pollUrgentSeconds": (
+        "Urgent poll (s)",
+        "Seconds between active-account polls once it nears the threshold",
+    ),
+    "pollHourlyBudget": (
+        "Hourly poll budget",
+        "Most usage polls per account in any trailing hour (hard cap)",
+    ),
+}
+
+
+def _cadence_specs() -> tuple[SettingSpec, ...]:
+    return tuple(
+        SettingSpec(
+            "autoswitch", json_key, field, kind, lo, hi,
+            help=_CADENCE_TEXT[json_key][1],
+            group="polling", label=_CADENCE_TEXT[json_key][0],
+            source_key="cadence",
+        )
+        for json_key, (field, kind, lo, hi) in CADENCE_SETTING_KEYS.items()
+    )
 
 
 # settings.json uses camelCase (matching the repo's other JSON artifacts);
@@ -145,6 +195,7 @@ SETTING_SPECS: dict[str, SettingSpec] = {
             help="Also switch on these models' weekly limits (e.g. Fable, Fable,Opus, or all)",
             group="autoswitch", label="Model limits",
         ),
+        *_cadence_specs(),
         SettingSpec(
             "ui", "theme", "theme", "choice", choices=("dark", "light", "auto"),
             help="Color theme; auto follows the terminal background",
@@ -162,10 +213,12 @@ SETTING_GROUPS: tuple[tuple[str, str], ...] = (
     ("ui", "Appearance"),
 )
 
+# AutoSwitchSettings fields only: the cadence keys share the JSON section but
+# are loaded by poll_policy.load_cadence.
 _AUTOSWITCH_KEYS: dict[str, str] = {
     spec.field: spec.json_key
     for spec in SETTING_SPECS.values()
-    if spec.section == "autoswitch"
+    if spec.source == "autoswitch"
 }
 
 
@@ -197,7 +250,7 @@ def _clamped(settings: AutoSwitchSettings) -> AutoSwitchSettings:
 
     kwargs = {}
     for spec in SETTING_SPECS.values():
-        if spec.section != "autoswitch":
+        if spec.source != "autoswitch":
             continue
         value = getattr(settings, spec.field)
         if spec.kind in ("float", "int"):
@@ -432,12 +485,13 @@ def effective_settings(backup_root: Path) -> list[tuple[SettingSpec, object, boo
     loaded = {
         "autoswitch": load_settings(backup_root),
         "ui": load_ui_settings(backup_root),
+        "cadence": load_cadence(backup_root),
     }
     rows = []
     for spec in SETTING_SPECS.values():
         section = raw.get(spec.section)
         is_set = isinstance(section, dict) and spec.json_key in section
-        rows.append((spec, getattr(loaded[spec.section], spec.field), is_set))
+        rows.append((spec, getattr(loaded[spec.source], spec.field), is_set))
     return rows
 
 

@@ -11,6 +11,7 @@ from pathlib import Path
 import pytest
 
 from claude_swap.exceptions import ConfigError
+from claude_swap.poll_policy import CADENCE_SETTING_KEYS, PollCadence, load_cadence
 from claude_swap.settings import (
     SETTING_GROUPS,
     SETTING_SPECS,
@@ -155,14 +156,17 @@ class TestUiSettings:
 
 class TestSettingSpecs:
     def test_registry_covers_every_dataclass_field(self):
-        by_section: dict[str, set[str]] = {}
+        by_source: dict[str, set[str]] = {}
         for spec in SETTING_SPECS.values():
-            by_section.setdefault(spec.section, set()).add(spec.field)
-        assert by_section["autoswitch"] == {
+            by_source.setdefault(spec.source, set()).add(spec.field)
+        assert by_source["autoswitch"] == {
             f.name for f in AutoSwitchSettings.__dataclass_fields__.values()
         }
-        assert by_section["ui"] == {
+        assert by_source["ui"] == {
             f.name for f in UiSettings.__dataclass_fields__.values()
+        }
+        assert by_source["cadence"] == {
+            f.name for f in PollCadence.__dataclass_fields__.values()
         }
 
     def test_every_spec_group_is_a_known_section(self):
@@ -199,9 +203,55 @@ class TestSettingSpecs:
         assert SETTING_SPECS["autoswitch.intervalSeconds"].section == "autoswitch"
 
     def test_defaults_match_dataclass(self):
-        sources = {"autoswitch": AutoSwitchSettings(), "ui": UiSettings()}
+        sources = {
+            "autoswitch": AutoSwitchSettings(),
+            "ui": UiSettings(),
+            "cadence": PollCadence(),
+        }
         for spec in SETTING_SPECS.values():
-            assert spec.default == getattr(sources[spec.section], spec.field)
+            assert spec.default == getattr(sources[spec.source], spec.field)
+
+    def test_cadence_specs_mirror_poll_policy(self):
+        """One source of truth: cadence bounds and defaults come from
+        poll_policy, and every cadence key lands on the Polling section."""
+        assert set(CADENCE_SETTING_KEYS) == {
+            spec.json_key for spec in SETTING_SPECS.values() if spec.source == "cadence"
+        }
+        for json_key, (field, kind, lo, hi) in CADENCE_SETTING_KEYS.items():
+            spec = SETTING_SPECS[f"autoswitch.{json_key}"]
+            assert (spec.field, spec.kind, spec.lo, spec.hi) == (field, kind, lo, hi)
+            assert spec.group == "polling"
+            assert spec.label
+        assert SETTING_SPECS["autoswitch.pollActiveSeconds"].default == 180.0
+        assert SETTING_SPECS["autoswitch.pollSpareSeconds"].default == 600.0
+        assert SETTING_SPECS["autoswitch.pollUrgentSeconds"].default == 60.0
+        assert SETTING_SPECS["autoswitch.pollHourlyBudget"].default == 20
+
+    def test_cadence_keys_do_not_leak_into_autoswitch_settings(self, tmp_path: Path):
+        set_setting(tmp_path, "autoswitch.pollActiveSeconds", "120")
+        settings = load_settings(tmp_path)
+        assert settings == AutoSwitchSettings()
+        save_settings(tmp_path, settings)
+        raw = json.loads(settings_path(tmp_path).read_text())
+        assert raw["autoswitch"]["pollActiveSeconds"] == 120.0
+        assert load_cadence(tmp_path).active_s == 120.0
+
+    def test_effective_settings_reports_cadence(self, tmp_path: Path):
+        set_setting(tmp_path, "autoswitch.pollHourlyBudget", "12")
+        rows = {spec.dotted: (value, is_set) for spec, value, is_set in effective_settings(tmp_path)}
+        assert rows["autoswitch.pollHourlyBudget"] == (12, True)
+        assert rows["autoswitch.pollSpareSeconds"] == (600.0, False)
+
+    @pytest.mark.parametrize("key, bad", [
+        ("autoswitch.pollActiveSeconds", "5"),
+        ("autoswitch.pollUrgentSeconds", "4"),
+        ("autoswitch.pollHourlyBudget", "0"),
+        ("autoswitch.pollHourlyBudget", "2.5"),
+        ("autoswitch.pollSpareSeconds", "3601"),
+    ])
+    def test_cadence_set_rejects_out_of_range(self, tmp_path: Path, key, bad):
+        with pytest.raises(ConfigError):
+            set_setting(tmp_path, key, bad)
 
 
 class TestSetUnsetSetting:

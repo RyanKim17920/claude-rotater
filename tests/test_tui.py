@@ -1353,6 +1353,31 @@ class TestEngineHosting:
             assert fake_engine.instances[1].settings.threshold == 81.0
             assert app.threshold_pct == 81.0
 
+    @pytest.mark.parametrize("key", [
+        "autoswitch.pollActiveSeconds",
+        "autoswitch.pollSpareSeconds",
+        "autoswitch.pollUrgentSeconds",
+        "autoswitch.pollHourlyBudget",
+    ])
+    async def test_cadence_change_restarts_engine(self, tmp_path, fake_engine, key):
+        """A cadence edit restarts the engine so its next sleep is planned
+        with the new value instead of waiting out the old one."""
+        from claude_swap.poll_policy import load_cadence
+        from claude_swap.settings import set_setting
+
+        app = make_app(three_accounts(tmp_path))
+        async with app.run_test(size=(120, 40)) as pilot:
+            await settle(pilot)
+            set_setting(tmp_path, key, "30")
+            app.on_settings_changed(key)
+            await settle(pilot)
+            assert fake_engine.instances[0].stopped
+            assert len(fake_engine.instances) == 2
+            cadence = load_cadence(tmp_path)
+            assert 30 in (
+                cadence.active_s, cadence.spare_s, cadence.urgent_s, cadence.hourly_budget
+            )
+
     async def test_config_message_routes_to_settings_change(self, tmp_path, fake_engine):
         from claude_swap.settings import set_setting
 
