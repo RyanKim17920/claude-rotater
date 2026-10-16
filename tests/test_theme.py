@@ -89,3 +89,12 @@ def test_accent_is_distinct_from_every_severity_color():
 def test_palette_carries_theme_background():
     assert Palette.from_theme(ROTA_LIGHT).background == theme.BACKGROUND_LIGHT
     assert Palette.DARK.background == theme.BACKGROUND
+
+
+def test_brand_chip_style_does_not_leak_into_appended_text():
+    from claude_rotater.tui.theme import brand_chip
+
+    text = brand_chip(Palette.DARK)
+    text.append(" settings")
+    assert text.plain == " rota  settings"
+    assert str(text.style) == ""  # the chip style lives on its span only

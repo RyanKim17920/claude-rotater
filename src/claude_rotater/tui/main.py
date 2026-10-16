@@ -41,7 +41,7 @@ from claude_rotater.json_output import USAGE_API_KEY, USAGE_RELOGIN_REQUIRED
 from claude_rotater.models import AccountSnapshot, AccountsSnapshot
 from claude_rotater.tui import data
 from claude_rotater.tui.plot import history_plot, line_plot, peak_columns, sparkline
-from claude_rotater.tui.theme import Palette
+from claude_rotater.tui.theme import Palette, brand_chip
 from claude_rotater.tui.widgets import account_card_text, bar_cells
 from claude_rotater.usage_history import Point
 from claude_rotater.usage_store import STALE_OK_S
@@ -124,11 +124,6 @@ FEED_LABELS = {
     "stale": ("◐", "sev_warn", "feed stale"),
     "off": ("○", "muted", "feed off"),
 }
-
-
-def brand_chip(palette: Palette) -> Text:
-    """The ``rota`` mark: a solid accent chip, the one loud thing on screen."""
-    return Text(" rota ", style=f"bold {palette.background} on {palette.accent}")
 
 
 def status_text(
@@ -613,8 +608,9 @@ def _arrange(
         return _side_by_side(columns[0], columns[1], col_w)[:height]
     each = height // len(blocks)
     lines: list[Text] = []
-    for title, render in blocks:
-        plot_h = min(MAX_PLOT_LINES, each - 1)
+    for i, (title, render) in enumerate(blocks):
+        share = height - each * (len(blocks) - 1) if i == len(blocks) - 1 else each
+        plot_h = min(MAX_PLOT_LINES, share - 1)
         lines.append(title)
         if plot_h > 0:
             lines.extend(render(width, plot_h))

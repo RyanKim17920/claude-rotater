@@ -140,7 +140,7 @@ class TestLayout:
             text = plain(app)
             for spec in SETTING_SPECS.values():
                 assert spec.label in text
-            headings = [t for _g, t in SETTING_GROUPS]
+            headings = [t.upper() for _g, t in SETTING_GROUPS]  # small-caps headings
             positions = [text.index(h) for h in headings]
             assert positions == sorted(positions)
             assert [s.dotted for s in lst(app).specs] == [s.dotted for s in ordered_specs()]

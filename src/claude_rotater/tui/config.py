@@ -53,9 +53,15 @@ from claude_rotater.settings import (
     set_setting,
     unset_setting,
 )
-from claude_rotater.tui.theme import Palette
+from claude_rotater.tui.theme import Palette, brand_chip
 
-_HINT = "↑↓ move · ←→ change · enter or 0-9 exact value · ctrl+r default · esc back"
+HINT_KEYS: tuple[tuple[str, str], ...] = (
+    ("↑↓", "move"),
+    ("←→", "change"),
+    ("enter/0-9", "exact value"),
+    ("ctrl+r", "default"),
+    ("esc", "back"),
+)
 _LABEL_W = 26
 _VALUE_W = 16
 _MARKER_W = 8
@@ -220,10 +226,20 @@ class SettingsList(Widget, can_focus=True):
             if i:
                 out.append("\n")
             if spec is None:
-                out.append(kind, style=f"bold {palette.accent}")
+                out.append(self._heading(kind, width, palette))
             else:
                 out.append(self._row(spec, width, palette))
         return out
+
+    @staticmethod
+    def _heading(title: str, width: int, palette: Palette) -> Text:
+        """``AUTO-SWITCH ──────────``: a quiet small-caps label and a rule."""
+        if not title:
+            return Text()
+        text = Text(no_wrap=True)
+        text.append(f"  {title.upper()} ", style=f"bold {palette.muted}")
+        text.append("─" * max(0, width - text.cell_len - 2), style=palette.track)
+        return text
 
     def _value_cell(self, spec: SettingSpec, selected: bool, palette: Palette) -> Text:
         value, _is_set = self.values[spec.dotted]
@@ -251,7 +267,8 @@ class SettingsList(Widget, can_focus=True):
         selected = current and self.has_focus
         _value, is_set = self.values[spec.dotted]
         row = Text(no_wrap=True, overflow="ellipsis")
-        row.append("▸ " if current else "  ", style=f"bold {palette.accent}")
+        # Same gutter bar as the on-duty account on the main page.
+        row.append("▌ " if current else "  ", style=palette.accent)
         label = (spec.label or spec.dotted)[: _LABEL_W - 1].ljust(_LABEL_W)
         row.append(label, style=f"bold {palette.foreground}" if selected else palette.foreground)
         cell = self._value_cell(spec, selected, palette)
@@ -259,7 +276,7 @@ class SettingsList(Widget, can_focus=True):
         row.append(" " * max(1, _VALUE_W - cell.cell_len))
         row.append(
             ("custom" if is_set else "default").ljust(_MARKER_W),
-            style=palette.accent if is_set else palette.muted,
+            style=f"bold {palette.accent}" if is_set else palette.muted,
         )
         help_w = width - row.cell_len - 2
         if width >= HELP_COLUMN_MIN_WIDTH and help_w > 0:
@@ -444,6 +461,22 @@ class SettingsList(Widget, can_focus=True):
         self.refresh()
 
 
+def hint_markup() -> str:
+    """Footer key legend, styled like the main page's key strip."""
+    return "  ".join(f"[b $primary]{key}[/] [$secondary]{word}[/]" for key, word in HINT_KEYS)
+
+
+class _ConfigTitle(Static):
+    """The header band: the rota chip and the page name, as on the main page."""
+
+    def render(self) -> Text:
+        palette = Palette.from_theme(self.app.current_theme)
+        text = brand_chip(palette)
+        text.append("  settings", style=f"bold {palette.foreground}")
+        text.append("  saved as you change them", style=palette.muted)
+        return text
+
+
 class ConfigScreen(Screen):
     """Settings editor generated from ``SETTING_SPECS``.
 
@@ -474,8 +507,8 @@ class ConfigScreen(Screen):
     ConfigScreen #config-title {
         height: 1;
         padding: 0 1;
-        text-style: bold;
-        background: $panel;
+        background: $surface;
+        margin-bottom: 1;
     }
     ConfigScreen #config-body {
         height: 1fr;
@@ -494,8 +527,6 @@ class ConfigScreen(Screen):
     ConfigScreen #config-hint {
         height: 1;
         padding: 0 1;
-        background: $panel;
-        color: $text-muted;
         text-wrap: nowrap;
         text-overflow: ellipsis;
     }
@@ -507,13 +538,13 @@ class ConfigScreen(Screen):
         self._pending: dict[str, object] = {}  # dotted key -> debounce timer
 
     def compose(self) -> ComposeResult:
-        yield Static("rota · config", id="config-title")
+        yield _ConfigTitle(id="config-title")
         body = VerticalScroll(id="config-body")
         body.can_focus = False
         with body:
             yield SettingsList(self.backup_dir, id="settings")
         yield Static(id="config-detail", markup=False)
-        yield Static(_HINT, id="config-hint")
+        yield Static(hint_markup(), id="config-hint")
 
     @property
     def settings_list(self) -> SettingsList:

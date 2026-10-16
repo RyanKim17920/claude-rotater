@@ -14,6 +14,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import ClassVar
 
+from rich.text import Text
 from textual.theme import Theme
 
 # Core palette (single source of truth — widgets import these for rich
@@ -140,3 +141,10 @@ Palette.DARK = Palette(
     sev_ok=SEV_OK, sev_warn=SEV_WARN, sev_crit=SEV_CRIT, track=TRACK,
     background=BACKGROUND,
 )
+
+
+def brand_chip(palette: Palette) -> Text:
+    """The ``rota`` mark: a solid accent chip, the one loud thing on screen."""
+    chip = Text()
+    chip.append(" rota ", style=f"bold {palette.background} on {palette.accent}")
+    return chip
