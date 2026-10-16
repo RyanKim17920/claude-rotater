@@ -87,6 +87,8 @@ class SettingSpec:
     hi: float | None = None
     choices: tuple[str, ...] = ()
     help: str = ""
+    group: str = ""  # SETTING_GROUPS key: the Config page section it renders in
+    label: str = ""  # short UI name shown on the Config page
 
     @property
     def dotted(self) -> str:
@@ -105,42 +107,60 @@ SETTING_SPECS: dict[str, SettingSpec] = {
         SettingSpec(
             "autoswitch", "threshold", "threshold", "float", 50.0, 99.9,
             help="Switch when the binding 5h/7d window reaches this pct",
+            group="autoswitch", label="Threshold %",
         ),
         SettingSpec(
             "autoswitch", "intervalSeconds", "interval_seconds", "float", 15.0, 3600.0,
             help="Poll interval for the cswap auto loop, in seconds",
+            group="polling", label="Loop interval (s)",
         ),
         SettingSpec(
             "autoswitch", "cooldownSeconds", "cooldown_seconds", "float", 0.0, 86400.0,
             help="Minimum seconds between proactive switches",
+            group="autoswitch", label="Cooldown (s)",
         ),
         SettingSpec(
             "autoswitch", "hysteresisPct", "hysteresis_pct", "float", 0.0, 50.0,
             help="A target must beat the active account by this many pct",
+            group="autoswitch", label="Hysteresis %",
         ),
         SettingSpec(
             "autoswitch", "strategy", "strategy", "choice",
             choices=("best", "consume-first"),
             help="How auto-switch picks the target account",
+            group="autoswitch", label="Strategy",
         ),
         SettingSpec(
             "autoswitch", "includeApiKeyAccounts", "include_api_key_accounts", "bool",
             help="Allow rotating onto managed API-key accounts (bill per token)",
+            group="autoswitch", label="Include API-key accounts",
         ),
         SettingSpec(
             "autoswitch", "unhealthyTicks", "unhealthy_ticks", "int", 1, 100,
             help="Consecutive failed polls before an account is unhealthy",
+            group="autoswitch", label="Unhealthy after (polls)",
         ),
         SettingSpec(
             "autoswitch", "model", "model", "string",
             help="Also switch on these models' weekly limits (e.g. Fable, Fable,Opus, or all)",
+            group="autoswitch", label="Model limits",
         ),
         SettingSpec(
             "ui", "theme", "theme", "choice", choices=("dark", "light", "auto"),
             help="Color theme; auto follows the terminal background",
+            group="ui", label="Theme",
         ),
     )
 }
+
+# Config page sections, in display order: (group key, heading). Every spec's
+# ``group`` must be one of these keys (enforced by a test), so a new spec
+# lands in a section without any UI code.
+SETTING_GROUPS: tuple[tuple[str, str], ...] = (
+    ("autoswitch", "Auto-switch"),
+    ("polling", "Polling"),
+    ("ui", "Appearance"),
+)
 
 _AUTOSWITCH_KEYS: dict[str, str] = {
     spec.field: spec.json_key

@@ -12,6 +12,7 @@ import pytest
 
 from claude_swap.exceptions import ConfigError
 from claude_swap.settings import (
+    SETTING_GROUPS,
     SETTING_SPECS,
     atomic_write_json,
     AutoSwitchSettings,
@@ -163,6 +164,39 @@ class TestSettingSpecs:
         assert by_section["ui"] == {
             f.name for f in UiSettings.__dataclass_fields__.values()
         }
+
+    def test_every_spec_group_is_a_known_section(self):
+        groups = {key for key, _ in SETTING_GROUPS}
+        for spec in SETTING_SPECS.values():
+            assert spec.group in groups, spec.dotted
+
+    def test_groups_are_unique_and_titled(self):
+        keys = [key for key, _ in SETTING_GROUPS]
+        assert len(keys) == len(set(keys))
+        assert all(title for _, title in SETTING_GROUPS)
+
+    def test_every_group_has_a_spec(self):
+        # An empty section would render as a bare heading on the Config page.
+        used = {spec.group for spec in SETTING_SPECS.values()}
+        assert used == {key for key, _ in SETTING_GROUPS}
+
+    def test_labels_are_present_and_unique(self):
+        labels = [spec.label for spec in SETTING_SPECS.values()]
+        assert all(labels)
+        assert len(labels) == len(set(labels))
+
+    def test_group_assignments(self):
+        assert SETTING_SPECS["autoswitch.intervalSeconds"].group == "polling"
+        assert SETTING_SPECS["ui.theme"].group == "ui"
+        for key in (
+            "threshold", "cooldownSeconds", "hysteresisPct", "strategy",
+            "model", "includeApiKeyAccounts", "unhealthyTicks",
+        ):
+            assert SETTING_SPECS[f"autoswitch.{key}"].group == "autoswitch"
+
+    def test_group_does_not_change_json_location(self):
+        # `group` is display only: settings.json keeps section/json_key.
+        assert SETTING_SPECS["autoswitch.intervalSeconds"].section == "autoswitch"
 
     def test_defaults_match_dataclass(self):
         sources = {"autoswitch": AutoSwitchSettings(), "ui": UiSettings()}
