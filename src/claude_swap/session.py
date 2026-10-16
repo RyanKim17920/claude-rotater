@@ -677,7 +677,7 @@ class SessionManager:
             raise SessionError(
                 f"Account-{account_num} ({email}) is an API-key account; "
                 "'cswap run' (session mode) does not support API-key accounts yet. "
-                "Use 'cswap --switch-to' to make it your default login instead."
+                "Use 'cswap switch' to make it your default login instead."
             )
 
     # -- bootstrap -------------------------------------------------------

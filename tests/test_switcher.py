@@ -3932,7 +3932,7 @@ class TestSwitchToSelfSlotAndForce:
         assert live["creds"] == self.LIVE_1
         out = capsys.readouterr().out
         assert "Already on" in out and "Account-1" in out
-        assert "cswap --switch-to 1 --force" in out
+        assert "cswap switch 1 --force" in out
 
     def test_force_self_activation_restores_imported_creds(
         self,

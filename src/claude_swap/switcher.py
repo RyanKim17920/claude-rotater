@@ -2667,7 +2667,7 @@ class ClaudeAccountSwitcher:
         )
         raise ConfigError(
             f"Email '{identifier}' is ambiguous — matches accounts: {details}. "
-            f"Use account number instead (e.g., cswap --switch-to 1)."
+            f"Use account number instead (e.g., cswap switch 1)."
         )
 
     def _get_sequence_data_migrated(self) -> dict | None:
@@ -4651,7 +4651,7 @@ class ClaudeAccountSwitcher:
         against the current one and only recommends a switch it can *prove*
         lands on strictly more headroom — never onto an account worse than (or
         merely unverifiable against) where the user already is. When a switch
-        can't be proven beneficial, it stays put; bare ``cswap --switch``
+        can't be proven beneficial, it stays put; bare ``cswap switch``
         remains the way to force a plain rotation. ``models`` folds the named
         per-model weekly windows into every headroom comparison (see
         ``oauth.account_headroom``). Returns ``(target, note)``:
@@ -5112,7 +5112,7 @@ class ClaudeAccountSwitcher:
 
         ``"best"`` only switches when it can prove another account has more
         remaining quota; if usage can't be fetched or no candidate is provably
-        better, it stays put (run a plain ``cswap --switch`` to rotate anyway).
+        better, it stays put (run a plain ``cswap switch`` to rotate anyway).
         ``"next-available"`` rotates and skips accounts at their limit, falling
         back to plain rotation when usage is unavailable. Both apply only to the
         normal path (a live Claude login present); the fresh-machine path (no
@@ -5244,7 +5244,7 @@ class ClaudeAccountSwitcher:
 
         # Usage-aware "jump to most headroom". Only switches when another
         # account is provably better; otherwise stays put (never moves onto a
-        # worse or unverifiable account). Bare `cswap --switch` rotates anyway.
+        # worse or unverifiable account). Bare `cswap switch` rotates anyway.
         if strategy == "best":
             best_usage = self._usage_by_account()
             self._warn_inert_models(best_usage, models, json_output, warnings)
@@ -5269,7 +5269,8 @@ class ClaudeAccountSwitcher:
                     )
                 print(dimmed(
                     f"Current account usage is unavailable — staying on "
-                    f"Account-{current_num}. Run cswap --switch to rotate."
+                    f"Account-{current_num}. Run a plain cswap switch to "
+                    "rotate."
                 ))
                 return None
             if note == "no-comparison":
@@ -5284,7 +5285,8 @@ class ClaudeAccountSwitcher:
                     )
                 print(dimmed(
                     f"No other account has usage data to compare — staying on "
-                    f"Account-{current_num}. Run cswap --switch to rotate."
+                    f"Account-{current_num}. Run a plain cswap switch to "
+                    "rotate."
                 ))
                 return None
             if note == "incomplete-comparison":
@@ -5566,9 +5568,8 @@ class ClaudeAccountSwitcher:
                             f"{accent('Already on')} Account-{target_account} ({email})"
                         )
                         print(dimmed(
-                            "To rewrite the live login from the stored backup "
-                            "(e.g. after --import), run: "
-                            f"cswap --switch-to {target_account} --force"
+                            "To rewrite the live login from the stored backup, "
+                            f"run: cswap switch {target_account} --force"
                         ))
                         return None
                     return self._switch_noop(
@@ -6552,7 +6553,7 @@ class ClaudeAccountSwitcher:
                 self.list_accounts()
             except Exception as e:
                 self._logger.warning(f"Post-switch usage display failed: {e!r}")
-                print(dimmed("  (usage display unavailable — run `cswap --list` to retry)"))
+                print(dimmed("  (usage display unavailable — open cswap to retry)"))
             print()
             self._print_switch_followup()
             print()
