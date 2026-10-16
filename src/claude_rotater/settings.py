@@ -524,11 +524,12 @@ def merged_with_cli(settings: AutoSwitchSettings, args) -> AutoSwitchSettings:
     return _clamped(dataclasses.replace(settings, **overrides))
 
 
-def atomic_write_json(path: Path, data: dict) -> None:
+def atomic_write_json(path: Path, data: dict, *, compact: bool = False) -> None:
     """Atomically write JSON with the backup dir's 0600/0700 modes.
 
     Shared by settings.json and the autoswitch state file (and any future
-    machine-local state files beside them).
+    machine-local state files beside them). ``compact`` drops the
+    indentation, for machine-only files where size matters (history).
 
     **Writes THROUGH a symlink, never over it.** A rename swaps a directory
     ENTRY and does not follow links, so renaming onto a symlinked path
@@ -556,7 +557,12 @@ def atomic_write_json(path: Path, data: dict) -> None:
         os.chmod(path.parent, 0o700)
     fd, tmp_path = tempfile.mkstemp(dir=str(target.parent), suffix=".tmp")
     try:
-        os.write(fd, json.dumps(data, indent=2).encode("utf-8"))
+        text = (
+            json.dumps(data, separators=(",", ":"))
+            if compact
+            else json.dumps(data, indent=2)
+        )
+        os.write(fd, text.encode("utf-8"))
         os.close(fd)
         fd = -1
         replace_with_retry(tmp_path, str(target))
