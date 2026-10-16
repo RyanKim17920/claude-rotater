@@ -373,3 +373,134 @@ class TestEntryPoint:
         with pytest.raises(SystemExit):
             cli.main()
         assert "feed" not in capsys.readouterr().out
+
+
+# -- transcript tail ------------------------------------------------------------
+
+
+def _entry(kind: str, ts: str, size: int = 50) -> bytes:
+    body = {"message": {"content": [{"type": "text", "text": "z" * size}]},
+            "type": kind, "timestamp": ts}
+    return (json.dumps(body) + "\n").encode()
+
+
+TS = "2026-10-16T10:05:00.250Z"
+TS_EPOCH = 1792145100.25
+
+
+class TestLastAssistantAt:
+    def test_last_assistant_entry_wins(self, tmp_path):
+        path = tmp_path / "t.jsonl"
+        path.write_bytes(
+            _entry("assistant", "2026-10-16T09:00:00Z")
+            + _entry("assistant", TS)
+            + _entry("user", "2026-10-16T10:06:00Z")
+        )
+        assert feed.last_assistant_at(str(path)) == TS_EPOCH
+
+    @pytest.mark.parametrize("value", [None, "", 5, "/no/such/file.jsonl"])
+    def test_missing_or_bogus_path(self, value):
+        assert feed.last_assistant_at(value) is None
+
+    def test_directory_and_empty_file(self, tmp_path):
+        assert feed.last_assistant_at(str(tmp_path)) is None
+        (tmp_path / "e.jsonl").write_bytes(b"")
+        assert feed.last_assistant_at(str(tmp_path / "e.jsonl")) is None
+
+    def test_trailing_partial_line_is_ignored(self, tmp_path):
+        path = tmp_path / "t.jsonl"
+        partial = _entry("assistant", "2026-10-16T11:00:00Z").rstrip(b"\n")
+        path.write_bytes(_entry("assistant", TS) + partial[: len(partial) // 2])
+        assert feed.last_assistant_at(str(path)) == TS_EPOCH
+        # Even a complete-looking entry is not trusted without its newline.
+        path.write_bytes(_entry("assistant", TS) + partial)
+        assert feed.last_assistant_at(str(path)) == TS_EPOCH
+
+    def test_garbage_lines_are_skipped(self, tmp_path):
+        path = tmp_path / "t.jsonl"
+        path.write_bytes(_entry("assistant", TS) + b"{not json\n\xff\xfe\n[1,2]\n")
+        assert feed.last_assistant_at(str(path)) == TS_EPOCH
+
+    def test_huge_file_reads_only_the_tail(self, tmp_path, monkeypatch):
+        path = tmp_path / "t.jsonl"
+        with open(path, "wb") as f:
+            f.write(_entry("assistant", "2026-01-01T00:00:00Z"))
+            filler = _entry("user", "2026-10-16T10:00:00Z", size=900)
+            for _ in range(20_000):  # ~20 MB
+                f.write(filler)
+            f.write(_entry("assistant", TS))
+            f.write(filler)
+        reads: list[int] = []
+        real_open = open
+
+        class Spy:
+            def __init__(self, handle):
+                self.h = handle
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                self.h.close()
+
+            def read(self, n):
+                reads.append(n)
+                return self.h.read(n)
+
+            def __getattr__(self, name):
+                return getattr(self.h, name)
+
+        monkeypatch.setattr("builtins.open", lambda p, m="r", *a, **k: Spy(real_open(p, m, *a, **k)))
+        assert feed.last_assistant_at(str(path)) == TS_EPOCH
+        assert sum(reads) <= 2 * feed.TAIL_CHUNK_BYTES
+
+    def test_no_assistant_within_the_cap_gives_up(self, tmp_path):
+        path = tmp_path / "t.jsonl"
+        filler = _entry("user", "2026-10-16T10:00:00Z", size=900)
+        path.write_bytes(
+            _entry("assistant", TS) + filler * (feed.TAIL_MAX_BYTES // len(filler) + 10)
+        )
+        assert feed.last_assistant_at(str(path)) is None
+
+    def test_huge_assistant_line_is_scanned_not_parsed(self, tmp_path, monkeypatch):
+        path = tmp_path / "t.jsonl"
+        big = _entry("assistant", TS, size=feed.JSON_LINE_MAX * 2)
+        path.write_bytes(_entry("user", "2026-10-16T09:00:00Z") + big)
+
+        def no_parse(*a, **k):
+            raise AssertionError("a huge line must not be json-parsed")
+
+        monkeypatch.setattr(feed.json, "loads", no_parse)
+        assert feed.last_assistant_at(str(path)) == TS_EPOCH
+
+    def test_line_longer_than_the_cap_is_given_up(self, tmp_path):
+        path = tmp_path / "t.jsonl"
+        path.write_bytes(_entry("assistant", TS, size=feed.TAIL_MAX_BYTES * 2))
+        assert feed.last_assistant_at(str(path)) is None
+
+    def test_nested_escaped_type_is_not_an_assistant_entry(self, tmp_path):
+        path = tmp_path / "t.jsonl"
+        text = '"type":"assistant","timestamp":"2026-10-16T12:00:00Z"' + "z" * feed.JSON_LINE_MAX
+        line = json.dumps({"type": "user", "message": {"content": text},
+                           "timestamp": "2026-10-16T12:00:00Z"}) + "\n"
+        path.write_bytes(_entry("assistant", TS) + line.encode())
+        assert feed.last_assistant_at(str(path)) == TS_EPOCH
+
+
+class TestReadingTimeInRecords:
+    def test_parse_payload_stamps_the_last_response(self, tmp_path):
+        path = tmp_path / "projects" / "-repo" / "s.jsonl"
+        path.parent.mkdir(parents=True)
+        path.write_bytes(_entry("assistant", TS))
+        record = feed.parse_payload(raw(transcript_path=str(path)), NOW)
+        assert record["at"] == TS_EPOCH
+        assert feed.valid_record(record)
+
+    def test_unreadable_transcript_leaves_at_out(self):
+        record = feed.parse_payload(raw(), NOW)
+        assert "at" not in record
+
+    def test_valid_record_rejects_a_bad_at(self):
+        record = {"t": NOW, "five_hour": {"pct": 1.0}}
+        assert feed.valid_record(record)
+        assert not feed.valid_record(dict(record, at="soon"))

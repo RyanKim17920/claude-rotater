@@ -13,6 +13,12 @@ watches that directory and ingests new lines
 (:mod:`claude_rotater.feed_ingest`), so the active account no longer needs
 polling while a session is running.
 
+A statusline re-renders on its own timer, long after the response its
+numbers came from, so ``t`` alone says nothing about how current a reading
+is. ``at`` is: the timestamp of the last assistant entry in the session's
+transcript (``transcript_path``), the response the rate limits were read
+from. Only the transcript's tail is read (:func:`last_assistant_at`).
+
 It runs on every statusline refresh, so it must be fast and must never break
 the statusline: stdlib-only imports (``claude_rotater.paths`` is ~15 ms), one
 ``O_APPEND`` write, every error swallowed and exit status 0. The backup root
@@ -22,6 +28,7 @@ that patches it (a second profile with its own backup dir) is honored.
 Record shape (keys with no value are omitted)::
 
     {"t": 1760000000.123,                 # when rota feed ran (epoch s)
+     "at": 1759999990.5,                  # the session's last assistant message
      "session_id": "...",
      "config_dir": "/Users/me/.claude",   # the session's CLAUDE_CONFIG_DIR
      "five_hour": {"pct": 42.0, "resets_at": 1760003600.0},
@@ -34,6 +41,7 @@ from __future__ import annotations
 import json
 import math
 import os
+import re
 import sys
 from dataclasses import dataclass
 
@@ -54,6 +62,15 @@ MAX_INPUT_BYTES = 1024 * 1024
 INITIAL_TAIL_BYTES = 64 * 1024
 
 WINDOW_KEYS = ("five_hour", "seven_day")
+
+# Transcript tail reading: chunks read backwards from the end, never more
+# than TAIL_MAX_BYTES in all; lines up to JSON_LINE_MAX are parsed as JSON,
+# longer ones (a big tool result) are scanned for their top-level keys.
+TAIL_CHUNK_BYTES = 8 * 1024
+TAIL_MAX_BYTES = 256 * 1024
+JSON_LINE_MAX = 64 * 1024
+_ASSISTANT_RE = re.compile(rb'"type"\s*:\s*"assistant"')
+_TIMESTAMP_RE = re.compile(rb'"timestamp"\s*:\s*"([^"\\]{1,64})"')
 _MAX_TEXT = 128
 _COPY_CHUNK = 64 * 1024
 
@@ -94,6 +111,58 @@ def _epoch(value: object) -> float | None:
         if parsed.tzinfo is None:
             parsed = parsed.replace(tzinfo=timezone.utc)
         return parsed.timestamp()
+    return None
+
+
+def _assistant_at(line: bytes) -> float | None:
+    """The ``timestamp`` of a transcript line if it is an assistant entry."""
+    if len(line) <= JSON_LINE_MAX:
+        try:
+            entry = json.loads(line)
+        except (ValueError, UnicodeDecodeError, RecursionError):
+            return None
+        if not isinstance(entry, dict) or entry.get("type") != "assistant":
+            return None
+        return _epoch(entry.get("timestamp"))
+    # Too long to parse on every refresh. Claude Code writes the top-level
+    # "type" and "timestamp" after "message", so the last occurrence of each
+    # is the entry's own (a nested one would have its quotes escaped).
+    if _ASSISTANT_RE.search(line) is None:
+        return None
+    stamps = _TIMESTAMP_RE.findall(line)
+    if not stamps:
+        return None
+    return _epoch(stamps[-1].decode("ascii", "replace"))
+
+
+def last_assistant_at(path: object) -> float | None:
+    """When the last assistant entry in a Claude Code transcript was written,
+    reading only the file's tail; None when there is none in the last
+    ``TAIL_MAX_BYTES`` or the file can't be read. A trailing line with no
+    newline (a write in progress) is ignored. Never raises."""
+    if not isinstance(path, str) or not path:
+        return None
+    try:
+        with open(path, "rb") as handle:
+            pos = os.fstat(handle.fileno()).st_size
+            size = pos
+            carry = b""  # the incomplete first line of the previous chunk
+            first = True
+            while pos > 0 and size - pos < TAIL_MAX_BYTES:
+                step = min(TAIL_CHUNK_BYTES, pos)
+                pos -= step
+                handle.seek(pos)
+                lines = (handle.read(step) + carry).split(b"\n")
+                if first:
+                    lines.pop()  # "" after a final newline, else a partial line
+                    first = False
+                carry = lines.pop(0) if pos > 0 else b""
+                for line in reversed(lines):
+                    at = _assistant_at(line)
+                    if at is not None:
+                        return at
+    except (OSError, ValueError):
+        return None
     return None
 
 
@@ -153,6 +222,9 @@ def parse_payload(raw: bytes | str, now: float, environ=os.environ) -> dict | No
             record[key] = window
     if not any(key in record for key in WINDOW_KEYS):
         return None
+    at = last_assistant_at(payload.get("transcript_path"))
+    if at is not None:
+        record["at"] = round(at, 3)
     session_id = _text(payload.get("session_id"))
     if session_id is not None:
         record["session_id"] = session_id
@@ -174,6 +246,8 @@ def valid_record(record: object) -> bool:
     """Whether a line read back from the feed has the shape ingestion relies
     on (the file is user-writable, so it is checked, not trusted)."""
     if not isinstance(record, dict) or _number(record.get("t")) is None:
+        return False
+    if "at" in record and _number(record["at"]) is None:
         return False
     seen = False
     for key in WINDOW_KEYS:
