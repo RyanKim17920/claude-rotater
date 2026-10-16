@@ -8162,7 +8162,7 @@ class TestStashManifestConcurrentMutation:
         assert not any(t.is_alive() for t in threads), "worker deadlocked"
         assert not errors, errors
         probes = {
-            meta.get("probe") for meta in store._read_stash_manifest().values()
+            meta.get("probe") for meta in store._read_stash_manifest_ex()[0].values()
         }
         expected = {f"{tag}{i}" for tag in ("a", "b") for i in range(self.ROWS)}
         return sorted(expected - probes)
@@ -10278,7 +10278,7 @@ class TestGateUltraReviewFixes:
         assert adopted is None      # correctly not adopted (dead branch)
         assert not [
             e for e in unclaimed_entries(s._store)
-            if s._store._read_stash_manifest().get(e, {}).get("reason")
+            if s._store._read_stash_manifest_ex()[0].get(e, {}).get("reason")
             == "consume-gate-cas-conflict"
         ], (
             "a CAS-conflict entry stays pending forever: it can never match "
@@ -10862,7 +10862,7 @@ class TestGateUltraReviewFixes:
              "consumedFp": oauth.credential_fingerprint(self._OLD),
              "fingerprint": oauth.credential_fingerprint(self._NEW)},
         )
-        assert list(s._store._read_stash_manifest()) == [dead_id, live_id], (
+        assert list(s._store._read_stash_manifest_ex()[0]) == [dead_id, live_id], (
             "premise: the dead row is scanned before the adoptable one"
         )
 
@@ -10920,7 +10920,7 @@ class TestGateUltraReviewFixes:
         adopted = s._adopt_stashed_successor("1", "test@example.com", self._NEW)
 
         assert adopted is None, "premise: a non-matching row is never adopted"
-        listed = entry_id in s._store._read_stash_manifest()
+        listed = entry_id in s._store._read_stash_manifest_ex()[0]
         if bytes_survive:
             assert listed, (
                 "a superseded row that still holds its bytes is a real "
@@ -11160,7 +11160,7 @@ class TestGateUltraReviewFixes:
              "consumedFp": oauth.credential_fingerprint(self._OLD),
              "fingerprint": oauth.credential_fingerprint(self._NEW)},
         )
-        assert list(s._store._read_stash_manifest()) == [row_a, row_b], (
+        assert list(s._store._read_stash_manifest_ex()[0]) == [row_a, row_b], (
             "premise: the dead row is classified before the adoptable one"
         )
 
@@ -11187,7 +11187,7 @@ class TestGateUltraReviewFixes:
             "an unreadable dead row aborted the scan before the adoptable "
             "row behind it was reached"
         )
-        assert row_a in s._store._read_stash_manifest(), (
+        assert row_a in s._store._read_stash_manifest_ex()[0], (
             "a row whose bytes are merely unreadable still holds a real "
             "credential; only a byte-less one is free to retire"
         )

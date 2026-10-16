@@ -1635,9 +1635,6 @@ class CredentialStore:
             return True
         return False
 
-    def _read_stash_manifest(self) -> dict:
-        return self._read_stash_manifest_ex()[0]
-
     def _write_stash_manifest(self, entries: dict) -> None:
         from claude_swap.settings import atomic_write_json
 
@@ -1645,7 +1642,7 @@ class CredentialStore:
         path = self._stash_manifest_path()
         # A corrupt manifest read as {} must not be silently clobbered — the
         # rows are classification evidence. Set it aside (the entry *bytes*
-        # are separate files and keep being listed as orphans either way).
+        # are separate files and stay on disk either way).
         # Failing closed instead would brick switching: a stash-write failure
         # aborts the switch by design.
         if path.exists():

@@ -11,7 +11,7 @@ from __future__ import annotations
 
 def unclaimed_entries(store) -> dict[str, dict]:
     """Manifest rows by id, plus orphaned entry files (no metadata)."""
-    entries = dict(store._read_stash_manifest())
+    entries = dict(store._read_stash_manifest_ex()[0])
     for path in store._host.credentials_dir.glob(".unclaimed-*.enc"):
         entry_id = path.name[len(".unclaimed-"):-len(".enc")]
         entries.setdefault(entry_id, {"createdAt": None})
