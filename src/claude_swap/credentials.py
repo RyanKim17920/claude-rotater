@@ -387,7 +387,7 @@ class CredentialStore:
         # out, the Keychain recovers and the cooldown lapses (verified
         # `unreadable is False`), then a write pins and it is True forever,
         # with `degraded=True`, "keychain unavailable" on every usage pass, and
-        # `cswap add` refused.
+        # adding an account refused.
         #
         # Cleared unconditionally rather than only when the cache was None: the
         # cache is a ROUTING decision (which backend to use, deliberately
@@ -1519,7 +1519,7 @@ class CredentialStore:
     # may be the only live copy of some account's refresh token). Entries are
     # append-only base64 files with a JSON manifest carrying the
     # classification evidence; nothing consumes them automatically — recovery
-    # is the documented /login + `cswap add [--slot N]`, and these files are
+    # is logging in again from the TUI, and these files are
     # forensic material for maintainers.
     #
     # Deliberately 0600 files on every platform, unlike the slot backups and

@@ -710,7 +710,7 @@ class SessionManager:
         # persists via fingerprint CAS; _bootstrap then reads the rotated
         # backup. Failure is non-fatal: the stored token may still be
         # valid, and claude refreshes on its own at runtime. Setup-token
-        # accounts (--add-token) have no refresh token by design — skip
+        # accounts (added as a token) have no refresh token by design — skip
         # silently instead of warning about a flow that can't happen.
         pre_creds = self.switcher.read_account_credentials(account_num, email)
         if pre_creds and self._has_refresh_token(pre_creds):
@@ -762,8 +762,8 @@ class SessionManager:
                     f"neither be stored nor stashed, so the backup holds a "
                     f"spent grant and the successor is gone. Fix the storage "
                     f"failure first; retrying before that spends nothing but "
-                    f"earns a strike. If the slot strikes, log in again and "
-                    f"re-add it: cswap --add-account --slot {account_num}"
+                    f"earns a strike. If the slot strikes, log in to it "
+                    f"again: open cswap and press l."
                 )
             if outcome.error is not None:
                 warning(
@@ -836,8 +836,8 @@ class SessionManager:
                 self._cleanup_failed_session(session_dir)
                 raise SessionError(
                     f"Session profile for Account-{account_num} ({email}) failed "
-                    f"validation. Log in with that account and re-add it: "
-                    f"cswap --add-account --slot {account_num}"
+                    f"validation. Log in to that account again: open cswap "
+                    f"and press l."
                 )
         # Lock released here, before any exec.
 
@@ -888,7 +888,7 @@ class SessionManager:
                 )
             raise SessionError(
                 f"Account-{account_num} has no stored credentials. "
-                f"Re-add with: cswap --add-account --slot {account_num}"
+                "Log in to it again: open cswap and press l."
             )
 
         # The pre-lock refresh (see run(): the consume gate must not run
@@ -905,7 +905,7 @@ class SessionManager:
         if not oauth_account:
             raise SessionError(
                 f"Account-{account_num} has no stored config backup. "
-                f"Re-add with: cswap --add-account --slot {account_num}"
+                "Log in to it again: open cswap and press l."
             )
 
         session_dir.mkdir(parents=True, exist_ok=True)

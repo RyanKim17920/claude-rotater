@@ -27,8 +27,8 @@ _ALIAS_RE = re.compile(r"^[a-z0-9_.-]+$")
 def normalize_alias(name: str) -> str:
     """Lowercase and validate a proposed alias; raise ValueError if invalid.
 
-    Shared by the CLI (``cswap alias``), ``cswap add --alias``, and import
-    validation so every path enforces identical rules.
+    Used wherever an alias is accepted (``add_account(alias=...)``) so every
+    path enforces identical rules.
     """
     normalized = name.strip().lower()
     if not normalized:

@@ -23,8 +23,8 @@ than ``STALE_STAGE_S`` (never a younger one: it may be a concurrent login).
 
 The interactive step (2-3) and the capture (4) are separate calls so the TUI
 can run the first with the app suspended and the second in a worker thread.
-There is deliberately no CLI verb: in a shell, ``claude /login`` followed by
-``cswap add`` already does this.
+There is deliberately no CLI verb: the TUI's log-in key (l) is the entry
+point.
 """
 
 from __future__ import annotations

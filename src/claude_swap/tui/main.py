@@ -142,7 +142,7 @@ def status_text(
 # Account rows
 # ---------------------------------------------------------------------------
 
-# The CLI's note names `cswap add`; in the TUI the fix is one key away.
+# Shorter than the headless note: in the TUI the fix is one key away.
 RELOGIN_ROW_LABEL = "re-login needed — press l to log in again"
 _CONFIDENCE_GLYPH = {"high": " ", "medium": "~", "low": "?"}
 _PREFIX_W = 4  # "▸ 1 "
