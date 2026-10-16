@@ -6,119 +6,78 @@ Screen {
     background: $background;
 }
 
-/* -- accounts panel (the always-visible monitor) --------------------------- */
+/* -- main page ---------------------------------------------------------------- */
 
-#accounts-panel {
-    height: auto;
-    padding: 1 3;
-    background: $background;
-    border-bottom: solid $panel;
-}
-
-#auto-active-panel {
-    height: auto;
-    padding: 1 3 0 3;
-    background: $background;
-}
-
-/* -- dashboard menu ----------------------------------------------------------- */
-
-#menu-title {
+#status {
     height: 1;
-    margin-top: 1;
-    padding: 0 3;
-    color: $secondary;
+    padding: 0 1;
+    background: $surface;
 }
 
-#menu, #accounts {
+#columns {
+    height: 1;
+    padding: 0 1;
+    margin-top: 1;
+}
+
+#accounts {
+    height: auto;
+    max-height: 12;
     background: $background;
-    padding: 1 2 0 1;
+    padding: 0 1 0 0;
     scrollbar-size-vertical: 1;
 }
 
-#menu:focus, #accounts:focus {
+#accounts:focus {
     background-tint: $foreground 0%;
 }
 
-#menu ListItem, #accounts ListItem {
-    background: transparent;
-    padding: 0 1;
-    border-left: thick $background;
-}
-
 #accounts ListItem {
-    margin-bottom: 1;
+    background: transparent;
+    padding: 0 0 0 1;
 }
 
-#menu ListItem.-highlight,
-#menu:focus ListItem.-highlight,
 #accounts ListItem.-highlight,
 #accounts:focus ListItem.-highlight {
     color: $foreground;
     background: $surface;
     text-style: none;
-    border-left: thick $primary;
 }
 
-#accounts ListItem.flash {
-    background: $panel;
-}
-
-MenuItem Static { color: $foreground; }
-MenuItem Static.menu-item-muted { color: $secondary; }
-
-/* -- switch / watch screens --------------------------------------------------- */
-
-#list-title {
-    height: 1;
+#detail {
+    height: 1fr;
+    min-height: 3;
+    max-height: 15;
+    padding: 0 1;
     margin-top: 1;
-    padding: 0 3;
-    color: $secondary;
-}
-
-/* -- auto screen ---------------------------------------------------------- */
-
-#auto-top {
-    height: auto;
-    background: $background;
-    padding: 1 2;
-}
-
-#auto-title-row {
-    height: 1;
-    margin-bottom: 1;
-}
-
-#mode-badge {
-    width: auto;
-    text-style: bold;
-}
-
-#mode-badge.dry {
-    background: $panel;
-    color: $warning;
-}
-
-#mode-badge.live {
-    background: $primary;
-    color: $background;
-}
-
-#auto-summary {
-    width: 1fr;
-    color: $secondary;
-    padding-left: 2;
-}
-
-#candidates {
-    height: auto;
 }
 
 #event-log {
+    height: 3;
     background: $background;
-    border-top: solid $panel;
     padding: 0 1;
-    scrollbar-size-vertical: 1;
+    scrollbar-size-vertical: 0;
+}
+
+#actions {
+    height: 1;
+    padding: 0 1;
+}
+
+#actions Button {
+    border: none;
+    height: 1;
+    min-width: 0;
+    width: auto;
+    padding: 0;  /* Button's own line-pad leaves one cell each side */
+    margin-right: 1;
+    background: $panel;
+    color: $foreground;
+    text-style: none;
+}
+
+#actions Button:hover {
+    background: $panel-lighten-1;
 }
 
 /* -- modals ----------------------------------------------------------------- */

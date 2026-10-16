@@ -19,12 +19,15 @@ from pathlib import Path
 
 import pytest
 
-from claude_swap.autoswitch import NoSwitchEvent, SwitchEvent
+from claude_swap.autoswitch import NoSwitchEvent, PollEvent, SleepEvent, SwitchEvent
 from claude_swap.json_output import USAGE_API_KEY, USAGE_TOKEN_EXPIRED
 from claude_swap.models import AccountSnapshot, AccountsSnapshot
 from claude_swap.switcher import ClaudeAccountSwitcher
 from claude_swap.tui import data as tui_data
 from claude_swap.usage_store import UsageEntry
+
+sys.path.insert(0, str(Path(__file__).parent))
+from _fake_history import FakeHistory, linear_points  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -238,6 +241,59 @@ class BlockingSnapshotSwitcher(FakeSwitcher):
         )
 
 
+class FakeEngine:
+    """Stands in for AutoSwitchEngine: records construction, blocks until stop.
+
+    Emits one NoSwitchEvent at start (like a real first tick in cooldown);
+    tests push more through :meth:`emit`. ``crash`` makes run_loop raise.
+    """
+
+    instances: list["FakeEngine"] = []
+    crash = False
+
+    def __init__(self, switcher, settings, on_event, **kwargs):
+        self.switcher = switcher
+        self.settings = settings
+        self.on_event = on_event
+        self.kwargs = kwargs
+        self.stopped = False
+        self.applied_thresholds: list[float] = []
+        self.wakes = 0
+        self._stop = threading.Event()
+        FakeEngine.instances.append(self)
+
+    def run_loop(self) -> int:
+        if FakeEngine.crash:
+            raise RuntimeError("engine exploded")
+        self.on_event(NoSwitchEvent(reason="cooldown"))
+        self._stop.wait(30)
+        return 0
+
+    def emit(self, event) -> None:
+        self.on_event(event)
+
+    def stop(self) -> None:
+        self.stopped = True
+        self._stop.set()
+
+    def apply_threshold(self, threshold: float) -> None:
+        self.settings = dataclasses.replace(self.settings, threshold=threshold)
+        self.applied_thresholds.append(threshold)
+
+    def wake(self) -> None:
+        self.wakes += 1
+
+
+@pytest.fixture(autouse=True)
+def fake_engine(monkeypatch):
+    """Every app in this module hosts a FakeEngine: a real engine would
+    fetch and switch against the FakeSwitcher on its own schedule."""
+    FakeEngine.instances = []
+    FakeEngine.crash = False
+    monkeypatch.setattr("claude_swap.tui.app.default_engine_factory", FakeEngine)
+    return FakeEngine
+
+
 def make_app(fake: FakeSwitcher):
     from claude_swap.tui.app import CswapApp
 
@@ -247,8 +303,8 @@ def make_app(fake: FakeSwitcher):
 async def settle(pilot) -> None:
     """Let thread workers finish and their UI updates apply.
 
-    The (fake) auto engine worker deliberately runs until its screen stops
-    it, so waiting on it would block; wait on everything else.
+    The (fake) auto engine worker deliberately runs until the app stops it,
+    so waiting on it would block; wait on everything else.
     """
     app = pilot.app
     pending = [w for w in app.workers if w.group != "engine"]
@@ -260,22 +316,6 @@ async def settle(pilot) -> None:
 
 async def wait_event(event: threading.Event, timeout: float = 1.0) -> None:
     assert await asyncio.to_thread(event.wait, timeout)
-
-
-async def menu_select(pilot, action_id: str) -> None:
-    """Drive the dashboard menu: highlight the entry by id, press Enter."""
-    from textual.widgets import ListView
-
-    from claude_swap.tui.widgets import MenuItem
-
-    menu = pilot.app.screen.query_one("#menu", ListView)
-    items = list(menu.query(MenuItem))
-    menu.index = next(
-        i for i, item in enumerate(items) if item.action_id == action_id
-    )
-    await pilot.pause()
-    await pilot.press("enter")
-    await pilot.pause()
 
 
 # ---------------------------------------------------------------------------
@@ -625,42 +665,216 @@ class TestUsageRows:
         assert " · " not in narrow
 
 
-class TestMiniAccountText:
-    def test_seven_day_ahead_of_pace_marker(self):
-        from claude_swap.tui.widgets import mini_account_text
+class TestAccountRowText:
+    """The one-line account row and the column math it shares with the header."""
+
+    def _layout(self, width: int = 120, windows=("5h", "7d")):
+        from claude_swap.tui.main import RowLayout
+
+        return RowLayout.for_width(width, windows)
+
+    def _row(self, acc, est=None, *, width=120, threshold=90.0, now=None, models=()):
+        from claude_swap.tui.main import account_row_text
+
+        return account_row_text(
+            acc,
+            est,
+            self._layout(width),
+            now=now if now is not None else time.time(),
+            threshold=threshold,
+            models=models,
+        ).plain
+
+    def test_active_marker_and_pcts(self):
+        row = self._row(make_account(1, active=True, entry=make_entry(62.0, 31.0)))
+        assert row.startswith("▸ 1 ")
+        assert "62%" in row and "31%" in row
+        assert "━" in row  # wide layout carries bars
+
+    def test_inactive_has_no_marker(self):
+        row = self._row(make_account(2, entry=make_entry(12.0, 44.0)))
+        assert row.startswith("  2 ")
+
+    def test_disabled_tag_replaces_org_tag(self):
+        row = self._row(make_account(3, disabled=True))
+        assert "disabled" in row and "[personal]" not in row
+
+    def test_absent_window_is_a_dot_not_invented(self):
+        row = self._row(make_account(1, entry=make_entry(pct5=92.0, pct7=None)))
+        assert "92%" in row
+        assert "·" in row
+
+    def test_sentinel_replaces_usage(self):
+        row = self._row(make_account(1, entry=make_entry(sentinel=USAGE_TOKEN_EXPIRED)))
+        assert tui_data.sentinel_label(USAGE_TOKEN_EXPIRED) in row
+        assert "%" not in row
+
+    def test_no_usage_says_unknown(self):
+        row = self._row(make_account(1, entry=UsageEntry()))
+        assert "usage unknown" in row
+
+    def test_no_estimate_shows_dash_eta_and_burn(self):
+        row = self._row(make_account(1, entry=make_entry(40.0, 10.0)))
+        assert "—" in row
+        assert "%/h" not in row
+
+    def test_eta_burn_and_projection_from_estimate(self):
+        from claude_swap.tui._wp1_stub import WindowEstimate, AccountEstimate
 
         now = time.time()
-        entry = UsageEntry(
-            last_good={"seven_day": {"pct": 50.0, "resets_at": _iso_in(86400 * 6)}},
-            fetched_at=now,
-            age_s=0.0,
-        )
-        acc = make_account(1, entry=entry)
-        assert "(ahead)" in mini_account_text(acc, now).plain
+        # measured 60% 30 min ago at 10%/h: 65% projected now, 90% in 2.5h
+        win = WindowEstimate("5h", 60.0, now - 1800, now + 4 * 3600, 10.0, "medium", ())
+        est = AccountEstimate({"5h": win}, win, None, None, "medium")
+        acc = make_account(1, active=True, entry=make_entry(60.0, 10.0))
+        row = self._row(acc, est, now=now)
+        assert "→65%" in row
+        assert "+10.0%/h" in row
+        assert "2h 30m ~" in row
 
-    def test_five_hour_never_shows_pace_marker(self):
-        from claude_swap.tui.widgets import mini_account_text
-
-        now = time.time()
-        entry = UsageEntry(
-            last_good={"five_hour": {"pct": 90.0, "resets_at": _iso_in(3600 * 4)}},
-            fetched_at=now,
-            age_s=0.0,
-        )
-        acc = make_account(1, entry=entry)
-        assert "pace" not in mini_account_text(acc, now).plain
-
-    def test_no_pace_marker_without_fetched_at(self):
-        from claude_swap.tui.widgets import mini_account_text
+    def test_projection_hidden_below_one_point(self):
+        from claude_swap.tui._wp1_stub import WindowEstimate, AccountEstimate
 
         now = time.time()
-        entry = UsageEntry(
-            last_good={"seven_day": {"pct": 50.0, "resets_at": _iso_in(86400 * 6)}},
-            fetched_at=None,
-            age_s=None,
+        win = WindowEstimate("5h", 60.0, now - 60, now + 3600, 10.0, "high", ())
+        est = AccountEstimate({"5h": win}, win, None, None, "high")
+        row = self._row(make_account(1, entry=make_entry(60.0, 10.0)), est, now=now)
+        assert "→" not in row
+
+    def test_narrow_layout_drops_bars_keeps_name(self):
+        acc = make_account(1, active=True, entry=make_entry(62.0, 31.0), email="me@x.com")
+        row = self._row(acc, width=70)
+        assert "me@x.com" in row and "62%" in row
+        assert "━" not in row
+        assert len(row) <= 70
+
+    def test_scoped_window_column(self):
+        entry = make_entry(10.0, 20.0, scoped=[("Fable", 55.0)])
+        from claude_swap.tui.main import RowLayout, account_row_text
+
+        layout = RowLayout.for_width(140, ("5h", "7d", "Fable"))
+        row = account_row_text(
+            make_account(1, entry=entry), None, layout,
+            now=time.time(), threshold=90.0, models=("Fable",),
+        ).plain
+        assert "55%" in row
+
+    def test_reset_column_uses_binding_window(self):
+        row = self._row(make_account(1, entry=make_entry(80.0, 10.0)))
+        assert row.rstrip().endswith(("1h 59m", "2h"))
+
+
+class TestRowLayout:
+    def test_wide_gets_full_bars(self):
+        from claude_swap.tui.main import RowLayout
+
+        layout = RowLayout.for_width(120, ("5h", "7d"))
+        assert layout.bar_w == 10 and layout.show_burn and layout.show_reset
+
+    def test_degrades_in_order(self):
+        from claude_swap.tui.main import RowLayout
+
+        widths = [RowLayout.for_width(w, ("5h", "7d")) for w in (120, 95, 80, 66, 50)]
+        bars = [lay.bar_w for lay in widths]
+        assert bars == sorted(bars, reverse=True)
+        assert not widths[-1].show_burn and not widths[-1].show_reset
+
+    def test_header_matches_row_columns(self):
+        from claude_swap.tui.main import RowLayout, account_row_text, header_text
+
+        layout = RowLayout.for_width(120, ("5h", "7d"))
+        header = header_text(layout, threshold=90.0).plain
+        row = account_row_text(
+            make_account(1, entry=make_entry(62.0, 31.0)), None, layout,
+            now=time.time(), threshold=90.0,
+        ).plain
+        col = header.index("7d")
+        # the 7d bar starts exactly under its header label
+        assert row[col] in "━╸─┃"
+        assert "ETA→90%" in header
+
+
+class TestStatusText:
+    def _status(self, **kw):
+        from claude_swap.tui.main import AutoStatus
+
+        return AutoStatus(**kw)
+
+    def _text(self, status, now=None, width=120):
+        from claude_swap.tui.main import status_text
+
+        return status_text(status, now=now or time.time(), width=width).plain
+
+    def test_running_threshold_and_next_check(self):
+        now = time.time()
+        text = self._text(
+            self._status(running=True, threshold=90.0, next_check_at=now + 80), now
         )
-        acc = make_account(1, entry=entry)
-        assert "pace" not in mini_account_text(acc, now).plain
+        assert "AUTO ●" in text and "thr 90%" in text and "next 1m" in text
+
+    def test_stopped_engine_is_hollow(self):
+        assert "AUTO ○" in self._text(self._status(running=False))
+
+    def test_cooldown_counts_down_then_disappears(self):
+        now = time.time()
+        status = self._status(running=True, cooldown_s=300, last_switch_at=now - 60)
+        assert "cooldown 4m" in self._text(status, now)
+        assert "cooldown" not in self._text(status, now + 400)
+
+    def test_last_switch_right_aligned(self):
+        now = time.time()
+        status = self._status(running=True, last_switch_at=now, last_switch="2 → 1")
+        text = self._text(status, now, width=100)
+        assert text.rstrip().endswith("switched 2 → 1")
+        assert len(text) == 100
+
+    def test_outcome_shown_without_switch(self):
+        text = self._text(self._status(running=True, last_outcome="no switch: cooldown"))
+        assert "no switch: cooldown" in text
+
+
+class TestEtaCell:
+    def _est(self, conf, rate=10.0, last=50.0, resets_in=5 * 3600):
+        from claude_swap.tui._wp1_stub import AccountEstimate, WindowEstimate
+
+        now = time.time()
+        win = WindowEstimate("5h", last, now, now + resets_in, rate, conf, ())
+        return AccountEstimate({"5h": win}, win, None, None, conf), now
+
+    @pytest.mark.parametrize("conf,glyph", [("high", ""), ("medium", "~"), ("low", "?")])
+    def test_confidence_glyph(self, conf, glyph):
+        from claude_swap.tui.main import eta_cell
+
+        est, now = self._est(conf)
+        text, _role = eta_cell(est, 90.0, now)
+        assert text.startswith("4h") or text.startswith("3h")
+        assert text.endswith(glyph) if glyph else text[-1].isalnum()
+
+    def test_none_confidence_is_dash(self):
+        from claude_swap.tui.main import eta_cell
+
+        est, now = self._est("none", rate=None)
+        assert eta_cell(est, 90.0, now) == ("—", "muted")
+
+    def test_over_threshold_is_now(self):
+        from claude_swap.tui.main import eta_cell
+
+        est, now = self._est("high", last=95.0)
+        assert eta_cell(est, 90.0, now)[0] == "now"
+
+    def test_crossing_after_reset(self):
+        from claude_swap.tui.main import eta_cell
+
+        est, now = self._est("high", rate=1.0, resets_in=600)
+        assert eta_cell(est, 90.0, now)[0] == "≥reset"
+
+    def test_burn_cell(self):
+        from claude_swap.tui.main import burn_cell
+
+        est, _now = self._est("high", rate=0.01)
+        assert burn_cell(est) == "0"
+        assert burn_cell(None) == "—"
+        est, _now = self._est("high", rate=8.0)
+        assert burn_cell(est) == "+8.0%/h"
 
 
 class TestRunAction:
@@ -698,838 +912,462 @@ class TestRunAction:
         assert tui_data.run_action(fn).first_line == "Bold headline"
 
 
+
 # ---------------------------------------------------------------------------
 # Pilot tests (async)
 # ---------------------------------------------------------------------------
-
-
-@pytest.mark.asyncio
-class TestDashboard:
-    async def test_panel_shows_active_full_and_others_mini(self, tmp_path):
-        fake = FakeSwitcher(
-            [
-                make_account(1, active=True, entry=make_entry(47.0, 63.0)),
-                make_account(2, entry=make_entry(92.0, 71.0)),
-            ],
-            tmp_path,
-        )
-        app = make_app(fake)
-        async with app.run_test(size=(100, 32)) as pilot:
-            await settle(pilot)
-            from claude_swap.tui.widgets import AccountsPanel
-
-            panel = app.screen.query_one(AccountsPanel).render().plain
-            assert "user1@example.com" in panel and "● active" in panel
-            assert "resets" in panel  # the active card is the full one
-            assert "user2@example.com" in panel and "92%" in panel
-            # the mini line has no bars — bar glyphs only in the active card
-            mini_part = panel.split("user2@example.com", 1)[1]
-            assert "━" not in mini_part
-
-    async def test_disabled_marker_on_active_card_and_mini(self, tmp_path):
-        # A disabled account is still shown; it's just annotated so the user
-        # can see it's held out of auto-rotation — on the full card when it's
-        # the active login, and on the one-line form otherwise.
-        fake = FakeSwitcher(
-            [
-                make_account(1, active=True, disabled=True),
-                make_account(2, disabled=True),
-            ],
-            tmp_path,
-        )
-        app = make_app(fake)
-        async with app.run_test(size=(100, 32)) as pilot:
-            await settle(pilot)
-            from claude_swap.tui.widgets import AccountsPanel
-
-            panel = app.screen.query_one(AccountsPanel).render().plain
-            assert "● active" in panel  # still the active card
-            # both the active card and the mini row carry the marker
-            assert panel.count("(disabled)") == 2
-
-    async def test_active_card_skips_absent_window_and_shows_scoped(self, tmp_path):
-        fake = FakeSwitcher(
-            [
-                make_account(
-                    1,
-                    active=True,
-                    entry=make_entry(pct5=47.0, pct7=None, scoped=[("Fable", 62.0)]),
-                )
-            ],
-            tmp_path,
-        )
-        app = make_app(fake)
-        async with app.run_test(size=(100, 32)) as pilot:
-            await settle(pilot)
-            from claude_swap.tui.widgets import AccountsPanel
-
-            panel = app.screen.query_one(AccountsPanel).render().plain
-            assert "5h" in panel
-            assert "7d" not in panel  # annual plan: no invented row
-            assert "usage unknown" not in panel
-            assert "Fable" in panel and "62%" in panel
-
-    async def test_mini_line_skips_absent_window(self, tmp_path):
-        fake = FakeSwitcher(
-            [
-                make_account(1, active=True),
-                make_account(2, entry=make_entry(pct5=92.0, pct7=None)),
-            ],
-            tmp_path,
-        )
-        app = make_app(fake)
-        async with app.run_test(size=(100, 32)) as pilot:
-            await settle(pilot)
-            from claude_swap.tui.widgets import AccountsPanel
-
-            panel = app.screen.query_one(AccountsPanel).render().plain
-            mini_part = panel.split("user2@example.com", 1)[1]
-            assert "5h 92%" in mini_part
-            assert "7d" not in mini_part
-
-    async def test_menu_is_default_navigation_and_nests(self, tmp_path):
-        fake = FakeSwitcher([make_account(1, active=True)], tmp_path)
-        app = make_app(fake)
-        async with app.run_test(size=(100, 32)) as pilot:
-            await settle(pilot)
-            from textual.widgets import ListView
-
-            from claude_swap.tui.widgets import MenuItem
-
-            menu = app.screen.query_one("#menu", ListView)
-            ids = [item.action_id for item in menu.query(MenuItem)]
-            assert ids == [
-                "switch",
-                "watch",
-                "auto",
-                "add-menu",
-                "disable-menu",
-                "remove-menu",
-                "theme-menu",
-                "quit",
-            ]
-            # nest into Add (index 3), then back out with escape
-            await pilot.press("down", "down", "down", "enter")
-            await pilot.pause()
-            ids = [item.action_id for item in menu.query(MenuItem)]
-            assert ids == ["add-login", "add-token", "back"]
-            await pilot.press("escape")
-            await pilot.pause()
-            ids = [item.action_id for item in menu.query(MenuItem)]
-            assert ids[0] == "switch"
-
-    async def test_remove_menu_shows_alias_before_email(self, tmp_path):
-        fake = FakeSwitcher(
-            [
-                make_account(1, active=True, alias="dev"),
-                make_account(2, email="plain@example.com"),
-            ],
-            tmp_path,
-        )
-        app = make_app(fake)
-        async with app.run_test(size=(100, 32)) as pilot:
-            await settle(pilot)
-            from textual.widgets import ListView
-
-            from claude_swap.tui.widgets import MenuItem
-
-            await menu_select(pilot, "remove-menu")
-            from textual.widgets import Static
-
-            menu = app.screen.query_one("#menu", ListView)
-            labels = [
-                item.query_one(Static).render().plain for item in menu.query(MenuItem)
-            ]
-            assert any("dev (user1@example.com)" in label for label in labels)
-            assert any("plain@example.com" in label for label in labels)
-            assert not any("(plain@example.com)" in label for label in labels)
-
-    async def test_remove_menu_label_renders_bracket_tag_literally(self, tmp_path):
-        # The remove menu labels each account with `[{display_tag}]`, and an
-        # org name of "red" makes that literally "[red]" — a valid Rich
-        # color markup tag. MenuItem must render it as text, not consume it
-        # as styling (which would silently drop the tag from the label).
-        fake = FakeSwitcher(
-            [dataclasses.replace(make_account(1, active=True), org_name="red")],
-            tmp_path,
-        )
-        app = make_app(fake)
-        async with app.run_test(size=(100, 32)) as pilot:
-            await settle(pilot)
-            from textual.widgets import ListView, Static
-
-            from claude_swap.tui.widgets import MenuItem
-
-            await menu_select(pilot, "remove-menu")
-            menu = app.screen.query_one("#menu", ListView)
-            labels = [
-                item.query_one(Static).render().plain for item in menu.query(MenuItem)
-            ]
-            assert any("[red]" in label for label in labels)
-
-    async def test_back_menu_entry_pops_submenu(self, tmp_path):
-        fake = FakeSwitcher([make_account(1, active=True)], tmp_path)
-        app = make_app(fake)
-        async with app.run_test(size=(100, 32)) as pilot:
-            await settle(pilot)
-            from textual.widgets import ListView
-
-            from claude_swap.tui.widgets import MenuItem
-
-            await menu_select(pilot, "add-menu")
-            await menu_select(pilot, "back")
-            menu = app.screen.query_one("#menu", ListView)
-            ids = [item.action_id for item in menu.query(MenuItem)]
-            assert ids[0] == "switch"
-
-    async def test_vim_keys_move_menu_cursor(self, tmp_path):
-        fake = FakeSwitcher([make_account(1, active=True)], tmp_path)
-        app = make_app(fake)
-        async with app.run_test(size=(100, 32)) as pilot:
-            await settle(pilot)
-            from textual.widgets import ListView
-
-            menu = app.screen.query_one("#menu", ListView)
-            assert menu.index == 0
-            await pilot.press("j")
-            assert menu.index == 1
-            await pilot.press("k")
-            assert menu.index == 0
-
-    async def test_s_opens_switch_screen_and_enter_switches(self, tmp_path):
-        fake = FakeSwitcher(
-            [make_account(1, active=True), make_account(2)], tmp_path
-        )
-        app = make_app(fake)
-        async with app.run_test(size=(100, 32)) as pilot:
-            await settle(pilot)
-            await pilot.press("s")
-            await pilot.pause()
-            from textual.widgets import ListView
-
-            from claude_swap.tui.dashboard import DashboardScreen, SwitchScreen
-            from claude_swap.tui.widgets import AccountItem
-
-            assert isinstance(app.screen, SwitchScreen)
-            listview = app.screen.query_one("#accounts", ListView)
-            items = list(listview.query(AccountItem))
-            assert [item.number for item in items] == ["1", "2"]
-            assert listview.index == 0  # starts on the active account
-            await pilot.press("down", "enter")
-            await settle(pilot)
-            assert ("switch_to", "2") in fake.calls
-            assert isinstance(app.screen, DashboardScreen)  # popped back
-            assert app.snapshot.active_number == "2"
-
-    async def test_switch_screen_escape_backs_out(self, tmp_path):
-        fake = FakeSwitcher(
-            [make_account(1, active=True), make_account(2)], tmp_path
-        )
-        app = make_app(fake)
-        async with app.run_test(size=(100, 32)) as pilot:
-            await settle(pilot)
-            await pilot.press("enter")  # menu: Switch account…
-            await pilot.pause()
-            from claude_swap.tui.dashboard import DashboardScreen, SwitchScreen
-
-            assert isinstance(app.screen, SwitchScreen)
-            await pilot.press("escape")
-            await pilot.pause()
-            assert isinstance(app.screen, DashboardScreen)
-            assert not any(call[0] == "switch_to" for call in fake.calls)
-
-    async def test_remove_via_menu_confirms_then_removes(self, tmp_path):
-        fake = FakeSwitcher(
-            [make_account(1, active=True), make_account(2)], tmp_path
-        )
-        app = make_app(fake)
-        async with app.run_test(size=(100, 32)) as pilot:
-            await settle(pilot)
-            await menu_select(pilot, "remove-menu")
-            await menu_select(pilot, "remove:2")
-            from claude_swap.tui.modals import ConfirmModal
-
-            assert isinstance(app.screen, ConfirmModal)
-            await pilot.press("y")
-            await settle(pilot)
-            assert ("remove", "2", True) in fake.calls
-
-    async def test_remove_via_menu_cancel_is_safe(self, tmp_path):
-        fake = FakeSwitcher(
-            [make_account(1, active=True), make_account(2)], tmp_path
-        )
-        app = make_app(fake)
-        async with app.run_test(size=(100, 32)) as pilot:
-            await settle(pilot)
-            await menu_select(pilot, "remove-menu")
-            await menu_select(pilot, "remove:1")
-            await pilot.press("n")
-            await settle(pilot)
-            assert not any(call[0] == "remove" for call in fake.calls)
-
-    async def test_disable_via_menu_toggles_without_confirm(self, tmp_path):
-        fake = FakeSwitcher(
-            [make_account(1, active=True), make_account(2)], tmp_path
-        )
-        app = make_app(fake)
-        async with app.run_test(size=(100, 32)) as pilot:
-            await settle(pilot)
-            await menu_select(pilot, "disable-menu")
-            await menu_select(pilot, "disable:2")  # no modal — direct action
-            await settle(pilot)
-            assert ("set_disabled", "2", True) in fake.calls
-            # the submenu pops back to root after the toggle
-            from textual.widgets import ListView
-
-            from claude_swap.tui.widgets import MenuItem
-
-            menu = app.screen.query_one("#menu", ListView)
-            ids = [item.action_id for item in menu.query(MenuItem)]
-            assert ids[0] == "switch"
-
-    async def test_disable_menu_row_reflects_state_and_re_enables(self, tmp_path):
-        fake = FakeSwitcher(
-            [make_account(1, active=True), make_account(2, disabled=True)],
-            tmp_path,
-        )
-        app = make_app(fake)
-        async with app.run_test(size=(100, 32)) as pilot:
-            await settle(pilot)
-            await menu_select(pilot, "disable-menu")
-            from textual.widgets import ListView, Static
-
-            from claude_swap.tui.widgets import MenuItem
-
-            menu = app.screen.query_one("#menu", ListView)
-            labels = [
-                item.query_one(Static).render().plain for item in menu.query(MenuItem)
-            ]
-            # the already-disabled account offers to enable; the active one to disable
-            assert any("(disabled)" in label and "enable" in label for label in labels)
-            assert any("disable" in label and "(disabled)" not in label for label in labels)
-            # selecting the disabled account flips it back on
-            await menu_select(pilot, "disable:2")
-            await settle(pilot)
-            assert ("set_disabled", "2", False) in fake.calls
-
-    async def test_modal_arrow_keys_choose_button(self, tmp_path):
-        fake = FakeSwitcher(
-            [make_account(1, active=True), make_account(2)], tmp_path
-        )
-        app = make_app(fake)
-        async with app.run_test(size=(100, 32)) as pilot:
-            await settle(pilot)
-            await menu_select(pilot, "remove-menu")
-            await menu_select(pilot, "remove:2")  # → confirm modal
-            # focus starts on the confirm button; → moves to Cancel, enter presses it
-            await pilot.press("right", "enter")
-            await settle(pilot)
-            assert not any(call[0] == "remove" for call in fake.calls)
-            # reopen (menu index still on account 2), ← back to confirm, press it
-            await pilot.press("enter")
-            await pilot.pause()
-            await pilot.press("right", "left", "enter")
-            await settle(pilot)
-            assert ("remove", "2", True) in fake.calls
-
-    async def test_full_refresh_binding(self, tmp_path):
-        fake = FakeSwitcher([make_account(1, active=True)], tmp_path)
-        app = make_app(fake)
-        async with app.run_test(size=(100, 32)) as pilot:
-            await settle(pilot)
-            await pilot.press("f")
-            await settle(pilot)
-            assert fake.fetch_sets[-1] is None  # full on-demand pass
-
-    async def test_add_token_via_menu_passes_assume_yes(self, tmp_path):
-        fake = FakeSwitcher([make_account(1, active=True)], tmp_path)
-        app = make_app(fake)
-        async with app.run_test(size=(100, 40)) as pilot:
-            await settle(pilot)
-            await menu_select(pilot, "add-menu")
-            await menu_select(pilot, "add-token")
-            from textual.widgets import Input
-
-            app.screen.query_one("#token", Input).value = "sk-ant-oat01-test"
-            app.screen.query_one("#slot", Input).value = "5"
-            await pilot.click("#add")
-            await settle(pilot)
-            assert ("add_token", "sk-ant-oat01-test", None, 5, True) in fake.calls
-
-    async def test_add_token_occupied_slot_asks_first(self, tmp_path):
-        fake = FakeSwitcher(
-            [make_account(1, active=True), make_account(2)], tmp_path
-        )
-        app = make_app(fake)
-        async with app.run_test(size=(100, 40)) as pilot:
-            await settle(pilot)
-            await menu_select(pilot, "add-menu")
-            await menu_select(pilot, "add-token")
-            from textual.widgets import Input
-
-            app.screen.query_one("#token", Input).value = "sk-ant-oat01-test"
-            app.screen.query_one("#slot", Input).value = "2"
-            await pilot.click("#add")
-            await pilot.pause()
-            from claude_swap.tui.modals import ConfirmModal
-
-            assert isinstance(app.screen, ConfirmModal)  # overwrite confirm
-            await pilot.press("n")
-            await settle(pilot)
-            assert not any(call[0] == "add_token" for call in fake.calls)
-
-    async def test_empty_state_hint_in_panel(self, tmp_path):
-        fake = FakeSwitcher([], tmp_path)
-        app = make_app(fake)
-        async with app.run_test(size=(100, 32)) as pilot:
-            await settle(pilot)
-            from claude_swap.tui.widgets import AccountsPanel
-
-            panel = app.screen.query_one(AccountsPanel).render().plain
-            assert "No managed accounts yet" in panel
-
-    async def test_palette_is_disabled(self, tmp_path):
-        from claude_swap.tui.app import CswapApp
-
-        assert CswapApp.ENABLE_COMMAND_PALETTE is False
-
-
-@pytest.mark.asyncio
-class TestWatchScreen:
-    def _fake(self, tmp_path):
-        return FakeSwitcher(
-            [make_account(1, active=True), make_account(2)], tmp_path
-        )
-
-    async def test_w_opens_monitor_without_cursor(self, tmp_path):
-        app = make_app(self._fake(tmp_path))
-        async with app.run_test(size=(100, 40)) as pilot:
-            await settle(pilot)
-            await pilot.press("w")
-            await pilot.pause()
-            from textual.widgets import ListView
-
-            from claude_swap.tui.dashboard import WatchScreen
-            from claude_swap.tui.widgets import AccountItem
-
-            assert isinstance(app.screen, WatchScreen)
-            listview = app.screen.query_one("#accounts", ListView)
-            assert len(list(listview.query(AccountItem))) == 2  # full cards
-            assert listview.index is None  # monitor mode: no cursor
-            await pilot.press("enter")  # inert while just watching
-            await settle(pilot)
-            assert not any(call[0] == "switch_to" for call in fake_calls(app))
-
-    async def test_s_arms_selection_switch_stays_watching(self, tmp_path):
-        fake = self._fake(tmp_path)
-        app = make_app(fake)
-        async with app.run_test(size=(100, 40)) as pilot:
-            await settle(pilot)
-            await pilot.press("w")
-            await pilot.pause()
-            await pilot.press("s")
-            await pilot.pause()
-            from textual.widgets import ListView
-
-            from claude_swap.tui.dashboard import WatchScreen
-
-            listview = app.screen.query_one("#accounts", ListView)
-            assert listview.index == 0  # cursor armed, on the active account
-            await pilot.press("down", "enter")
-            await settle(pilot)
-            assert ("switch_to", "2") in fake.calls
-            assert isinstance(app.screen, WatchScreen)  # stayed watching
-            assert app.screen.query_one("#accounts", ListView).index is None
-            assert app.snapshot.active_number == "2"
-
-    async def test_escape_disarms_then_leaves(self, tmp_path):
-        fake = self._fake(tmp_path)
-        app = make_app(fake)
-        async with app.run_test(size=(100, 40)) as pilot:
-            await settle(pilot)
-            await pilot.press("w")
-            await pilot.pause()
-            await pilot.press("s")
-            await pilot.pause()
-            await pilot.press("escape")  # disarm selection only
-            await pilot.pause()
-            from textual.widgets import ListView
-
-            from claude_swap.tui.dashboard import DashboardScreen, WatchScreen
-
-            assert isinstance(app.screen, WatchScreen)
-            assert app.screen.query_one("#accounts", ListView).index is None
-            await pilot.press("escape")  # now leave
-            await pilot.pause()
-            assert isinstance(app.screen, DashboardScreen)
-            assert not any(call[0] == "switch_to" for call in fake.calls)
-
-    async def test_menu_watch_entry_opens_it(self, tmp_path):
-        app = make_app(self._fake(tmp_path))
-        async with app.run_test(size=(100, 40)) as pilot:
-            await settle(pilot)
-            await menu_select(pilot, "watch")
-            from claude_swap.tui.dashboard import WatchScreen
-
-            assert isinstance(app.screen, WatchScreen)
-
-    async def test_app_start_watch_stacks_over_dashboard(self, tmp_path):
-        from claude_swap.tui.app import CswapApp
-
-        app = CswapApp(self._fake(tmp_path), start="watch")
-        async with app.run_test(size=(100, 40)) as pilot:
-            await settle(pilot)
-            from claude_swap.tui.dashboard import DashboardScreen, WatchScreen
-
-            assert isinstance(app.screen, WatchScreen)
-            await pilot.press("escape")
-            await pilot.pause()
-            assert isinstance(app.screen, DashboardScreen)
-
-    async def test_blocked_normal_allows_store_only_repaint_without_stale_overpaint(
-        self, tmp_path
-    ):
-        normal = make_account(1, active=True, entry=make_usage_at(100.0, pct=10.0))
-        store = make_account(1, active=True, entry=make_usage_at(200.0, pct=80.0))
-        fake = BlockingSnapshotSwitcher(normal, store, tmp_path)
-        app = make_app(fake)
-
-        async with app.run_test(size=(100, 40)) as pilot:
-            await wait_event(fake.normal_started)
-            app._tick()
-            await wait_event(fake.store_done)
-            await pilot.pause()
-            assert app.snapshot.accounts[0].usage.last_good["five_hour"]["pct"] == 80.0
-
-            fake.normal_release.set()
-            await wait_event(fake.normal_done)
-            await pilot.pause()
-            assert app.snapshot.accounts[0].usage.last_good["five_hour"]["pct"] == 80.0
-            assert fake.fetch_sets == [None, set()]
-
-    async def test_late_normal_can_advance_usage_after_store_repaint(self, tmp_path):
-        normal = make_account(1, active=True, entry=make_usage_at(200.0, pct=80.0))
-        store = make_account(1, active=True, entry=make_usage_at(100.0, pct=10.0))
-        fake = BlockingSnapshotSwitcher(normal, store, tmp_path)
-        app = make_app(fake)
-
-        async with app.run_test(size=(100, 40)) as pilot:
-            await wait_event(fake.normal_started)
-            app._tick()
-            await wait_event(fake.store_done)
-            await pilot.pause()
-            assert app.snapshot.accounts[0].usage.last_good["five_hour"]["pct"] == 10.0
-
-            fake.normal_release.set()
-            await wait_event(fake.normal_done)
-            await pilot.pause()
-            assert app.snapshot.accounts[0].usage.last_good["five_hour"]["pct"] == 80.0
-
-    async def test_repeated_ticks_keep_store_lane_single_flight(self, tmp_path):
-        normal = make_account(1, active=True, entry=make_usage_at(100.0, pct=10.0))
-        store = make_account(1, active=True, entry=make_usage_at(200.0, pct=80.0))
-        fake = BlockingSnapshotSwitcher(normal, store, tmp_path)
-        fake.block_store = True
-        app = make_app(fake)
-
-        async with app.run_test(size=(100, 40)):
-            await wait_event(fake.normal_started)
-            app._tick()
-            await wait_event(fake.store_started)
-            app._tick()
-            app._tick()
-            assert fake.fetch_sets == [None, set()]
-            fake.store_release.set()
-            fake.normal_release.set()
-            await wait_event(fake.store_done)
-            await wait_event(fake.normal_done)
-
-    async def test_store_only_mode_launches_only_store_lane(self, tmp_path):
-        fake = self._fake(tmp_path)
-        app = make_app(fake)
-        async with app.run_test(size=(100, 40)) as pilot:
-            await settle(pilot)
-            fake.fetch_sets.clear()
-            app.set_store_only(True)
-            await settle(pilot)
-            assert fake.fetch_sets == [set()]
-
-    async def test_watch_title_shows_snapshot_age_and_long_refresh(self, tmp_path):
-        app = make_app(self._fake(tmp_path))
-        async with app.run_test(size=(100, 40)) as pilot:
-            await settle(pilot)
-            await pilot.press("w")
-            await pilot.pause()
-            from textual.widgets import Static
-
-            title = app.screen.query_one("#list-title", Static)
-            # Fresh snapshots stay quiet; the age note is a staleness alarm.
-            assert "snapshot" not in title.render().plain
-            app.snapshot = dataclasses.replace(
-                app.snapshot, taken_at=time.time() - app.SNAPSHOT_AGE_NOTE_S - 1.0
-            )
-            app._update_refresh_status()
-            await pilot.pause()
-            assert "snapshot 1m ago" in title.render().plain
-            app._normal_refreshing = True
-            app._normal_started_at = time.time() - app.POLL_INTERVAL_S - 1.0
-            app._update_refresh_status()
-            await pilot.pause()
-            assert "refreshing" in title.render().plain
 
 
 def fake_calls(app) -> list[tuple]:
     return app.switcher.calls
 
 
-
-class _FakeEngine:
-    """Stands in for AutoSwitchEngine: records construction, blocks until stop."""
-
-    instances: list["_FakeEngine"] = []
-
-    def __init__(self, switcher, settings, on_event, *, dry_run=False, **kwargs):
-        self.settings = settings
-        self.on_event = on_event
-        self.dry_run = dry_run
-        self.stopped = False
-        self.applied_thresholds: list[float] = []
-        self.wakes = 0
-        self._stop = threading.Event()
-        _FakeEngine.instances.append(self)
-
-    def run_loop(self) -> int:
-        self.on_event(NoSwitchEvent(reason="cooldown"))
-        self._stop.wait(30)
-        return 0
-
-    def stop(self) -> None:
-        self.stopped = True
-        self._stop.set()
-
-    def apply_threshold(self, threshold: float) -> None:
-        self.settings = dataclasses.replace(self.settings, threshold=threshold)
-        self.applied_thresholds.append(threshold)
-
-    def wake(self) -> None:
-        self.wakes += 1
+def with_history(fake: FakeSwitcher, series: dict | None = None) -> FakeHistory:
+    fake.usage_history = FakeHistory(series or {})
+    return fake.usage_history
 
 
-@pytest.fixture
-def fake_engine(monkeypatch):
-    _FakeEngine.instances = []
-    monkeypatch.setattr(
-        "claude_swap.tui.autoview.AutoSwitchEngine", _FakeEngine
+def burn_history(now: float, *, start: float = 38.0, rate: float = 12.0) -> dict:
+    """Account 1 burning ``rate`` %/h on 5h for two hours (ends at start+2*rate)."""
+    return {
+        "1": {
+            "5h": linear_points(
+                now=now, start_pct=start, rate_pct_per_h=rate,
+                span_s=7200, step_s=300, resets_at=now + 3 * 3600,
+            ),
+            "7d": linear_points(
+                now=now, start_pct=20.0, rate_pct_per_h=0.4,
+                span_s=86400, step_s=3600, resets_at=now + 3 * 86400,
+            ),
+        }
+    }
+
+
+def three_accounts(tmp_path) -> FakeSwitcher:
+    return FakeSwitcher(
+        [
+            make_account(1, active=True, entry=make_entry(62.0, 31.0), email="me@x.com"),
+            make_account(2, entry=make_entry(12.0, 44.0), email="work@y.com"),
+            make_account(3, disabled=True, entry=UsageEntry(), email="old@z.com"),
+        ],
+        tmp_path,
     )
-    return _FakeEngine
+
+
+def row_plain(app, number: str) -> str:
+    from claude_swap.tui.main import AccountRow
+
+    row = next(r for r in app.screen.query(AccountRow) if r.number == number)
+    return row.children[0].render().plain
+
+
+def painted(app, widget_id: str) -> str:
+    return app.screen.query_one(widget_id).render().plain
+
+
+async def emit(engine, event) -> None:
+    """Deliver an engine event the way the engine does: from its own thread."""
+    await asyncio.to_thread(engine.emit, event)
+
+
+def log_plain(app) -> str:
+    from textual.widgets import RichLog
+
+    log = app.screen.query_one("#event-log", RichLog)
+    return "\n".join(strip.text for strip in log.lines)
 
 
 @pytest.mark.asyncio
-class TestAutoScreen:
-    async def _open(self, pilot):
-        await settle(pilot)
-        await pilot.press("g")
-        await pilot.pause()
-
-    async def test_opens_in_dry_run_and_store_only(self, tmp_path, fake_engine):
-        fake = FakeSwitcher(
-            [make_account(1, active=True), make_account(2)], tmp_path
-        )
-        app = make_app(fake)
-        async with app.run_test(size=(100, 40)) as pilot:
-            await self._open(pilot)
-            from claude_swap.tui.autoview import AutoScreen
-
-            assert isinstance(app.screen, AutoScreen)
-            assert len(fake_engine.instances) == 1
-            assert fake_engine.instances[0].dry_run is True
-            assert app._store_only is True
+class TestMainPage:
+    async def test_renders_every_account_on_one_line(self, tmp_path):
+        app = make_app(three_accounts(tmp_path))
+        async with app.run_test(size=(120, 40)) as pilot:
             await settle(pilot)
-            # engine event reached the log via call_from_thread
-            from textual.widgets import RichLog
+            header = painted(app, "#columns")
+            assert "account" in header and "5h" in header and "7d" in header
+            assert "ETA→90%" in header
+            first = row_plain(app, "1")
+            assert first.startswith("▸") and "me@x.com" in first and "62%" in first
+            assert "\n" not in first
+            assert "work@y.com" in row_plain(app, "2")
+            assert "disabled" in row_plain(app, "3")
 
-            assert len(app.screen.query_one("#event-log", RichLog).lines) > 0
-
-    async def test_go_live_requires_confirmation(self, tmp_path, fake_engine):
+    async def test_active_account_is_highlighted_at_start(self, tmp_path):
         fake = FakeSwitcher(
-            [make_account(1, active=True), make_account(2)], tmp_path
+            [make_account(1), make_account(2, active=True)], tmp_path
         )
         app = make_app(fake)
-        async with app.run_test(size=(100, 40)) as pilot:
-            await self._open(pilot)
-            await pilot.press("l")
-            await pilot.pause()
-            from claude_swap.tui.modals import ConfirmModal
+        async with app.run_test(size=(120, 40)) as pilot:
+            await settle(pilot)
+            assert app.screen.selected_number == "2"
 
+    async def test_status_line_and_action_bar(self, tmp_path):
+        from textual.widgets import Button
+
+        app = make_app(three_accounts(tmp_path))
+        async with app.run_test(size=(120, 40)) as pilot:
+            await settle(pilot)
+            status = painted(app, "#status")
+            assert "claude-swap" in status and "AUTO ●" in status
+            assert "thr 90%" in status
+            labels = [str(b.label) for b in app.screen.query(Button)]
+            for word in ("switch", "add", "token", "disable", "remove", "config", "quit"):
+                assert any(word in label for label in labels)
+            # chips never steal the keyboard from the list
+            assert all(not b.can_focus for b in app.screen.query(Button))
+
+    async def test_empty_account_list(self, tmp_path):
+        app = make_app(FakeSwitcher([], tmp_path))
+        async with app.run_test(size=(120, 40)) as pilot:
+            await settle(pilot)
+            assert "No managed accounts yet" in painted(app, "#columns")
+            assert painted(app, "#detail").strip() == ""
+            await pilot.press("enter", "d", "x")  # nothing to act on: no crash
+            await settle(pilot)
+            assert fake_calls(app) == []
+
+    @pytest.mark.parametrize("size", [(80, 24), (60, 20)])
+    async def test_narrow_terminal(self, tmp_path, size):
+        fake = three_accounts(tmp_path)
+        with_history(fake, burn_history(time.time()))
+        app = make_app(fake)
+        async with app.run_test(size=size) as pilot:
+            await settle(pilot)
+            first = row_plain(app, "1")
+            assert "me@x" in first and "62%" in first
+            assert "━" not in first  # bars dropped before names
+            # every action chip stays on screen
+            from textual.widgets import Button
+
+            assert all(b.region.right <= size[0] for b in app.screen.query(Button))
+            # the action bar and the plot pane still exist
+            assert app.screen.query_one("#actions") is not None
+            assert painted(app, "#detail")
+
+    async def test_no_history_account_shows_card_and_dash_eta(self, tmp_path):
+        app = make_app(three_accounts(tmp_path))
+        async with app.run_test(size=(120, 40)) as pilot:
+            await settle(pilot)
+            assert "—" in row_plain(app, "1")
+            detail = painted(app, "#detail")
+            assert "no usage history yet" in detail
+            assert "resets" in detail  # the full card stands in for the plot
+
+    async def test_synthetic_history_gives_eta_and_plot(self, tmp_path):
+        import re
+
+        fake = three_accounts(tmp_path)
+        with_history(fake, burn_history(time.time()))
+        app = make_app(fake)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await settle(pilot)
+            first = row_plain(app, "1")
+            # 62% at 12%/h → 90% in ~2h20m, before the 3h reset
+            assert re.search(r"2h 1\dm|2h 20m", first), first
+            assert "+12.0%/h" in first
+            detail = painted(app, "#detail")
+            assert "me@x.com · 5h" in detail
+            assert any(0x2800 <= ord(ch) <= 0x28FF for ch in detail)  # braille plot
+            assert " 7d " in detail and "resets" in detail  # other-window sparkline
+            # account 2 has no history: its ETA is a dash
+            assert "—" in row_plain(app, "2")
+
+    async def test_highlight_moves_detail(self, tmp_path):
+        fake = three_accounts(tmp_path)
+        with_history(fake, burn_history(time.time()))
+        app = make_app(fake)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await settle(pilot)
+            assert "me@x.com" in painted(app, "#detail")
+            await pilot.press("down")
+            await pilot.pause()
+            assert "work@y.com" in painted(app, "#detail")
+            await pilot.press("k")
+            await pilot.pause()
+            assert "me@x.com" in painted(app, "#detail")
+
+    async def test_history_reread_only_when_stamp_advances(self, tmp_path):
+        fake = three_accounts(tmp_path)
+        history = with_history(fake, burn_history(time.time()))
+        app = make_app(fake)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await settle(pilot)
+            app._tick()
+            await settle(pilot)
+            app._tick()
+            await settle(pilot)
+            assert history.reads == 1
+            fake._accounts[0] = dataclasses.replace(
+                fake._accounts[0], usage=make_entry(63.0, 31.0, age_s=1.0)
+            )
+            app._tick()
+            await settle(pilot)
+            assert history.reads == 2
+
+    async def test_history_failure_degrades_to_no_estimates(self, tmp_path):
+        fake = three_accounts(tmp_path)
+        history = with_history(fake, burn_history(time.time()))
+        history.fail = True
+        app = make_app(fake)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await settle(pilot)
+            assert app.estimates == {}
+            assert "—" in row_plain(app, "1")
+
+    async def test_poller_reads_store_only(self, tmp_path):
+        fake = three_accounts(tmp_path)
+        app = make_app(fake)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await settle(pilot)
+            app._tick()
+            await settle(pilot)
+            assert fake.fetch_sets and all(f == set() for f in fake.fetch_sets)
+
+    async def test_f_does_one_normal_take(self, tmp_path):
+        fake = three_accounts(tmp_path)
+        app = make_app(fake)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await settle(pilot)
+            await pilot.press("f")
+            await settle(pilot)
+            assert fake.fetch_sets.count(None) == 1
+
+    async def test_enter_switches_highlighted_and_wakes_engine(self, tmp_path, fake_engine):
+        app = make_app(three_accounts(tmp_path))
+        async with app.run_test(size=(120, 40)) as pilot:
+            await settle(pilot)
+            await pilot.press("down", "enter")
+            await settle(pilot)
+            assert ("switch_to", "2") in fake_calls(app)
+            assert fake_engine.instances[-1].wakes == 1
+            await settle(pilot)
+            assert row_plain(app, "2").startswith("▸")
+
+    async def test_switch_button(self, tmp_path):
+        app = make_app(three_accounts(tmp_path))
+        async with app.run_test(size=(120, 40)) as pilot:
+            await settle(pilot)
+            await pilot.click("#act-switch")
+            await settle(pilot)
+            assert ("switch_to", "1") in fake_calls(app)
+
+    async def test_d_toggles_disabled(self, tmp_path):
+        app = make_app(three_accounts(tmp_path))
+        async with app.run_test(size=(120, 40)) as pilot:
+            await settle(pilot)
+            await pilot.press("d")
+            await settle(pilot)
+            assert ("set_disabled", "1", True) in fake_calls(app)
+            assert "disabled" in row_plain(app, "1")
+            await pilot.press("d")
+            await settle(pilot)
+            assert ("set_disabled", "1", False) in fake_calls(app)
+
+    async def test_x_confirms_then_removes(self, tmp_path):
+        from claude_swap.tui.modals import ConfirmModal
+
+        app = make_app(three_accounts(tmp_path))
+        async with app.run_test(size=(120, 40)) as pilot:
+            await settle(pilot)
+            await pilot.press("down", "x")
+            await pilot.pause()
+            assert isinstance(app.screen, ConfirmModal)
+            await pilot.press("n")
+            await settle(pilot)
+            assert not any(c[0] == "remove" for c in fake_calls(app))
+            await pilot.press("delete")
+            await pilot.pause()
+            await pilot.press("y")
+            await settle(pilot)
+            assert ("remove", "2", True) in fake_calls(app)
+            await settle(pilot)
+            from claude_swap.tui.main import AccountRow
+
+            assert [r.number for r in app.screen.query(AccountRow)] == ["1", "3"]
+
+    async def test_a_adds_current_login_after_confirm(self, tmp_path):
+        from claude_swap.tui.modals import ConfirmModal, OutputModal
+
+        app = make_app(three_accounts(tmp_path))
+        async with app.run_test(size=(120, 40)) as pilot:
+            await settle(pilot)
+            await pilot.press("a")
+            await pilot.pause()
             assert isinstance(app.screen, ConfirmModal)
             await pilot.press("y")
             await settle(pilot)
-            assert len(fake_engine.instances) == 2
-            assert fake_engine.instances[0].stopped is True
-            assert fake_engine.instances[1].dry_run is False
+            assert ("add", None, False) in fake_calls(app)
+            assert isinstance(app.screen, OutputModal)
 
-    async def test_back_stops_engine_and_restores_fetching(
-        self, tmp_path, fake_engine
-    ):
-        fake = FakeSwitcher(
-            [make_account(1, active=True), make_account(2)], tmp_path
-        )
-        app = make_app(fake)
-        async with app.run_test(size=(100, 40)) as pilot:
-            await self._open(pilot)
-            await pilot.press("escape")
+    async def test_t_adds_token(self, tmp_path):
+        from textual.widgets import Input
+
+        from claude_swap.tui.modals import AddTokenModal
+
+        app = make_app(three_accounts(tmp_path))
+        async with app.run_test(size=(120, 40)) as pilot:
             await settle(pilot)
-            from claude_swap.tui.dashboard import DashboardScreen
-
-            assert isinstance(app.screen, DashboardScreen)
-            assert fake_engine.instances[0].stopped is True
-            assert app._store_only is False
-
-    async def test_threshold_adjust_is_session_only(self, tmp_path, fake_engine):
-        fake = FakeSwitcher(
-            [make_account(1, active=True), make_account(2)], tmp_path
-        )
-        app = make_app(fake)
-        async with app.run_test(size=(100, 40)) as pilot:
-            await self._open(pilot)
-            screen = app.screen
-            assert app.threshold_pct == 90.0  # mount syncs to the file value
-            await pilot.press("right")  # inert outside adjust mode
-            await pilot.pause()
-            assert screen._settings.threshold == 90.0
-            await pilot.press("t", "right", "right", "right")
-            await pilot.pause()
-            assert screen._settings.threshold == 93.0
-            assert app.threshold_pct == 93.0
-            engine = fake_engine.instances[0]
-            assert engine.applied_thresholds == [91.0, 92.0, 93.0]
-            from textual.widgets import Static
-
-            summary = screen.query_one("#auto-summary", Static)
-            assert "threshold 93% (session)" in summary.render().plain
-            await pilot.press("enter")
-            await pilot.pause()
-            assert engine.wakes == 1  # one forced tick on leaving the mode
-            # the override lives in memory only — nothing was persisted
-            assert not (tmp_path / "settings.json").exists()
-            # a dry↔live restart rebuilds the engine from the adjusted copy
-            await pilot.press("l")
-            await pilot.pause()
-            await pilot.press("y")
-            await settle(pilot)
-            assert fake_engine.instances[1].settings.threshold == 93.0
-            await pilot.press("escape")
-            await settle(pilot)
-            # leaving the screen reverts the tick and unpins poll planning
-            assert app.threshold_pct == 90.0
-            assert fake._poll_inputs_override is None
-
-    async def test_threshold_adjust_escape_exits_mode_not_screen(
-        self, tmp_path, fake_engine
-    ):
-        fake = FakeSwitcher(
-            [make_account(1, active=True), make_account(2)], tmp_path
-        )
-        app = make_app(fake)
-        async with app.run_test(size=(100, 40)) as pilot:
-            await self._open(pilot)
-            from claude_swap.tui.autoview import AutoScreen
-
             await pilot.press("t")
             await pilot.pause()
+            assert isinstance(app.screen, AddTokenModal)
+            app.screen.query_one("#token", Input).value = "sk-ant-oat-x"
+            app.screen.query_one("#slot", Input).value = "7"
+            await pilot.click("#add")
+            await settle(pilot)
+            assert ("add_token", "sk-ant-oat-x", None, 7, True) in fake_calls(app)
+
+    async def test_c_opens_config_and_back(self, tmp_path):
+        from claude_swap.tui.main import MainScreen
+
+        app = make_app(three_accounts(tmp_path))
+        async with app.run_test(size=(120, 40)) as pilot:
+            await settle(pilot)
+            await pilot.press("c")
+            await pilot.pause()
+            assert not isinstance(app.screen, MainScreen)
+            assert type(app.screen).__name__ in {"ConfigScreen", "ConfigPlaceholder"}
             await pilot.press("escape")
             await pilot.pause()
-            assert isinstance(app.screen, AutoScreen)
-            # no net change → no forced tick
-            assert fake_engine.instances[0].wakes == 0
-            await pilot.press("escape")
+            assert isinstance(app.screen, MainScreen)
+
+
+def test_default_factory_builds_live_engine(monkeypatch):
+    # Drop the autouse FakeEngine patch: this test checks the real factory.
+    monkeypatch.undo()
+    import claude_swap.autoswitch as autoswitch
+    from claude_swap.tui.app import default_engine_factory
+    from claude_swap.settings import AutoSwitchSettings
+
+    built = {}
+
+    def recorder(switcher, settings, on_event, **kwargs):
+        built.update(kwargs=kwargs, settings=settings)
+        return object()
+
+    monkeypatch.setattr(autoswitch, "AutoSwitchEngine", recorder)
+    default_engine_factory(object(), AutoSwitchSettings(), lambda e: None)
+    assert built["kwargs"].get("dry_run", False) is False
+
+
+@pytest.mark.asyncio
+class TestEngineHosting:
+    async def test_factory_called_once_live(self, tmp_path, fake_engine):
+        app = make_app(three_accounts(tmp_path))
+        async with app.run_test(size=(120, 40)) as pilot:
             await settle(pilot)
-            from claude_swap.tui.dashboard import DashboardScreen
+            assert len(fake_engine.instances) == 1
+            engine = fake_engine.instances[0]
+            assert engine.kwargs == {}  # no dry_run, ever
+            assert engine.settings.threshold == 90.0
+            assert engine.switcher is app.switcher
 
-            assert isinstance(app.screen, DashboardScreen)
-
-    async def test_threshold_clamps_and_keeps_meaningful_decimals(
-        self, tmp_path, fake_engine
-    ):
-        import json as _json
-
-        (tmp_path / "settings.json").write_text(_json.dumps({
-            "schemaVersion": 1, "autoswitch": {"threshold": 99.0},
-        }))
-        fake = FakeSwitcher(
-            [make_account(1, active=True), make_account(2)], tmp_path
-        )
-        app = make_app(fake)
-        async with app.run_test(size=(100, 40)) as pilot:
-            await self._open(pilot)
-            screen = app.screen
-            await pilot.press("t", "right", "right")
-            await pilot.pause()
-            assert screen._settings.threshold == 99.9  # spec's upper bound
-            from textual.widgets import Static
-
-            summary = screen.query_one("#auto-summary", Static)
-            # never a lying "100%"
-            assert "threshold 99.9% (session)" in summary.render().plain
-            screen.action_threshold_step(-60.0)
-            await pilot.pause()
-            assert screen._settings.threshold == 50.0  # spec's lower bound
-
-    async def test_candidates_ranked_by_headroom(self, tmp_path, fake_engine):
-        fake = FakeSwitcher(
-            [
-                make_account(1, active=True, entry=make_entry(91.0, 20.0)),
-                make_account(2, entry=make_entry(80.0, 10.0)),
-                make_account(3, entry=make_entry(15.0, 5.0)),
-            ],
-            tmp_path,
-        )
-        app = make_app(fake)
-        async with app.run_test(size=(100, 40)) as pilot:
-            await self._open(pilot)
+    async def test_switch_event_logs_updates_status_and_refreshes(self, tmp_path, fake_engine):
+        app = make_app(three_accounts(tmp_path))
+        async with app.run_test(size=(120, 40)) as pilot:
             await settle(pilot)
-            from textual.widgets import Static
-
-            plain = app.screen.query_one("#candidates", Static).render().plain
-            assert plain.index("user3@example.com") < plain.index(
-                "user2@example.com"
+            before = len(app.switcher.fetch_sets)
+            await emit(
+                fake_engine.instances[0],
+                SwitchEvent(
+                    trigger="proactive",
+                    from_ref={"number": 2, "email": "work@y.com"},
+                    to_ref={"number": 1, "email": "me@x.com"},
+                )
             )
-
-    async def test_candidates_ranking_honors_configured_model(
-        self, tmp_path, fake_engine
-    ):
-        """The 'Next best' ranking must use the same window set as the
-        engine: with autoswitch.model set, a Fable-bound account ranks by
-        its Fable pct, not its roomy 5h."""
-        import json as _json
-
-        (tmp_path / "settings.json").write_text(_json.dumps({
-            "schemaVersion": 1, "autoswitch": {"model": "Fable"},
-        }))
-        fake = FakeSwitcher(
-            [
-                make_account(1, active=True, entry=make_entry(91.0, 20.0)),
-                make_account(
-                    2, entry=make_entry(10.0, 5.0, scoped=[("Fable", 95.0)])
-                ),
-                make_account(
-                    3, entry=make_entry(50.0, 5.0, scoped=[("Fable", 20.0)])
-                ),
-            ],
-            tmp_path,
-        )
-        app = make_app(fake)
-        async with app.run_test(size=(100, 40)) as pilot:
-            await self._open(pilot)
             await settle(pilot)
-            from textual.widgets import Static
+            assert "Switched Account-2 -> Account-1" in log_plain(app)
+            assert "switched 2 → 1" in painted(app, "#status")
+            assert len(app.switcher.fetch_sets) > before
 
-            plain = app.screen.query_one("#candidates", Static).render().plain
-            # On 5h alone #2 (10% used) would rank first; Fable 95% binds it
-            # below #3 (50% binding).
-            assert plain.index("user3@example.com") < plain.index(
-                "user2@example.com"
-            )
+    async def test_quiet_events_feed_status_not_log(self, tmp_path, fake_engine):
+        app = make_app(three_accounts(tmp_path))
+        async with app.run_test(size=(120, 40)) as pilot:
+            await settle(pilot)
+            engine = fake_engine.instances[0]
+            await emit(engine, PollEvent(active={"number": 1, "email": "me@x.com"}, headroom={"1": 38.0}, threshold=90.0))
+            await emit(engine, SleepEvent(seconds=125.0, until="later"))
+            await settle(pilot)
+            status = painted(app, "#status")
+            assert "checked 0s ago" in status or "checked 1s ago" in status
+            assert "next 2m" in status
+            # the startup NoSwitchEvent is summarized on the status line only
+            assert "no switch: cooldown" in status
+            assert "no switch" not in log_plain(app)
+            assert "sleeping" not in log_plain(app)
+
+    async def test_cooldown_from_shared_state_file(self, tmp_path):
+        (tmp_path / "autoswitch_state.json").write_text(
+            json.dumps({"lastSwitchAt": time.time() - 30})
+        )
+        app = make_app(three_accounts(tmp_path))
+        async with app.run_test(size=(120, 40)) as pilot:
+            await settle(pilot)
+            status = painted(app, "#status")
+            assert "cooldown 4m" in status
+            assert "last switch" in status
+
+    async def test_settings_change_restarts_engine(self, tmp_path, fake_engine):
+        from claude_swap.settings import set_setting
+
+        fake = three_accounts(tmp_path)
+        app = make_app(fake)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await settle(pilot)
+            first = fake_engine.instances[0]
+            set_setting(tmp_path, "autoswitch.threshold", "80")
+            app.on_settings_changed("autoswitch.threshold")
+            await settle(pilot)
+            assert first.stopped
+            assert len(fake_engine.instances) == 2
+            assert fake_engine.instances[1].settings.threshold == 80.0
+            assert app.threshold_pct == 80.0
+            assert fake._poll_inputs_override == (80.0, ())
+            assert "thr 80%" in painted(app, "#status")
+            assert "ETA→80%" in painted(app, "#columns")
+
+    async def test_config_message_routes_to_settings_change(self, tmp_path, fake_engine):
+        from claude_swap.settings import set_setting
+
+        app = make_app(three_accounts(tmp_path))
+        async with app.run_test(size=(120, 40)) as pilot:
+            await settle(pilot)
+            set_setting(tmp_path, "autoswitch.cooldownSeconds", "60")
+
+            class Msg:
+                key = "autoswitch.cooldownSeconds"
+
+            app.on_config_screen_setting_changed(Msg())
+            await settle(pilot)
+            assert len(fake_engine.instances) == 2
+            assert fake_engine.instances[1].settings.cooldown_seconds == 60.0
+
+    async def test_theme_setting_applies_without_engine_restart(self, tmp_path, fake_engine):
+        (tmp_path / "settings.json").write_text(json.dumps({"ui": {"theme": "light"}}))
+        app = make_app(three_accounts(tmp_path))
+        async with app.run_test(size=(120, 40)) as pilot:
+            await settle(pilot)
+            (tmp_path / "settings.json").write_text(json.dumps({"ui": {"theme": "dark"}}))
+            app.on_settings_changed("ui.theme")
+            await pilot.pause()
+            assert app.theme == "cswap-dark"
+            assert len(fake_engine.instances) == 1
+
+    async def test_unmount_stops_engine_and_clears_poll_inputs(self, tmp_path, fake_engine):
+        fake = three_accounts(tmp_path)
+        fake._poll_inputs_override = (90.0, ())
+        app = make_app(fake)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await settle(pilot)
+        assert fake_engine.instances[0].stopped
+        assert fake._poll_inputs_override is None
+
+    async def test_engine_crash_shows_stopped(self, tmp_path, fake_engine):
+        fake_engine.crash = True
+        app = make_app(three_accounts(tmp_path))
+        async with app.run_test(size=(120, 40)) as pilot:
+            await settle(pilot)
+            await pilot.pause(0.1)
+            assert "AUTO ○" in painted(app, "#status")
 
 
 class TestEventText:
@@ -1539,12 +1377,12 @@ class TestEventText:
             from_ref={"number": 1, "email": "a@x.com"},
             to_ref={"number": 2, "email": "b@x.com"},
         )
-        from claude_swap.tui.autoview import event_text
+        from claude_swap.tui.main import event_text
 
         assert event.human() in event_text(event).plain
 
     def test_event_text_uses_light_accent_for_switch(self):
-        from claude_swap.tui.autoview import event_text
+        from claude_swap.tui.main import event_text
         from claude_swap.tui.theme import ACCENT_LIGHT, CSWAP_LIGHT, Palette
 
         event = SwitchEvent(
@@ -1622,23 +1460,6 @@ class TestBareInvocation:
             cli.main()
         assert excinfo.value.code == 2  # argparse usage error
 
-    def test_cswap_watch_opens_tui_on_watch_page(self, monkeypatch, temp_home):
-        import claude_swap.cli as cli
-        import claude_swap.tui as tui
-
-        launched = {}
-
-        def fake_run(switcher, start="dashboard"):
-            launched["start"] = start
-            return 0
-
-        monkeypatch.setattr(sys, "argv", ["cswap", "watch"])
-        monkeypatch.setattr(tui, "run", fake_run)
-        with pytest.raises(SystemExit) as excinfo:
-            cli.main()
-        assert excinfo.value.code == 0
-        assert launched["start"] == "watch"
-
 
 # ---------------------------------------------------------------------------
 # Theme wiring
@@ -1689,24 +1510,12 @@ class TestThemeWiring:
             app.action_toggle_theme(); await pilot.pause()
             assert app.theme == "cswap-dark"           # → back to dark
 
-    async def test_theme_menu_marks_current_and_applies(self, tmp_path):
-        from textual.widgets import ListView, Static
-
-        from claude_swap.tui.widgets import MenuItem
-
+    async def test_ctrl_t_cycles_theme(self, tmp_path):
+        (tmp_path / "settings.json").write_text(json.dumps({"ui": {"theme": "dark"}}))
         fake = FakeSwitcher([make_account("1", active=True)], tmp_path)
         app = make_app(fake)
-        async with app.run_test(size=(100, 32)) as pilot:
+        async with app.run_test() as pilot:
             await settle(pilot)
-            assert app._theme_name == "auto"  # default
-            await menu_select(pilot, "theme-menu")
-            menu = app.screen.query_one("#menu", ListView)
-            labels = [it.query_one(Static).render().plain for it in menu.query(MenuItem)]
-            assert any("dark" in lbl for lbl in labels)
-            assert any("light" in lbl for lbl in labels)
-            current = next(lbl for lbl in labels if "auto" in lbl)
-            assert "●" in current  # the current theme is marked
-            await menu_select(pilot, "theme:light")
-            assert app._theme_name == "light"
+            await pilot.press("ctrl+t")
+            await pilot.pause()
             assert app.theme == "cswap-light"
-

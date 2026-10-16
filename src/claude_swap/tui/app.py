@@ -1,87 +1,147 @@
 """The claude-swap Textual application.
 
-Owns the snapshot poll loop and every mutating action (switch/add/remove),
-so the dashboard, the auto view, and the command palette all drive the same
-code paths. Blocking switcher work always runs in thread workers — the UI
-loop never touches file locks, keychain subprocesses, or the network.
+Owns the snapshot poll loop, the always-on auto-switch engine, the usage
+estimates, and every mutating action (switch/add/remove), so the main page
+and the config page drive the same code paths. Blocking switcher work always
+runs in thread workers: the UI loop never touches file locks, keychain
+subprocesses, the history file, or the network.
+
+The engine is the only scheduled fetcher. It runs LIVE for the whole session
+(no dry-run gate in the TUI; its own guards: threshold, hysteresis, shared
+cooldown, quarantine, disabled accounts). The 3 s poller therefore only reads
+the store; ``f`` asks for one normal pass, which the store still paces.
 """
 
 from __future__ import annotations
 
+import json
+import threading
 import time
 from dataclasses import replace
 from functools import partial
+from typing import Callable, Protocol
 
 from textual.app import App
 from textual.binding import Binding
 from textual.reactive import reactive
+from textual.screen import Screen
+from textual.widgets import Static
 from textual.worker import WorkerState
 
 from claude_swap import printer
+from claude_swap.autoswitch import STATE_FILENAME, AutoSwitchEvent
 from claude_swap.models import AccountsSnapshot
+from claude_swap.settings import (
+    AutoSwitchSettings,
+    load_settings,
+    load_ui_settings,
+    parse_model_names,
+    set_setting,
+)
 from claude_swap.snapshot_source import account_identity
-from claude_swap.settings import load_settings, load_ui_settings, set_setting
 from claude_swap.switcher import ClaudeAccountSwitcher
-from claude_swap.tui.autoview import AutoScreen
-from claude_swap.tui.dashboard import DashboardScreen, WatchScreen
+from claude_swap.tui._wp1_stub import AccountEstimate, Point, estimate_account
 from claude_swap.tui.data import ActionResult, SnapshotSource, format_duration, run_action
+from claude_swap.tui.main import AutoStatus, MainScreen
 from claude_swap.tui.modals import AddTokenModal, ConfirmModal, OutputModal, TokenForm
 from claude_swap.tui.theme import CSWAP_DARK, CSWAP_LIGHT
 
 
+class EngineLike(Protocol):
+    """What the app needs from an auto-switch engine (tests inject fakes)."""
+
+    def run_loop(self) -> int: ...
+    def stop(self) -> None: ...
+    def wake(self) -> None: ...
+    def apply_threshold(self, threshold: float) -> None: ...
+
+
+EngineFactory = Callable[
+    [ClaudeAccountSwitcher, AutoSwitchSettings, Callable[[AutoSwitchEvent], None]],
+    EngineLike,
+]
+
+
+def default_engine_factory(switcher, settings, on_event) -> EngineLike:
+    """A LIVE engine: the TUI never passes ``dry_run``."""
+    from claude_swap.autoswitch import AutoSwitchEngine
+
+    return AutoSwitchEngine(switcher, settings, on_event)
+
+
+class ConfigPlaceholder(Screen):
+    """TEMPORARY until WP3's ``claude_swap.tui.config.ConfigScreen`` lands."""
+
+    BINDINGS = [Binding("escape,c,q", "app.pop_screen", "Back")]
+
+    def __init__(self, backup_dir) -> None:
+        super().__init__()
+        self.backup_dir = backup_dir
+
+    def compose(self):
+        yield Static("Config page is not available in this build. esc to go back.")
+
+
 class CswapApp(App):
-    """claude-swap interactive dashboard."""
+    """claude-swap interactive TUI: one main page plus the config page."""
 
     TITLE = "claude-swap"
     CSS_PATH = "cswap.tcss"
-    # No command palette: actions live in the dashboard's nested menu, in
-    # their own context — not in a global searchable list.
     ENABLE_COMMAND_PALETTE = False
     BINDINGS = [Binding("ctrl+t", "toggle_theme", "Theme")]
 
-    POLL_INTERVAL_S = 3.0  # matches the old watch view's recapture cadence
+    POLL_INTERVAL_S = 3.0
     # Snapshot age stays hidden while polling is healthy (age never exceeds
-    # ~POLL_INTERVAL_S); past this it surfaces as a staleness alarm. 60s also
-    # keeps format_duration in whole minutes, so the note never ticks per
-    # second.
+    # ~POLL_INTERVAL_S); past this it surfaces as a staleness alarm.
     SNAPSHOT_AGE_NOTE_S = 60.0
 
     snapshot: reactive[AccountsSnapshot | None] = reactive(None)
     refresh_status: reactive[str] = reactive("")
     busy: reactive[bool] = reactive(False)
+    # slot → cached estimate / history series; replaced (never mutated) by
+    # the refresh worker, re-projected at render time against the clock.
+    estimates: reactive[dict[str, AccountEstimate]] = reactive(dict, always_update=True)
+    series: dict[str, dict[str, list[Point]]]
+    auto_status: reactive[AutoStatus] = reactive(AutoStatus, always_update=True)
 
     def __init__(
         self,
         switcher: ClaudeAccountSwitcher,
         *,
-        start: str = "dashboard",
         detected: str | None = None,
+        engine_factory: EngineFactory | None = None,
     ) -> None:
         super().__init__()
         self.switcher = switcher
-        self._start = start  # "dashboard" | "watch" (`cswap watch`)
         self._detected = detected  # terminal background sensed pre-driver, or None
+        self._engine_factory = engine_factory or default_engine_factory
+        self.engine: EngineLike | None = None
         self.source = SnapshotSource(switcher)
-        self._store_only = False
-        self._full_next = False
         self._normal_refreshing = False
         self._store_refreshing = False
         self._normal_started_at: float | None = None
         self._refresh_generation = 0
         self._applied_generation = 0
         self._last_refresh_error = ""
-        # The auto-switch threshold, drawn as a tick on the status strip's
-        # bars everywhere. Missing/invalid settings fall back to the default.
-        try:
-            self.threshold_pct: float | None = load_settings(
-                switcher.backup_dir
-            ).threshold
-        except Exception:
-            self.threshold_pct = None
+        self.series = {}
+        # (slot → fetched_at) the cached estimates were computed from; the
+        # history file is re-read only when one of these stamps advances.
+        self._estimate_stamps: dict[str, float | None] | None = None
+        self._estimate_lock = threading.Lock()
+        self._load_settings()
         try:
             self._theme_name = load_ui_settings(switcher.backup_dir).theme
         except Exception:
             self._theme_name = "auto"
+        self.main_screen = MainScreen()
+
+    def _load_settings(self) -> None:
+        try:
+            self.settings = load_settings(self.switcher.backup_dir)
+        except Exception:
+            self.settings = AutoSwitchSettings()
+        self.threshold_pct: float | None = self.settings.threshold
+        self.models: tuple[str, ...] = parse_model_names(self.settings.model)
 
     def on_mount(self) -> None:
         self.register_theme(CSWAP_DARK)
@@ -90,31 +150,113 @@ class CswapApp(App):
         # We own the theme; $TEXTUAL_THEME is intentionally not honoured.
         self.theme = f"cswap-{resolved}"
         printer.set_theme(resolved)
-        self.push_screen(DashboardScreen())
-        if self._start == "watch":
-            # Stacked over the dashboard so Esc lands there, not on exit.
-            self.push_screen(WatchScreen())
+        self.push_screen(self.main_screen)
+        self._start_engine()
         self.set_interval(self.POLL_INTERVAL_S, self._tick)
         self.set_interval(1.0, self._update_refresh_status)
         self._tick()
 
+    def on_unmount(self) -> None:
+        self._stop_engine()
+        try:
+            self.switcher.clear_poll_policy_inputs()
+        except Exception:
+            pass
+
+    # -- the always-on engine ---------------------------------------------------
+
+    def _start_engine(self) -> None:
+        engine = self._engine_factory(self.switcher, self.settings, self._emit_from_thread)
+        self.engine = engine
+        self.auto_status = replace(
+            self.auto_status,
+            running=True,
+            threshold=self.settings.threshold,
+            cooldown_s=self.settings.cooldown_seconds,
+            next_check_at=None,
+        )
+        self.run_worker(
+            engine.run_loop,
+            thread=True,
+            group="engine",
+            exit_on_error=False,
+            name="auto-engine",
+        )
+
+    def _stop_engine(self) -> None:
+        engine, self.engine = self.engine, None
+        if engine is not None:
+            engine.stop()
+
+    def _emit_from_thread(self, event: AutoSwitchEvent) -> None:
+        """Engine ``on_event`` callback; runs on the engine's worker thread."""
+        try:
+            self.call_from_thread(self._on_engine_event, event)
+        except Exception:
+            pass  # app tearing down mid-tick: the event has nowhere to go
+
+    def _on_engine_event(self, event: AutoSwitchEvent) -> None:
+        now = time.time()
+        status = self.auto_status
+        kind = event.kind
+        if kind == "poll":
+            status = replace(status, last_check_at=now)
+        elif kind == "sleep":
+            status = replace(status, next_check_at=now + float(getattr(event, "seconds", 0.0)))
+        elif kind == "switch":
+            src = (getattr(event, "from_ref", None) or {}).get("number", "?")
+            dst = (getattr(event, "to_ref", None) or {}).get("number", "?")
+            status = replace(status, last_switch_at=now, last_switch=f"{src} → {dst}")
+        elif kind == "no-switch":
+            status = replace(status, last_outcome=event.human())
+        elif kind in ("error", "all-exhausted"):
+            status = replace(status, last_outcome=event.human())
+        self.auto_status = status
+        if self.main_screen.is_attached:
+            self.main_screen.write_event(event)
+        if kind == "switch":
+            self.request_refresh()
+
+    def on_settings_changed(self, dotted_key: str) -> None:
+        """A setting changed on the Config page: apply it live."""
+        if dotted_key == "ui.theme":
+            try:
+                theme = load_ui_settings(self.switcher.backup_dir).theme
+            except Exception:
+                return
+            self.apply_theme(theme, persist=False)
+            return
+        if not dotted_key.startswith("autoswitch."):
+            return
+        self._load_settings()
+        # Engines are single-use: stop this one, start one on fresh settings.
+        self._stop_engine()
+        try:
+            self.switcher.set_poll_policy_inputs(self.settings.threshold, self.models)
+        except Exception:
+            pass
+        with self._estimate_lock:
+            self._estimate_stamps = None  # models may have changed
+        self._start_engine()
+        self.request_refresh()
+
+    def on_config_screen_setting_changed(self, message) -> None:
+        self.on_settings_changed(message.key)
+
+    def action_open_config(self) -> None:
+        try:
+            from claude_swap.tui.config import ConfigScreen  # type: ignore[import-not-found]
+        except ImportError:  # TEMPORARY: WP3 not merged yet
+            ConfigScreen = ConfigPlaceholder  # noqa: N806
+        if isinstance(self.screen, ConfigScreen):
+            return
+        self.push_screen(ConfigScreen(self.switcher.backup_dir))
+
     # -- snapshot poll loop ---------------------------------------------------
 
     def _tick(self) -> None:
-        """Start one eligible refresh lane.
-
-        Normal mode prefers the fetch-enabled lane. When that lane is blocked,
-        the poll tick may still observe another process's store update through
-        one store-only lane. Auto mode already has an engine fetching, so it
-        launches only store-only snapshots.
-        """
-        if self._store_only:
-            self._start_store_refresh()
-        elif not self._normal_refreshing:
-            full, self._full_next = self._full_next, False
-            self._start_normal_refresh(full=full)
-        else:
-            self._start_store_refresh()
+        """The scheduled poller only reads the store: the engine fetches."""
+        self._start_store_refresh()
 
     def _start_normal_refresh(self, *, full: bool) -> None:
         if self._normal_refreshing:
@@ -153,11 +295,73 @@ class CswapApp(App):
         self, generation: int, lane: str, full: bool, store_only: bool
     ) -> None:
         snap = self.source.take(full=full, store_only=store_only)
-        self.call_from_thread(self._apply_snapshot, generation, lane, snap)
+        estimates = self._estimates_for(snap)
+        last_switch_at = self._read_last_switch_at()
+        self.call_from_thread(
+            self._apply_snapshot, generation, lane, snap, estimates, last_switch_at
+        )
+
+    def _estimates_for(
+        self, snap: AccountsSnapshot
+    ) -> tuple[dict[str, AccountEstimate], dict[str, dict[str, list[Point]]]] | None:
+        """Re-read history and re-estimate, only when a fetch stamp advanced.
+
+        Worker thread only. None means "unchanged, keep the cached ones".
+        History is best effort: any failure degrades to no estimates.
+        """
+        stamps = {acc.number: acc.usage.fetched_at for acc in snap.accounts}
+        with self._estimate_lock:
+            if stamps == self._estimate_stamps:
+                return None
+            self._estimate_stamps = stamps
+        history = getattr(self.switcher, "usage_history", None)
+        if history is None:
+            return {}, {}
+        identities = {acc.number: (acc.email, acc.org_uuid) for acc in snap.accounts}
+        now = time.time()
+        threshold = self.settings.threshold
+        try:
+            series = history.series(identities)
+            estimates = {
+                num: estimate_account(
+                    series.get(num, {}), models=self.models, threshold=threshold, now=now
+                )
+                for num in identities
+            }
+        except Exception as exc:
+            self.log.warning(f"usage history unavailable: {exc}")
+            return {}, {}
+        return estimates, series
+
+    def _read_last_switch_at(self) -> float | None:
+        """The engine's shared ``lastSwitchAt``: covers switches made by
+        another process (``cswap auto``, the menu bar). Lock-free read."""
+        try:
+            raw = json.loads(
+                (self.switcher.backup_dir / STATE_FILENAME).read_text(encoding="utf-8")
+            )
+            value = raw.get("lastSwitchAt")
+            return float(value) if isinstance(value, (int, float)) else None
+        except Exception:
+            return None
 
     def _apply_snapshot(
-        self, generation: int, lane: str, snap: AccountsSnapshot
+        self,
+        generation: int,
+        lane: str,
+        snap: AccountsSnapshot,
+        estimates=None,
+        last_switch_at: float | None = None,
     ) -> None:
+        if estimates is not None:
+            self.series = estimates[1]
+            self.estimates = estimates[0]
+        status = self.auto_status
+        if last_switch_at is not None and (
+            status.last_switch_at is None or last_switch_at > status.last_switch_at + 1
+        ):
+            # A switch this session did not see as an event: no from → to.
+            self.auto_status = replace(status, last_switch_at=last_switch_at, last_switch="")
         if lane == "normal":
             self._normal_refreshing = False
             self._normal_started_at = None
@@ -204,14 +408,11 @@ class CswapApp(App):
         self.refresh_status = " · ".join(parts)
 
     def request_refresh(self, *, full: bool = False) -> None:
+        """Repaint from the store now; ``full`` also asks for one normal
+        (fetch-eligible) pass, which the store's gates still pace."""
         if full:
-            self._full_next = True
+            self._start_normal_refresh(full=True)
         self._tick()
-
-    def set_store_only(self, value: bool) -> None:
-        """Auto screen: the engine fetches, the poller only reads the store."""
-        self._store_only = value
-        self.request_refresh()
 
     def on_worker_state_changed(self, event) -> None:
         if event.state is not WorkerState.ERROR:
@@ -234,6 +435,7 @@ class CswapApp(App):
             self.busy = False
             self.notify(f"Action failed: {event.worker.error}", severity="error")
         elif event.worker.group == "engine":
+            self.auto_status = replace(self.auto_status, running=False)
             self.notify(
                 f"Auto-switch engine stopped: {event.worker.error}",
                 severity="error",
@@ -268,6 +470,10 @@ class CswapApp(App):
             return
         payload = result.payload or {}
         if "switched" in payload:
+            if payload.get("switched") and self.engine is not None:
+                # Let the engine re-evaluate now so the status line reflects
+                # the new active account instead of waiting out its sleep.
+                self.engine.wake()
             if payload.get("switched"):
                 to = payload.get("to") or {}
                 target = to.get("email") or f"account {to.get('number')}"
@@ -287,12 +493,6 @@ class CswapApp(App):
         self._start_action(
             f"Switch to account {number}",
             partial(self.switcher.switch_to, number, json_output=True),
-        )
-
-    def action_switch_best(self) -> None:
-        self._start_action(
-            "Switch (best)",
-            partial(self.switcher.switch, strategy="best", json_output=True),
         )
 
     def do_toggle_disabled(self, number: str) -> None:
@@ -394,16 +594,6 @@ class CswapApp(App):
         self.request_refresh(full=True)
         self.notify("Refreshing usage…", timeout=2)
 
-    def action_open_auto(self) -> None:
-        if isinstance(self.screen, AutoScreen):
-            return
-        self.push_screen(AutoScreen())
-
-    def action_open_watch(self) -> None:
-        if isinstance(self.screen, WatchScreen):
-            return
-        self.push_screen(WatchScreen())
-
     # -- theme --------------------------------------------------------------
 
     def _resolved_theme(self) -> str:
@@ -412,7 +602,7 @@ class CswapApp(App):
             return self._detected or "dark"
         return self._theme_name
 
-    def apply_theme(self, name: str) -> None:
+    def apply_theme(self, name: str, *, persist: bool = True) -> None:
         """Switch the live theme: TUI + captured printer output + persistence.
 
         ``name`` is the setting; ``auto`` resolves against the pre-driver
@@ -421,6 +611,8 @@ class CswapApp(App):
         resolved = self._resolved_theme()
         self.theme = f"cswap-{resolved}"
         printer.set_theme(resolved)
+        if not persist:
+            return
         try:
             set_setting(self.switcher.backup_dir, "ui.theme", name)
         except Exception as exc:  # persistence is best-effort; never crash the UI
