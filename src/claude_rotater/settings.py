@@ -2,7 +2,8 @@
 
 One versioned JSON file for user-tunable rota preferences, written
 atomically with the backup dir's 0600/0700 modes. v1 carries the
-``autoswitch`` and ``ui`` sections; other sections can be added additively.
+``autoswitch``, ``ui``, ``run`` and ``accounts`` sections; other sections
+can be added additively.
 Unknown keys (future fields, other tools' experiments) survive a round trip.
 
 Reading is forgiving — a missing or corrupt file yields defaults with a logged
@@ -70,6 +71,29 @@ class UiSettings:
     login_warn_days: int = 3
 
 
+@dataclass(frozen=True)
+class RunSettings:
+    """``rota run`` defaults (``run`` section). ``share_default``: whether a
+    session profile shares settings, CLAUDE.md, skills and the like from the
+    main Claude config when the call says neither ``--share`` nor
+    ``--no-share``. A profile kept apart from the main config (a separate
+    work setup) turns it off once instead of passing ``--no-share`` every
+    time."""
+
+    share_default: bool = True
+
+
+@dataclass(frozen=True)
+class AccountsSettings:
+    """Account policy for this data dir (``accounts`` section).
+    ``oauth_only`` holds managed API-key accounts out of every switch: bare
+    and strategy rotation, explicit ``rota switch``/TUI switches and the auto
+    engine (whatever ``autoswitch.includeApiKeyAccounts`` says). They stay
+    managed and listed."""
+
+    oauth_only: bool = False
+
+
 # Where each spec's default (and effective value) lives, by ``SettingSpec.source``.
 # The poll cadence keys sit in the ``autoswitch`` JSON section but are owned
 # by ``poll_policy.PollCadence``, so their defaults are never restated here.
@@ -77,6 +101,8 @@ _DEFAULT_SOURCES = {
     "autoswitch": AutoSwitchSettings,
     "ui": UiSettings,
     "cadence": PollCadence,
+    "run": RunSettings,
+    "accounts": AccountsSettings,
 }
 
 
@@ -207,6 +233,17 @@ SETTING_SPECS: dict[str, SettingSpec] = {
             help="Warn when an account's login ends within this many days (0 = never)",
             group="ui", label="Login warning (days)", step=1.0,
         ),
+        SettingSpec(
+            "run", "shareDefault", "share_default", "bool",
+            help="rota run shares settings, CLAUDE.md and skills from the main "
+            "config unless told --share/--no-share",
+            group="profile", label="rota run shares config",
+        ),
+        SettingSpec(
+            "accounts", "oauthOnly", "oauth_only", "bool",
+            help="Never switch onto API-key accounts, by hand or automatically",
+            group="profile", label="OAuth accounts only",
+        ),
     )
 }
 
@@ -216,6 +253,7 @@ SETTING_SPECS: dict[str, SettingSpec] = {
 SETTING_GROUPS: tuple[tuple[str, str], ...] = (
     ("autoswitch", "Auto-switch"),
     ("polling", "Polling"),
+    ("profile", "Profile"),
     ("ui", "Appearance"),
 )
 
@@ -330,6 +368,38 @@ def load_ui_settings(backup_root: Path) -> UiSettings:
         days = default.login_warn_days
     days = int(min(max(days, spec.lo), spec.hi))
     return UiSettings(theme=theme, login_warn_days=days)
+
+
+def _load_flag_section(backup_root: Path, section: str):
+    """Load a section made only of bool specs (``run``, ``accounts``); a
+    missing section or a non-bool value reads as the default."""
+    cls = _DEFAULT_SOURCES[section]
+    raw = _read_raw(settings_path(backup_root)).get(section)
+    if not isinstance(raw, dict):
+        return cls()
+    kwargs = {}
+    for spec in SETTING_SPECS.values():
+        if spec.source != section or spec.json_key not in raw:
+            continue
+        value = raw[spec.json_key]
+        if isinstance(value, bool):
+            kwargs[spec.field] = value
+        else:
+            _logger.warning(
+                "settings.json: %s expects true or false, got %r; using %r",
+                spec.dotted, value, spec.default,
+            )
+    return cls(**kwargs)
+
+
+def load_run_settings(backup_root: Path) -> RunSettings:
+    """Load the ``run`` section; missing/corrupt values → defaults."""
+    return _load_flag_section(backup_root, "run")
+
+
+def load_accounts_settings(backup_root: Path) -> AccountsSettings:
+    """Load the ``accounts`` section; missing/corrupt values → defaults."""
+    return _load_flag_section(backup_root, "accounts")
 
 
 def save_settings(backup_root: Path, settings: AutoSwitchSettings) -> None:
@@ -497,6 +567,8 @@ def effective_settings(backup_root: Path) -> list[tuple[SettingSpec, object, boo
         "autoswitch": load_settings(backup_root),
         "ui": load_ui_settings(backup_root),
         "cadence": load_cadence(backup_root),
+        "run": load_run_settings(backup_root),
+        "accounts": load_accounts_settings(backup_root),
     }
     rows = []
     for spec in SETTING_SPECS.values():

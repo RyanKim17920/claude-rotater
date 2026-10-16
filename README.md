@@ -87,6 +87,11 @@ under the service `rota`.
 Set `ROTA_HOME` to run a separate profile with its own accounts and
 settings. Its Keychain service is `rota-<8 hex>` (the start of the SHA-256
 of the directory's absolute path), so profiles never collide.
+Two settings on the Profile section of the config page (`c`) suit such a
+profile: `run.shareDefault` (off: `rota run` keeps the main `~/.claude`
+settings, CLAUDE.md and skills out of its sessions unless told `--share`)
+and `accounts.oauthOnly` (on: API-key accounts are never switched to, by
+hand or automatically).
 
 On first run, if the data dir does not exist yet and an upstream claude-swap
 store does (`~/.claude-swap-backup`, or `~/.local/share/claude-swap` on

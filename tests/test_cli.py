@@ -282,6 +282,17 @@ class TestJsonOutputCli:
 class TestRunCommand:
     """`rota run` pre-dispatch: parsing, forwarding, and dispatch."""
 
+    @pytest.fixture(autouse=True)
+    def _data_dir(self, tmp_path):
+        # The fake switcher's data dir: where run.shareDefault is read from.
+        self.backup_dir = tmp_path
+
+    def _switcher(self):
+        return patch(
+            "claude_rotater.cli.ClaudeAccountSwitcher",
+            **{"return_value.backup_dir": self.backup_dir},
+        )
+
     def _dispatch(self, argv: list[str]):
         """Run cli.main() with a fake SessionManager; returns recorded calls."""
         calls = []
@@ -304,7 +315,7 @@ class TestRunCommand:
                 ))
 
         with patch("claude_rotater.session.SessionManager", FakeSessionManager), \
-             patch("claude_rotater.cli.ClaudeAccountSwitcher"), \
+             self._switcher(), \
              patch("os.geteuid", return_value=1000, create=True), \
              patch.object(sys, "argv", ["rota", *argv]):
             cli.main()
@@ -321,6 +332,24 @@ class TestRunCommand:
     def test_no_share_flag(self):
         calls = self._dispatch(["run", "2", "--no-share"])
         assert ("run", "2", [], False, False, False) in calls
+
+    def test_share_default_setting_turns_sharing_off(self):
+        from claude_rotater.settings import set_setting
+
+        set_setting(self.backup_dir, "run.shareDefault", "false")
+        assert ("run", "2", [], False, False, False) in self._dispatch(["run", "2"])
+
+    def test_share_flag_overrides_the_setting(self):
+        from claude_rotater.settings import set_setting
+
+        set_setting(self.backup_dir, "run.shareDefault", "false")
+        assert ("run", "2", [], True, False, False) in self._dispatch(["run", "2", "--share"])
+
+    def test_no_share_flag_overrides_the_default(self):
+        from claude_rotater.settings import set_setting
+
+        set_setting(self.backup_dir, "run.shareDefault", "true")
+        assert ("run", "2", [], False, False, False) in self._dispatch(["run", "2", "--no-share"])
 
     def test_share_history_flag(self):
         calls = self._dispatch(["run", "2", "--share-history"])
@@ -362,7 +391,7 @@ class TestRunCommand:
                 cli.main()
         assert excinfo.value.code == 0
         out = capsys.readouterr().out
-        assert "--no-share" in out
+        assert "--no-share" in out and "run.shareDefault" in out
         assert "this terminal only" in out
 
     def test_main_help_mentions_run(self):
@@ -392,7 +421,7 @@ class TestRunCommand:
                 raise SessionError("boom")
 
         with patch("claude_rotater.session.SessionManager", FailingSessionManager), \
-             patch("claude_rotater.cli.ClaudeAccountSwitcher"), \
+             self._switcher(), \
              patch("os.geteuid", return_value=1000, create=True), \
              patch.object(sys, "argv", ["rota", "run", "2"]):
             with pytest.raises(SystemExit) as excinfo:

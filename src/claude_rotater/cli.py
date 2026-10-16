@@ -11,7 +11,7 @@ from claude_rotater import __version__, paths, printer
 from claude_rotater.exceptions import ClaudeSwitchError
 from claude_rotater.json_output import error_envelope
 from claude_rotater.printer import dimmed, error, force_utf8_output
-from claude_rotater.settings import load_ui_settings
+from claude_rotater.settings import load_run_settings, load_ui_settings
 from claude_rotater.switcher import ClaudeAccountSwitcher
 
 
@@ -35,7 +35,7 @@ def _prog_name() -> str:
 
 
 def _run_command(argv: list[str]) -> None:
-    """Handle `rota run NUM|EMAIL [--no-share] [-- <claude args>]`.
+    """Handle `rota run NUM|EMAIL [--share|--no-share] [-- <claude args>]`.
 
     Pre-dispatched before the main parser is built so everything after
     ``--`` reaches claude untouched. Limitation: `run` must be the first
@@ -76,12 +76,14 @@ Examples:
         help="Account to run (number or email)",
     )
     parser.add_argument(
-        "--no-share",
-        action="store_true",
+        "--share",
+        action=argparse.BooleanOptionalAction,
+        default=None,
         help=(
-            "Don't share settings/keybindings/CLAUDE.md/skills/commands/agents/rules "
-            "from ~/.claude into the session profile (and remove previously "
-            "shared items)"
+            "Share settings/keybindings/CLAUDE.md/skills/commands/agents/rules "
+            "from ~/.claude into the session profile; --no-share keeps them "
+            "out (and removes previously shared items). Default: the "
+            "run.shareDefault setting (on unless changed)"
         ),
     )
     parser.add_argument(
@@ -118,12 +120,15 @@ Examples:
 
         from claude_rotater.session import SessionManager
 
+        share = args.share
+        if share is None:
+            share = load_run_settings(switcher.backup_dir).share_default
         manager = SessionManager(switcher)
 
         manager.run(
             args.account,
             tail,
-            share=not args.no_share,
+            share=share,
             share_history=args.share_history,
             require_session=args.require_session,
         )

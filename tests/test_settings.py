@@ -16,9 +16,13 @@ from claude_rotater.settings import (
     SETTING_GROUPS,
     SETTING_SPECS,
     atomic_write_json,
+    AccountsSettings,
     AutoSwitchSettings,
+    RunSettings,
     UiSettings,
     effective_settings,
+    load_accounts_settings,
+    load_run_settings,
     load_settings,
     load_ui_settings,
     merged_with_cli,
@@ -188,6 +192,8 @@ class TestSettingSpecs:
         assert by_source["cadence"] == {
             f.name for f in PollCadence.__dataclass_fields__.values()
         }
+        assert by_source["run"] == {"share_default"}
+        assert by_source["accounts"] == {"oauth_only"}
 
     def test_every_spec_group_is_a_known_section(self):
         groups = {key for key, _ in SETTING_GROUPS}
@@ -228,6 +234,8 @@ class TestSettingSpecs:
             "autoswitch": AutoSwitchSettings(),
             "ui": UiSettings(),
             "cadence": PollCadence(),
+            "run": RunSettings(),
+            "accounts": AccountsSettings(),
         }
         for spec in SETTING_SPECS.values():
             assert spec.default == getattr(sources[spec.source], spec.field)
@@ -489,3 +497,51 @@ class TestLoginWarnDays:
         assert load_ui_settings(tmp_path).login_warn_days == 10
         with pytest.raises(ConfigError):
             set_setting(tmp_path, "ui.loginWarnDays", "61")
+
+
+class TestProfileSettings:
+    """``run.shareDefault`` and ``accounts.oauthOnly``: plain bools, read
+    leniently, set strictly, shown on the Config page's Profile section."""
+
+    def test_defaults(self, tmp_path: Path):
+        assert load_run_settings(tmp_path) == RunSettings(share_default=True)
+        assert load_accounts_settings(tmp_path) == AccountsSettings(oauth_only=False)
+
+    def test_specs_are_bools_in_the_profile_group(self):
+        for key in ("run.shareDefault", "accounts.oauthOnly"):
+            spec = SETTING_SPECS[key]
+            assert spec.kind == "bool" and spec.group == "profile"
+            assert spec.label and spec.help
+
+    def test_set_round_trips_into_their_own_sections(self, tmp_path: Path):
+        set_setting(tmp_path, "run.shareDefault", "no")
+        set_setting(tmp_path, "accounts.oauthOnly", "yes")
+        raw = json.loads(settings_path(tmp_path).read_text())
+        assert raw["run"] == {"shareDefault": False}
+        assert raw["accounts"] == {"oauthOnly": True}
+        assert load_run_settings(tmp_path).share_default is False
+        assert load_accounts_settings(tmp_path).oauth_only is True
+
+    def test_set_rejects_non_bools(self, tmp_path: Path):
+        with pytest.raises(ConfigError, match="true or false"):
+            set_setting(tmp_path, "accounts.oauthOnly", "maybe")
+
+    @pytest.mark.parametrize("bad", ["false", 0, 1, None, [True]])
+    def test_non_bool_values_on_disk_read_as_default(self, tmp_path: Path, bad):
+        atomic_write_json(
+            settings_path(tmp_path),
+            {"run": {"shareDefault": bad}, "accounts": {"oauthOnly": bad}},
+        )
+        assert load_run_settings(tmp_path).share_default is True
+        assert load_accounts_settings(tmp_path).oauth_only is False
+
+    def test_non_object_sections_read_as_default(self, tmp_path: Path):
+        atomic_write_json(settings_path(tmp_path), {"run": "x", "accounts": [1]})
+        assert load_run_settings(tmp_path) == RunSettings()
+        assert load_accounts_settings(tmp_path) == AccountsSettings()
+
+    def test_effective_settings_report_them(self, tmp_path: Path):
+        set_setting(tmp_path, "accounts.oauthOnly", "true")
+        rows = {spec.dotted: (value, is_set) for spec, value, is_set in effective_settings(tmp_path)}
+        assert rows["accounts.oauthOnly"] == (True, True)
+        assert rows["run.shareDefault"] == (True, False)

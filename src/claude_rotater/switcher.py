@@ -86,7 +86,12 @@ from claude_rotater.process_detection import get_running_instances
 from claude_rotater import poll_policy
 from claude_rotater.estimator import estimate_account
 from claude_rotater.usage_history import UsageHistory
-from claude_rotater.settings import load_settings, parse_model_names, settings_path
+from claude_rotater.settings import (
+    load_accounts_settings,
+    load_settings,
+    parse_model_names,
+    settings_path,
+)
 from claude_rotater.usage_store import (
     FetchRecord,
     UsageEntry,
@@ -870,11 +875,14 @@ class ClaudeAccountSwitcher:
 
         Used by switch() and switch_to() to decide whether a target slot can
         be activated without re-adding the account. Tolerates stale sequence
-        entries that reference a removed account record.
+        entries that reference a removed account record. An API-key slot is
+        never switchable while ``accounts.oauthOnly`` is on.
         """
         data = self._get_sequence_data() or {}
         record = data.get("accounts", {}).get(str(account_num))
         if not record:
+            return False
+        if self._api_key_from_data(data, str(account_num)) and self._oauth_only():
             return False
         email = record.get("email", "")
         if not self._read_account_credentials(str(account_num), email):
@@ -1091,6 +1099,23 @@ class ClaudeAccountSwitcher:
             if self._account_is_switchable(str(num))
             and not self._disabled_from_data(data, str(num))
         ]
+
+    # Shown wherever a switch skips or refuses a slot held out by policy.
+    OAUTH_ONLY_REASON = "(API-key account; accounts.oauthOnly is on)"
+
+    def _oauth_only(self) -> bool:
+        """``accounts.oauthOnly`` for this data dir: API-key slots are held
+        out of every switch. Read fresh so a config change applies at once."""
+        return load_accounts_settings(self.backup_dir).oauth_only
+
+    @staticmethod
+    def _api_key_from_data(data: dict, account_num: str) -> bool:
+        """Whether a slot is a managed API-key account, in loaded data."""
+        record = data.get("accounts", {}).get(str(account_num))
+        return bool(record and record.get("kind") == "api_key")
+
+    def _held_out_by_policy(self, data: dict, account_num: str, oauth_only: bool) -> bool:
+        return oauth_only and self._api_key_from_data(data, account_num)
 
     @staticmethod
     def _disabled_from_data(data: dict, account_num: str) -> bool:
@@ -5139,6 +5164,8 @@ class ClaudeAccountSwitcher:
             if target_disabled or not self._account_is_switchable(target):
                 if target_disabled:
                     reason = console_reason = "(disabled)"
+                elif self._held_out_by_policy(data, target, self._oauth_only()):
+                    reason = console_reason = self.OAUTH_ONLY_REASON
                 else:
                     reason = "(no stored credentials/config)"
                     console_reason = (
@@ -5347,13 +5374,19 @@ class ClaudeAccountSwitcher:
 
         next_account: str | None = None
         skipped_exhausted: list[str] = []
+        oauth_only = self._oauth_only()
         for offset in range(1, len(sequence)):
             candidate = str(sequence[(current_index + offset) % len(sequence)])
+            held_out = None
             if self._disabled_from_data(data, candidate):
+                held_out = "(disabled)"
+            elif self._held_out_by_policy(data, candidate, oauth_only):
+                held_out = self.OAUTH_ONLY_REASON
+            if held_out:
                 if json_output:
-                    warnings.append(f"Skipped Account-{candidate} (disabled)")
+                    warnings.append(f"Skipped Account-{candidate} {held_out}")
                 else:
-                    print(f"{accent('Skipping')} Account-{candidate} (disabled)")
+                    print(f"{accent('Skipping')} Account-{candidate} {held_out}")
                 continue
             if not self._account_is_switchable(candidate):
                 if json_output:
@@ -5520,6 +5553,12 @@ class ClaudeAccountSwitcher:
         data = self._get_sequence_data()
         if target_account not in data.get("accounts", {}):
             raise AccountNotFoundError(f"Account-{target_account} does not exist")
+        if self._held_out_by_policy(data, target_account, self._oauth_only()):
+            raise ConfigError(
+                f"Account-{target_account} is an API-key account and this "
+                "profile allows OAuth accounts only (accounts.oauthOnly); "
+                "turn it off on rota's config page (c) to switch to it"
+            )
 
         # Short-circuit a no-op before mutating (issue #79). A self-switch
         # would first back up the live credentials into the target slot —

@@ -1096,3 +1096,52 @@ class TestADeniedKeychainSurvivesAnUnreadableFallbackFile:
         assert ac.keychain_unavailable is True, (
             "the keychain WAS denied; an unreadable fallback cannot clear that"
         )
+
+
+class TestOauthOnlyProfile:
+    """``accounts.oauthOnly`` holds API-key slots out of every switch."""
+
+    def _switcher(self, *, oauth_only: bool) -> ClaudeAccountSwitcher:
+        from claude_rotater.settings import set_setting
+
+        s = _linux_switcher()
+        s.add_account_from_token(SETUP_TOKEN)  # 1: OAuth
+        s.add_account_from_token(API_KEY)  # 2: API key
+        s.add_account_from_token(SETUP_TOKEN.replace("o9", "q1"), slot=3)  # 3: OAuth
+        set_setting(s.backup_dir, "accounts.oauthOnly", "true" if oauth_only else "false")
+        return s
+
+    def test_off_by_default_keeps_api_key_slots_switchable(self, temp_home: Path):
+        s = self._switcher(oauth_only=False)
+        assert s.switchable_account_numbers() == ["1", "2", "3"]
+
+    def test_api_key_slots_drop_out_of_rotation_candidates(self, temp_home: Path):
+        s = self._switcher(oauth_only=True)
+        assert s.switchable_account_numbers() == ["1", "3"]
+        assert not s._account_is_switchable("2")
+        assert s.account_kind_for("2") == "api_key"  # still managed
+
+    def test_explicit_switch_is_refused(self, temp_home: Path):
+        from claude_rotater.exceptions import ConfigError
+
+        s = self._switcher(oauth_only=True)
+        before = s._get_sequence_data()["activeAccountNumber"]
+        with pytest.raises(ConfigError, match="accounts.oauthOnly"):
+            s.switch_to("2", json_output=True)
+        assert s._get_sequence_data()["activeAccountNumber"] == before
+
+    def test_rotation_skips_with_a_reason(self, temp_home: Path):
+        s = self._switcher(oauth_only=True)
+        data = s._get_sequence_data()
+        data["activeAccountNumber"] = 2
+        s._write_json(s.sequence_file, data)
+        out = s.switch(json_output=True)
+        assert any(s.OAUTH_ONLY_REASON in w for w in out.get("warnings", [])), out
+        assert s._get_sequence_data()["activeAccountNumber"] != 2
+
+    def test_setting_change_applies_without_a_restart(self, temp_home: Path):
+        from claude_rotater.settings import set_setting
+
+        s = self._switcher(oauth_only=True)
+        set_setting(s.backup_dir, "accounts.oauthOnly", "false")
+        assert "2" in s.switchable_account_numbers()
