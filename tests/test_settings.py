@@ -45,6 +45,28 @@ class TestLoadSettings:
     def test_missing_file_gives_defaults(self, tmp_path: Path):
         assert load_settings(tmp_path) == AutoSwitchSettings()
 
+    def test_retired_keys_from_older_versions_load_cleanly(self, tmp_path: Path):
+        """A settings.json written before the statusline feed (loop interval,
+        active and urgent cadences) keeps working: the retired keys are
+        ignored, kept in the file, and never crash a read or a write."""
+        retired = {"intervalSeconds": 20, "pollActiveSeconds": 90,
+                   "pollUrgentSeconds": 30}
+        settings_path(tmp_path).write_text(json.dumps({
+            "schemaVersion": 1,
+            "autoswitch": {"threshold": 85, "pollSpareSeconds": 300, **retired},
+        }))
+        assert load_settings(tmp_path) == AutoSwitchSettings(threshold=85.0)
+        assert load_cadence(tmp_path) == PollCadence(spare_s=300.0)
+        rows = {spec.dotted: value for spec, value, _ in effective_settings(tmp_path)}
+        assert "autoswitch.intervalSeconds" not in rows
+        assert rows["autoswitch.feedStaleSeconds"] == 600.0
+        set_setting(tmp_path, "autoswitch.threshold", "80")
+        save_settings(tmp_path, load_settings(tmp_path))
+        section = json.loads(settings_path(tmp_path).read_text())["autoswitch"]
+        assert {k: section[k] for k in retired} == retired
+        with pytest.raises(ConfigError, match="unknown setting"):
+            set_setting(tmp_path, "autoswitch.intervalSeconds", "30")
+
     def test_corrupt_file_gives_defaults(self, tmp_path: Path):
         settings_path(tmp_path).write_text("{not json")
         assert load_settings(tmp_path) == AutoSwitchSettings()

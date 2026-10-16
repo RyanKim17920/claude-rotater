@@ -808,6 +808,29 @@ class TestAdaptiveScheduler:
         self._tick(h, counts, usage)
         assert counts["1"] == 3
 
+    def test_spare_is_polled_just_after_its_window_resets(self, temp_home, monkeypatch):
+        # Spares poll every pollSpareSeconds, plus once right after a known
+        # reset (the new window re-baselines), and the loop sleeps exactly
+        # until then rather than ticking on a timer.
+        h = self._harness(temp_home, monkeypatch, accounts=2)
+        reset_at = h.clock.now + 200.0
+        usage = {"1": _usage(10), "2": _usage(60, _iso_at(reset_at))}
+        counts: dict[str, int] = {}
+        self._tick(h, counts, usage)
+        assert counts == {"1": 1, "2": 1}
+        due = reset_at + poll_policy.RESET_SLACK_S
+        assert h.engine._next_delay(TickOutcome.NO_ACTION) == pytest.approx(due - h.clock.now)
+        h.clock.now = due - 1
+        self._tick(h, counts, usage)
+        assert counts["2"] == 1
+        usage["2"] = _usage(0, _iso_at(reset_at + 5 * 3600))
+        h.clock.now = due
+        self._tick(h, counts, usage)
+        assert counts == {"1": 1, "2": 2}
+        # Back on the baseline afterwards.
+        e = h.switcher._usage_store.entries({"2": ("b@example.com", "")})["2"]
+        assert e.next_poll_at == pytest.approx(due + poll_policy.SPARE_INTERVAL_S)
+
     def test_in_band_without_movement_keeps_the_baseline(self, temp_home, monkeypatch):
         # In the escalation band but not burning: no ETA, so the plan keeps
         # the baseline. Escalation still refreshes the row once it is past
