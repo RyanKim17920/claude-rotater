@@ -536,43 +536,6 @@ class TestTryRefreshOAuthCredentials:
             assert oauth.refresh_oauth_credentials(self._make_credentials()) is None
 
 
-class TestBuildTokenStatus:
-    """Test token status formatting."""
-
-    def test_builds_fresh_token_status(self):
-        fixed_now = datetime(2026, 4, 2, 18, 0, 0, tzinfo=timezone.utc)
-        expires_at = int(datetime(2026, 4, 2, 19, 30, 0, tzinfo=timezone.utc).timestamp() * 1000)
-        credentials = json.dumps({
-            "claudeAiOauth": {
-                "accessToken": "old-access",
-                "refreshToken": "old-refresh",
-                "expiresAt": expires_at,
-            }
-        })
-
-        with patch("claude_swap.oauth.datetime") as mock_dt:
-            mock_dt.fromisoformat = datetime.fromisoformat
-            mock_dt.fromtimestamp = datetime.fromtimestamp
-            mock_dt.now.return_value = fixed_now
-            status = oauth.build_token_status(credentials)
-
-        assert status is not None
-        assert "oauth: fresh, refresh token yes" in status
-        assert "in 1h 30m" in status
-
-    def test_builds_unknown_expiry_status(self):
-        credentials = json.dumps({
-            "claudeAiOauth": {
-                "accessToken": "old-access",
-                "refreshToken": "old-refresh",
-            }
-        })
-
-        status = oauth.build_token_status(credentials)
-
-        assert status == "oauth: unknown expiry, refresh token yes"
-
-
 class TestFetchUsageForAccount:
     """Test refresh-aware usage fetches for managed accounts."""
 

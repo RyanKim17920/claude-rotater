@@ -333,25 +333,6 @@ def fetch_oauth_profile(access_token: str) -> dict | None:
 
 
 
-def build_token_status(credentials: str) -> str | None:
-    """Return a short debug summary of stored OAuth token state."""
-    oauth = extract_oauth_data(credentials)
-    if not oauth:
-        return None
-
-    has_refresh_token = bool(oauth.get("refreshToken"))
-    expires_at = oauth.get("expiresAt")
-    refresh_str = "yes" if has_refresh_token else "no"
-
-    if not isinstance(expires_at, (int, float)):
-        return f"oauth: unknown expiry, refresh token {refresh_str}"
-
-    expires_utc = datetime.fromtimestamp(expires_at / 1000, tz=timezone.utc)
-    state = "expired" if is_oauth_token_expired(expires_at) else "fresh"
-    countdown, clock = format_reset(expires_utc.isoformat())
-    return f"oauth: {state}, refresh token {refresh_str}, expires {clock} in {countdown}"
-
-
 def format_reset(resets_at: str) -> tuple[str, str]:
     """Return (countdown, clock) for a reset time in local time."""
     reset_utc = datetime.fromisoformat(resets_at)
