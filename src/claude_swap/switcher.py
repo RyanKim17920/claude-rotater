@@ -195,7 +195,8 @@ ERROR_NOTES = {
     ),
     "stash-unreadable": (
         "this slot's stashed successor is unreadable — unlock the keychain "
-        "or fix the file, then retry; `cswap unclaimed` inspects it"
+        "or fix the file, then retry (stash files are .unclaimed-*.enc in "
+        "cswap's credentials folder)"
     ),
 }
 
@@ -1413,8 +1414,8 @@ class ClaudeAccountSwitcher:
                     # candidate (network?)" -- sending the operator to check
                     # a connection that is fine, forever, on a condition
                     # only they can clear (unlock the Keychain, fix the
-                    # mode, remount the volume) or drop
-                    # (`cswap unclaimed --purge`).
+                    # mode, remount the volume) or drop (delete the stash
+                    # file by hand).
                     self._logger.info(
                         "Account %s's stashed successor is unreadable; "
                         "deferring the refresh.", account_num, exc_info=True,
@@ -1709,8 +1710,8 @@ class ClaudeAccountSwitcher:
         re-POSTs a generation this pass already consumed.
 
         The two costs differ by an order of magnitude. Losing a retire leaves
-        one stale row, which the next pass retries and `cswap unclaimed
-        --purge` drops by hand. Losing the adoption discards a live credential
+        one stale row, which the next pass retries (or the operator deletes
+        by hand). Losing the adoption discards a live credential
         already written to the store. So: log and continue.
         """
         try:
@@ -1718,7 +1719,7 @@ class ClaudeAccountSwitcher:
         except Exception:
             self._logger.warning(
                 "Could not retire account %s's stash entry %s; leaving it for "
-                "the next pass (`cswap unclaimed --purge` drops it by hand).",
+                "the next pass (or delete its .unclaimed-*.enc file by hand).",
                 account_num, entry_id, exc_info=True,
             )
 
@@ -1772,8 +1773,9 @@ class ClaudeAccountSwitcher:
                 f"the unclaimed manifest is {manifest_verdict} and stashed "
                 f"entry files exist; deferring account {account_num}'s "
                 "adoption rather than POSTing a generation a stashed "
-                "successor may already have superseded (`cswap unclaimed` "
-                "lists them, `--purge` drops one)"
+                "successor may already have superseded (the entries are "
+                f".unclaimed-*.enc in {self.credentials_dir}; removing them "
+                "unblocks the slot)"
             )
         for entry_id, meta in manifest.items():
             if meta.get("configSlot") != account_num:
@@ -1814,7 +1816,7 @@ class ClaudeAccountSwitcher:
                     # ("", False) -- absent or corrupt. A merely UNREADABLE
                     # row is ("", True) and survives: its bytes may hold a
                     # real superseded token, so dropping it stays the
-                    # operator's call (`cswap unclaimed --purge`).
+                    # operator's call (delete the file by hand).
                     self._retire_stash_entry(entry_id, account_num)
                     self._logger.info(
                         "Retired account %s's byte-less stash entry: its "
@@ -1860,7 +1862,7 @@ class ClaudeAccountSwitcher:
             # Housekeeping, and non-fatal for the same reason: the slot is
             # advanced, so a raise would report a failed refresh for a
             # credential the store holds. A stale row is retried next pass or
-            # dropped with `cswap unclaimed --purge`.
+            # deleted by hand.
             self._retire_stash_entry(entry_id, account_num)
             self._logger.info(
                 "Adopted account %s's stashed successor (%s): the stored "

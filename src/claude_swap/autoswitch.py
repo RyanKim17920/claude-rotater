@@ -78,8 +78,8 @@ _SYSTEMIC_MESSAGES = {
     "invalid_client": "cswap's OAuth client was rejected — systemic, not this "
                       "account",
     "stash-unreadable": "a stashed successor is unreadable — unlock the "
-                        "keychain or fix the file, then retry; "
-                        "`cswap unclaimed` inspects it",
+                        "keychain or fix the file, then retry (stash files "
+                        "are .unclaimed-*.enc in cswap's credentials folder)",
     "consume-busy": "another cswap surface holds the slot — retries next pass",
 }
 # Insertion order IS the precedence order, so the remedy and its rank cannot

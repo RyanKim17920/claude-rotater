@@ -9373,30 +9373,34 @@ class TestConsumeGate:
             s.credentials_dir.glob(".unclaimed-manifest.json.corrupt-*")
         ), "set a READABLE manifest aside as corrupt"
 
-    def test_the_purge_exit_the_fail_closed_message_names_actually_works(
-        self, temp_home: Path, sample_sequence_data: dict
+    def test_the_manual_exit_the_fail_closed_message_names_actually_works(
+        self, temp_home: Path, sample_sequence_data: dict, caplog
     ):
         """A remedy named in an error message has to be a remedy.
 
         Failing closed on corrupt+orphans is only defensible because the
-        operator has a way out, and the message names one: `cswap unclaimed`
-        to see them, `--purge` to drop one. Both run against a CORRUPT
-        manifest, so the mutator must NOT refuse there — which is why its
-        refusal is scoped to `unreadable`. Walk the whole exit rather than
-        asserting the sentence.
+        operator has a way out, and the message names one: the
+        .unclaimed-*.enc files in the credentials directory, whose removal
+        unblocks the slot. Walk the whole exit rather than asserting the
+        sentence.
         """
         s = self._switcher(sample_sequence_data)
         s._write_account_credentials("1", "test@example.com", self._OLD)
         self._stash_successor_of(s, self._NEW, self._OLD)
         s._store._stash_manifest_path().write_text("{not json at all")
 
-        # 1. the operator can SEE the orphan, by glob, with no readable rows
-        listed = unclaimed_entries(s._store)
-        assert listed, "corrupt manifest hid the orphan from `cswap unclaimed`"
+        # 1. the gate defers without a POST and logs where the entries are
+        with patch("claude_swap.oauth.try_refresh_oauth_credentials") as never:
+            deferred = s.consume_backup_grant("1", "test@example.com", self._OLD)
+        never.assert_not_called()
+        assert deferred.error == "stash-unreadable"
+        assert str(s.credentials_dir) in caplog.text
 
-        # 2. and can DROP it — the mutator does not refuse on corrupt
-        for entry_id in list(listed):
-            s._store._remove_unclaimed_credential(entry_id)
+        # 2. the operator finds them there, with no readable rows, and drops them
+        orphans = list(s.credentials_dir.glob(".unclaimed-*.enc"))
+        assert orphans, "corrupt manifest hid the orphan from the operator"
+        for path in orphans:
+            path.unlink()
 
         # 3. after which nothing is at risk and the slot moves again
         assert s._store._stash_entry_files_exist() is False
@@ -9489,7 +9493,7 @@ class TestConsumeGate:
         does not "self-heal at the cost of one POST" — it returns
         invalid_grant, and the gate returns before any manifest write, so
         nothing is ever set aside. The exit is the operator's
-        (`cswap unclaimed --purge`, which still lists orphans by glob), not a
+        (deleting the orphaned .unclaimed-*.enc files by hand), not a
         POST that strikes a live account.
         """
         s = self._switcher(sample_sequence_data)
@@ -10130,7 +10134,7 @@ class TestPermanentlyUnreadableStashRow:
         from claude_swap.oauth import _DETERMINISTIC_REFRESH_ERRORS
         from claude_swap.switcher import ERROR_NOTES
 
-        assert "cswap unclaimed" in ERROR_NOTES["stash-unreadable"]
+        assert ".unclaimed-*.enc" in ERROR_NOTES["stash-unreadable"]
         assert "stash-unreadable" in _DETERMINISTIC_REFRESH_ERRORS
 
 
@@ -10924,7 +10928,7 @@ class TestGateUltraReviewFixes:
         if bytes_survive:
             assert listed, (
                 "a superseded row that still holds its bytes is a real "
-                "credential; dropping it is the operator's call (--purge)"
+                "credential; dropping it is the operator's call"
             )
         else:
             assert not listed, (
