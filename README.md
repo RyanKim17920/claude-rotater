@@ -15,6 +15,9 @@ Windows.
   behind `h`. Estimates are marked by `~`, a lighter tint or a dotted line
   and coloured by outcome: green under the threshold, yellow close, red over.
 - Automatic switching while the TUI is open, or headless with `rota auto`.
+  By default it spends the account whose weekly quota expires soonest and
+  keeps a 5-hour backup when resets are close (`autoswitch.strategy`:
+  `expiring-first`, `best` or `consume-first`).
   Switches take Claude Code's own credential locks, so they never collide
   with a token refresh.
 - Log accounts in from the TUI without touching the account you are using.

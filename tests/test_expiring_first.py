@@ -20,6 +20,7 @@ from claude_rotater.autoswitch import (
 from claude_rotater.settings import (
     SETTING_GROUPS,
     SETTING_SPECS,
+    AutoSwitchSettings,
     load_settings,
     set_setting,
     settings_path,
@@ -567,6 +568,13 @@ class TestDecisionFromEvent:
 
 
 class TestSettings:
+    def test_default_for_new_installs(self, tmp_path):
+        assert load_settings(tmp_path).strategy == "expiring-first"
+
+    def test_data_dir_without_the_key_follows_the_new_default(self, tmp_path):
+        settings_path(tmp_path).write_text(json.dumps({"autoswitch": {"threshold": 80}}))
+        assert load_settings(tmp_path).strategy == "expiring-first"
+
     def test_explicit_best_is_kept(self, tmp_path):
         set_setting(tmp_path, "autoswitch.strategy", "best")
         assert load_settings(tmp_path).strategy == "best"
@@ -592,3 +600,8 @@ class TestSettings:
         )
         loaded = load_settings(tmp_path)
         assert (loaded.similar_reset_hours, loaded.manual_hold_minutes) == (168.0, 0.0)
+
+    def test_strategy_choices_lead_with_the_default(self):
+        spec = SETTING_SPECS["autoswitch.strategy"]
+        assert spec.choices[0] == AutoSwitchSettings().strategy == "expiring-first"
+        assert set(spec.choices) == {"expiring-first", "best", "consume-first"}

@@ -48,11 +48,12 @@ class AutoSwitchSettings:
     threshold: float = 90.0
     cooldown_seconds: float = 300.0
     hysteresis_pct: float = 10.0
-    # "best" (most headroom, only at the threshold), "consume-first"
-    # (soonest weekly reset, strictly) or "expiring-first" (spend the account
-    # whose weekly window resets soonest, balancing 5h windows when resets
-    # are similar; see expiring_first.py).
-    strategy: str = "best"
+    # "expiring-first" (spend the account whose weekly window resets soonest,
+    # balancing 5h windows when resets are similar; see expiring_first.py),
+    # "best" (most headroom, only at the threshold) or "consume-first"
+    # (soonest weekly reset, strictly). A data dir that never set the key
+    # follows this default; an explicit value in settings.json is kept.
+    strategy: str = "expiring-first"
     include_api_key_accounts: bool = False
     unhealthy_ticks: int = 3
     # Comma-separated model display name(s) (e.g. "Fable" or "Fable,Opus"),
@@ -195,7 +196,7 @@ def _cadence_specs() -> tuple[SettingSpec, ...]:
 
 # Auto-switch strategies, the default first. cli.py's --strategy reads this
 # too, so the flag and the setting accept the same names.
-STRATEGY_CHOICES: tuple[str, ...] = ("best", "consume-first", "expiring-first")
+STRATEGY_CHOICES: tuple[str, ...] = ("expiring-first", "best", "consume-first")
 
 # settings.json uses camelCase (matching the repo's other JSON artifacts);
 # dataclass fields stay snake_case.

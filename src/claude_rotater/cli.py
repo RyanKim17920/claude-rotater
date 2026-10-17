@@ -246,11 +246,10 @@ Defaults live in settings.json in the backup root; flags override them.
         choices=STRATEGY_CHOICES,
         default=None,
         help=(
-            "Target selection: 'best' (most quota left, at the threshold "
-            "only; default), 'consume-first' (strictly the soonest weekly "
-            "reset) or 'expiring-first' (spend the account whose weekly "
-            "quota expires soonest, balancing 5h windows when resets are "
-            "similar)"
+            "Target selection: 'expiring-first' (default: spend the account "
+            "whose weekly quota expires soonest, balancing 5h windows when "
+            "resets are similar), 'best' (most quota left, at the threshold "
+            "only) or 'consume-first' (strictly the soonest weekly reset)"
         ),
     )
     parser.add_argument(
