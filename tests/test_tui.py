@@ -1191,6 +1191,20 @@ class TestHeaderDecision:
         assert header_decision(NoSwitchEvent(reason=reason)) is None
         assert header_decision(PollEvent(active={"number": 1}, headroom={}, threshold=90.0)) is None
 
+    @pytest.mark.parametrize(
+        "reason,to_ref,expected",
+        [
+            ("switch → #2: #1's 7d resets in 6d", {"number": "2", "email": "b@x.com"}, "→ b@x.com: #1's 7d resets in 6d"),
+            ("", {"number": "2", "email": "b@x.com"}, "→ b@x.com: proactive"),
+            ("drained: 5h at 91%", {"number": "3"}, "→ #3: drained: 5h at 91%"),
+        ],
+    )
+    def test_switch_flash(self, reason, to_ref, expected):
+        from claude_rotater.tui.main import switch_flash
+
+        event = SwitchEvent(trigger="proactive", from_ref={"number": "1"}, to_ref=to_ref, reason=reason)
+        assert switch_flash(event) == expected
+
     def test_same_verdict_ignores_the_time(self):
         from claude_rotater.autoswitch import Decision
         from claude_rotater.tui.main import same_verdict
@@ -2242,6 +2256,25 @@ class TestEngineHosting:
             await settle(pilot)
             assert app.auto_status.decision is first
             assert "no switch" not in painted(app, "#status")
+
+    @pytest.mark.parametrize("cols", [60, 120])
+    async def test_switch_flashes_on_the_prompt_line_and_heads_the_header(self, tmp_path, fake_engine, cols):
+        app = make_app(three_accounts(tmp_path))
+        async with app.run_test(size=(cols, 30)) as pilot:
+            await settle(pilot)
+            engine = fake_engine.instances[0]
+            await emit(engine, SwitchEvent(
+                trigger="expiring-first",
+                from_ref={"number": 1, "email": "me@x.com"},
+                to_ref={"number": 2, "email": "work@y.com"},
+                reason="switch → #2: #1's 7d resets in 6d, #2's in 19h; use #2 first",
+            ))
+            await settle(pilot)
+            prompt = prompt_plain(app)
+            assert prompt.startswith("→ work@y.com: #1's 7d") and len(prompt) <= cols
+            status = painted(app, "#status")
+            assert "auto on · switch → #2" in status and len(status) <= cols
+            assert app.prompt._timer is not None  # brief: it clears itself
 
     async def test_header_says_why_a_switch_is_held(self, tmp_path):
         """At its threshold with a cooldown running, the header says the

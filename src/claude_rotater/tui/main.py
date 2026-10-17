@@ -239,6 +239,18 @@ def header_decision(event: AutoSwitchEvent) -> Decision | None:
     return None
 
 
+def switch_flash(event: SwitchEvent) -> str:
+    """The prompt line's brief note for an engine switch: ``→ b@x.com: why``.
+
+    The why is the strategy's reason without its own "switch → #2:" lead
+    (the email already says where), else the trigger."""
+    dest = (event.to_ref or {}).get("email") or f"#{(event.to_ref or {}).get('number', '?')}"
+    lead, sep, why = event.reason.partition(": ")
+    if not (sep and lead.startswith("switch")):
+        why = event.reason
+    return f"→ {dest}: {why or event.trigger}"
+
+
 def same_verdict(new: Decision, old: Decision | None) -> bool:
     """Whether a decision repeats the one the header shows; its time alone
     does not count, so a steady verdict is not re-stored every tick."""

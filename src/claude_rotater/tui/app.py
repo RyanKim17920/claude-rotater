@@ -31,7 +31,7 @@ from textual.reactive import reactive
 from textual.worker import WorkerState
 
 from claude_rotater import legacy_import, printer
-from claude_rotater.autoswitch import STATE_FILENAME, AutoSwitchEvent
+from claude_rotater.autoswitch import STATE_FILENAME, AutoSwitchEvent, SwitchEvent
 from claude_rotater.estimator import AccountEstimate, estimate_account
 from claude_rotater import statusline_setup
 from claude_rotater.exceptions import ClaudeSwitchError, LoginError
@@ -59,6 +59,7 @@ from claude_rotater.tui.main import (
     MainScreen,
     header_decision,
     same_verdict,
+    switch_flash,
 )
 from claude_rotater.tui.prompt import Choice, PromptLine
 from claude_rotater.tui.theme import ROTA_DARK, ROTA_LIGHT
@@ -254,7 +255,8 @@ class RotaApp(App):
         self.auto_status = status
         if self.main_screen.is_attached:
             self.main_screen.write_event(event)
-        if kind == "switch":
+        if isinstance(event, SwitchEvent):
+            self.say(switch_flash(event), "ok")
             self.request_refresh()
 
     # -- proactive token refresh ----------------------------------------------
