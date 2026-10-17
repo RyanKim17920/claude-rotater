@@ -2209,6 +2209,17 @@ class TestStripLines:
         narrow = self._lines(60, acc=acc, feed="live")[0]
         assert "login ends" in narrow and "feed live" not in narrow and len(narrow) <= 60
 
+    def test_fractional_threshold_is_never_cut(self):
+        from claude_rotater.estimator import estimate_account
+        from claude_rotater.tui.main import strip_lines
+
+        now = time.time()
+        series = burn_history(now, rate=0.5)["1"]
+        est = estimate_account(series, models=(), threshold=99.9, now=now)
+        acc = make_account(1, active=True, entry=make_entry(62.0, 31.0))
+        lines = [line.plain for line in strip_lines(acc, est, series, now=now, threshold=99.9, width=80)]
+        assert any("stays under 99.9%" in line for line in lines), lines
+
     def test_feed_not_set_up_shows_on_the_active_account(self):
         assert "feed: not set up" in self._lines(160, feed="unset")[0]
 

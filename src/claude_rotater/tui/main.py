@@ -675,7 +675,7 @@ def _sentinel_line(acc: AccountSnapshot, palette: Palette) -> Text | None:
 _SEG_PROJ_W = 5  # " →64%"
 _SEG_SPARK_W = 12
 _SEG_BURN_W = 12  # "no trend yet"
-_SEG_ETA_W = 16  # "stays under 90%"
+_SEG_ETA_W = 17  # "stays under 99.9%"
 _SEG_AT_RESET_W = 14  # "→100% at reset"
 _SEG_RESET_FULL_W = 25  # "resets 2d23h · Mon 17:49"
 _SEG_RESET_SHORT_W = 13  # "resets 2d23h"
