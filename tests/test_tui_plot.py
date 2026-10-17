@@ -141,6 +141,16 @@ class TestLinePlot:
             "    Tue 16:13        Tue 23:13",
         ]
 
+    def test_week_axis_names_dates_not_a_repeated_weekday(self, utc):
+        """A 7d window starts and resets on the same weekday and clock, so
+        its axis reads "Tue 07 … Tue 14 23:13", never "Tue 23:13" twice."""
+        est = WindowEstimate("7d", 30.0, NOW, NOW + 7 * 3600, None, "none", (Point(NOW, 30.0, NOW + 7 * 3600),))
+        axis = line_plot(est, now=NOW, threshold=None, width=60, height=6)[-1].plain.split()
+        x1 = NOW + 7 * 3600
+        x0 = x1 - 7 * 86400
+        assert axis[:2] == [time.strftime("%a", time.gmtime(x0)), time.strftime("%d", time.gmtime(x0))]
+        assert axis[-3:] == time.strftime("%a %d %H:%M", time.gmtime(x1)).split()
+
     def test_empty_series_draws_axes_only(self, utc):
         est = WindowEstimate("5h", 0.0, NOW, NOW + 3600, None, "none", ())
         lines = line_plot(est, now=NOW, threshold=90, width=30, height=6)

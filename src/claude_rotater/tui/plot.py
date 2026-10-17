@@ -202,13 +202,21 @@ def line_plot(
         reset_col = dx(est.resets_at) // 2
 
     lines = _grid_rows(canvas, threshold=threshold, reset_col=reset_col, palette=palette)
-    lines.append(_time_axis(cols, x0, x1, now, _clock_fmt(window_len), palette))
+    left_fmt, right_fmt = _clock_fmts(window_len, x1 - x0)
+    lines.append(_time_axis(cols, x0, x1, now, left_fmt, palette, right_fmt=right_fmt))
     return lines
 
 
-def _clock_fmt(span_s: float) -> str:
-    """Axis label format for one usage window (5h: clock, 7d: weekday+clock)."""
-    return "%H:%M" if span_s <= 86400 else "%a %H:%M"
+def _clock_fmts(window_len_s: float, span_s: float) -> tuple[str, str]:
+    """(left, right) axis label formats for one usage window: clocks for 5h,
+    weekday and clock for a short look into a weekly window; across days,
+    dates ("Sat 10" … "Sat 17 19:00"), since a weekly window starts and
+    resets on the same weekday and clock. The right edge is the reset."""
+    if window_len_s <= 86400:
+        return "%H:%M", "%H:%M"
+    if span_s <= 86400:
+        return "%a %H:%M", "%a %H:%M"
+    return "%a %d", "%a %d %H:%M"
 
 
 def _span_fmt(span_s: float) -> str:
@@ -268,11 +276,12 @@ def _grid_rows(
 
 
 def _time_axis(
-    cols: int, x0: float, x1: float, now: float | None, fmt: str, palette: Palette
+    cols: int, x0: float, x1: float, now: float | None, fmt: str, palette: Palette,
+    *, right_fmt: str | None = None,
 ) -> Text:
     axis = [" "] * cols
     _place(axis, 0, datetime.fromtimestamp(x0).strftime(fmt))
-    right = datetime.fromtimestamp(x1).strftime(fmt)
+    right = datetime.fromtimestamp(x1).strftime(right_fmt or fmt)
     _place(axis, cols - len(right), right)
     if now is not None and x0 <= now <= x1:
         dot = round((now - x0) / (x1 - x0) * (cols * 2 - 1))
