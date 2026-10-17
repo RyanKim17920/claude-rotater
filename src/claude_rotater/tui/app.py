@@ -171,9 +171,10 @@ class RotaApp(App):
         self._applied_generation = 0
         self._last_refresh_error = ""
         self.series = {}
-        # (slot → fetched_at) the cached estimates were computed from; the
-        # history file is re-read only when one of these stamps advances.
-        self._estimate_stamps: dict[str, float | None] | None = None
+        # What the cached estimates were computed from (fetch stamps, slot
+        # identities, the account on duty, the last switch); the history file
+        # is re-read only when one of these changes.
+        self._estimate_stamps: dict | None = None
         self._estimate_lock = threading.Lock()
         self._load_settings()
         try:
@@ -396,26 +397,37 @@ class RotaApp(App):
         self, generation: int, lane: str, full: bool, store_only: bool
     ) -> None:
         snap = self.source.take(full=full, store_only=store_only)
-        estimates = self._estimates_for(snap)
         last_switch_at = self._read_last_switch_at()
+        estimates = self._estimates_for(snap, last_switch_at)
         feed = statusline_setup.status(self.switcher.backup_dir)
         self.call_from_thread(
             self._apply_snapshot, generation, lane, snap, estimates, last_switch_at, feed
         )
 
     def _estimates_for(
-        self, snap: AccountsSnapshot
+        self, snap: AccountsSnapshot, last_switch_at: float | None = None
     ) -> tuple[
         dict[str, AccountEstimate],
         dict[str, dict[str, list[Point]]],
         dict[str, LongTerm] | None,
     ] | None:
-        """Re-read history and re-estimate, only when a fetch stamp advanced.
+        """Re-read history and re-estimate, only when a fetch stamp advanced
+        or the account on duty changed.
+
+        Each account is estimated from its own history, its slope cut at
+        ``last_switch_at`` (the burn before a switch was the previous duty's,
+        see :mod:`claude_rotater.estimator`), so a switch re-estimates every
+        row even when no fetch has landed yet.
 
         Worker thread only. None means "unchanged, keep the cached ones".
         History is best effort: any failure degrades to no estimates.
         """
-        stamps = {acc.number: acc.usage.fetched_at for acc in snap.accounts}
+        stamps = {
+            "fetched": {acc.number: acc.usage.fetched_at for acc in snap.accounts},
+            "identities": {acc.number: account_identity(acc) for acc in snap.accounts},
+            "active": next((acc.number for acc in snap.accounts if acc.is_active), None),
+            "switch": last_switch_at,
+        }
         with self._estimate_lock:
             if stamps == self._estimate_stamps:
                 return None
@@ -430,7 +442,8 @@ class RotaApp(App):
             series = history.series(identities)
             estimates = {
                 num: estimate_account(
-                    series.get(num, {}), models=self.models, threshold=threshold, now=now
+                    series.get(num, {}), models=self.models, threshold=threshold,
+                    now=now, since=last_switch_at,
                 )
                 for num in identities
             }

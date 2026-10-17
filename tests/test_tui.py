@@ -1649,6 +1649,60 @@ class TestMainPage:
             # account 2 has no history: no forecast, rather than a guess
             assert "~" not in row_plain(app, "2") and "?" not in row_plain(app, "2")
 
+    async def test_switch_moves_the_forecast_to_the_account_on_duty(self, tmp_path):
+        """Account 1 burned until the switch, account 2 was idle until then
+        and burns since: after the switch each row (and chart) shows its
+        own history, not the previous duty's burn."""
+        now = time.time()
+        switch_at = now - 1800
+        fake = FakeSwitcher(
+            [
+                make_account(1, active=True, entry=make_entry(62.0, 31.0), email="me@x.com"),
+                make_account(2, entry=make_entry(32.0, 44.0), email="work@y.com"),
+            ],
+            tmp_path,
+        )
+        with_history(fake, {
+            "1": {
+                "5h": linear_points(now=switch_at, start_pct=32.0, rate_pct_per_h=15.0,
+                                    span_s=7200, step_s=300, resets_at=now + 7200),
+                "7d": linear_points(now=switch_at, start_pct=21.4, rate_pct_per_h=0.4,
+                                    span_s=86400, step_s=3600, resets_at=now + 3 * 86400),
+            },
+            "2": {
+                "5h": linear_points(now=switch_at, start_pct=12.0, rate_pct_per_h=0.0,
+                                    span_s=7200, step_s=600, resets_at=now + 7200)
+                + linear_points(now=now, start_pct=12.0, rate_pct_per_h=40.0,
+                                span_s=1800, step_s=300, resets_at=now + 7200)[1:],
+                "7d": linear_points(now=now, start_pct=44.0, rate_pct_per_h=0.0,
+                                    span_s=86400, step_s=3600, resets_at=now + 3 * 86400),
+            },
+        })
+        app = make_app(fake)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await settle(pilot)
+            assert "~5h limit in" in row_plain(app, "1")  # on duty, burning
+            await pilot.press("down", "enter")
+            await settle(pilot)
+            assert ("switch_to", "2") in fake_calls(app)
+            # what every switch stamps (engine and manual alike)
+            (tmp_path / "autoswitch_state.json").write_text(
+                json.dumps({"lastSwitchAt": switch_at})
+            )
+            app._tick()
+            await settle(pilot)
+            one, two = app.estimates["1"], app.estimates["2"]
+            assert all(w.rate_pct_per_h is None for w in one.windows.values())
+            assert two.windows["5h"].rate_pct_per_h == pytest.approx(40.0, rel=0.05)
+            assert two.windows["7d"].rate_pct_per_h == pytest.approx(0.0, abs=1e-6)
+            assert "~" not in row_plain(app, "1")  # its burn left with the duty
+            assert "~5h limit in" in row_plain(app, "2"), row_plain(app, "2")
+            title = painted(app, "#detail").splitlines()[1]
+            assert title.startswith("5h · est. ~limit in"), title
+            await pilot.press("up")
+            await pilot.pause()
+            assert "· —" in painted(app, "#detail")  # account 1: no projection
+
     async def test_highlight_moves_detail(self, tmp_path):
         fake = three_accounts(tmp_path)
         with_history(fake, burn_history(time.time()))
