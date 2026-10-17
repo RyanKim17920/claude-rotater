@@ -89,6 +89,49 @@ def clock():
     return Clock()
 
 
+@pytest.fixture(autouse=True)
+def no_claude_running(monkeypatch):
+    """Tests run on machines where claude may be running; default to none."""
+    monkeypatch.setattr(
+        "claude_rotater.process_detection.any_claude_process_running", lambda: False
+    )
+
+
+class TestAnyClaudeRunning:
+    def test_refuses_every_refresh_while_any_claude_runs(self, tmp_path, clock):
+        sw = FakeSwitcher(tmp_path, clock, {"1": creds("a", expires_in=3600), "2": creds("b", expires_in=60)})
+        TokenRefresher(sw, clock=clock, claude_running=lambda: True).tick()
+        assert sw.consumed == []
+        TokenRefresher(sw, clock=clock, claude_running=lambda: False).tick()
+        assert sw.consumed == ["2"]  # the control: the same pass refreshes
+
+    @pytest.mark.parametrize("line,expected", [
+        ("/Users/u/.local/bin/claude --resume", True),
+        ("claude", True),
+        ("node /opt/lib/node_modules/@anthropic-ai/claude-code/cli.js", True),
+        ("/usr/bin/python3 -m claude_rotater auto", False),
+        ("vim claude-notes.md", False),
+        ("", False),
+    ])
+    def test_recognises_claude_command_lines(self, line, expected):
+        from claude_rotater.process_detection import _looks_like_claude
+
+        assert _looks_like_claude(line) is expected
+
+    def test_unknown_reads_as_running(self, monkeypatch):
+        import subprocess as sp
+
+        from claude_rotater import process_detection
+
+        monkeypatch.undo()  # the real function, with ps failing
+
+        def boom(*_a, **_k):
+            raise OSError("no ps")
+
+        monkeypatch.setattr(sp, "run", boom)
+        assert process_detection.any_claude_process_running() is True
+
+
 def make(tmp_path, clock, accounts, **kw):
     sw = FakeSwitcher(tmp_path, clock, accounts, **kw)
     events = []

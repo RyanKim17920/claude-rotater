@@ -8,10 +8,13 @@ usage polling: each one is refreshed ``LEAD_S`` before its ``expiresAt``.
 
 Rules:
 
-- Never the active account, and never one held by a live ``rota run``
-  session. Refresh tokens rotate: consuming one retires the copy Claude Code
-  is holding, which would log that process out. Both are re-checked right
-  before each refresh, not only when the plan was made.
+- Off unless ``accounts.proactiveTokenRefresh`` is on (the hosts check).
+- Never the active account, never one held by a live ``rota run`` session,
+  and nothing at all while any claude runs on the machine: refresh tokens
+  rotate, consuming one retires the copy a running claude may hold (in any
+  profile; rota cannot see which login another profile's claude loaded),
+  which logs that process out. All are re-checked right before each
+  refresh, not only when the plan was made.
 - Every refresh goes through ``switcher.consume_backup_grant``, the gate that
   serializes grant consumption per slot (re-read, POST, fingerprint CAS), so
   this can race the auto engine, the collector or another rota safely.
@@ -34,6 +37,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Callable, Iterator
 
 from claude_rotater import oauth
+from claude_rotater import process_detection
 from claude_rotater.json_output import SCHEMA_VERSION
 from claude_rotater.usage_store import FetchRecord
 
@@ -124,8 +128,12 @@ class TokenRefresher:
         on_event: Callable[[RefreshEvent], None] = lambda _e: None,
         clock: Callable[[], float] = time.time,
         lead_s: float = LEAD_S,
+        claude_running: Callable[[], bool] | None = None,
     ) -> None:
         self.switcher = switcher
+        self._claude_running = claude_running or (
+            lambda: process_detection.any_claude_process_running()
+        )
         self.on_event = on_event
         self.clock = clock
         self.lead_s = lead_s
@@ -176,6 +184,8 @@ class TokenRefresher:
             return "active"
         if self.switcher._live_session_pids(cand.number, cand.email):
             return "held"
+        if self._claude_running():
+            return "claude-running"
         return None
 
     def tick(self) -> float:

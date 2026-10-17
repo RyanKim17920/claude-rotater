@@ -190,6 +190,45 @@ def process_is_claude(pid: int) -> bool | None:
     return "claude" in text.lower()
 
 
+def _looks_like_claude(args: str) -> bool:
+    """Is a ``ps -o args=`` line a claude: the native binary (or its
+    symlink) as argv[0], or an npm install's ``claude-code`` ``cli.js``."""
+    parts = args.split()
+    if not parts:
+        return False
+    if os.path.basename(parts[0]).lower() in ("claude", "claude.exe"):
+        return True
+    return any(
+        "claude-code" in part and part.endswith("cli.js") for part in parts[1:3]
+    )
+
+
+def any_claude_process_running() -> bool:
+    """Whether any claude runs on this machine, in ANY profile.
+
+    Machine-wide on purpose: an account's refresh token can be held by a
+    claude under another ``CLAUDE_CONFIG_DIR`` (a shared account, or a login
+    copied there), and that claude has no session record in this profile.
+    Callers use this to refuse a token rotation, so not knowing (Windows,
+    ``ps`` failing) answers True: uncertainty must never license one.
+    """
+    if sys.platform == "win32":
+        return True
+    try:
+        proc = subprocess.run(
+            ["ps", "-A", "-o", "args="],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            env={**os.environ, "LC_ALL": "C"},
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return True
+    if proc.returncode != 0:
+        return True
+    return any(_looks_like_claude(line.strip()) for line in proc.stdout.splitlines())
+
+
 def pid_matches_record(pid: int, proc_start: str | None) -> bool:
     """Is the live process at ``pid`` the one that wrote a record stamped
     ``proc_start``, claude's reading of its own start?
