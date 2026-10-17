@@ -12,6 +12,7 @@ import threading
 import sys
 import tempfile
 import time
+from contextlib import contextmanager
 from concurrent.futures import ThreadPoolExecutor
 from functools import partial
 from pathlib import Path
@@ -53,7 +54,7 @@ from claude_rotater.credentials import (  # noqa: F401  (constants re-exported f
 )
 from claude_rotater.fsutil import read_text_with_retry, replace_with_retry
 from claude_rotater.locking import FileLock
-from claude_rotater.logging_config import setup_logging
+from claude_rotater.logging_config import redact, setup_logging
 from claude_rotater.models import (
     AccountSnapshot,
     AccountsSnapshot,
@@ -2775,6 +2776,102 @@ class ClaudeAccountSwitcher:
             data["lastUpdated"] = get_timestamp()
             self._write_json(self.sequence_file, data)
 
+    @contextmanager
+    def _live_login_installed(
+        self, credentials: str, email: str, org_uuid: str, enabled: bool
+    ):
+        """Make a fresh login of the ACTIVE account live, then let the caller
+        store its backup; yields the credential both must hold.
+
+        A staged login of the active account writes the same live store a
+        switch does (``_write_credentials``: the profile-correct Keychain item
+        or plaintext file), with the machine-shared fields composed from the
+        live credential exactly as a switch composes them, and the caller
+        stores that composed blob as the slot's backup so the two agree.
+
+        All-or-nothing, live first: the backup is written only after the live
+        write succeeded, so a failed live write can never leave the backup on
+        the new login while live keeps the old one. A live write that fails
+        partway, or a backup step that fails after it, puts the previous live
+        credential back. Under rota's lock and Claude Code's credential and
+        config locks, re-checking that the account is still the live one.
+        ``enabled`` False is a pass-through, so callers keep one code path.
+        """
+        if not enabled:
+            yield credentials
+            return
+        with FileLock(self.lock_file), claude_credentials_lock(), claude_config_lock():
+            if not self._live_identity_matches(email, org_uuid):
+                raise ValidationError(
+                    "The active account changed while logging in. Nothing was "
+                    "changed; log in again."
+                )
+            previous = self._read_credentials()
+            if previous is None:
+                raise CredentialReadError(
+                    "Cannot read the live credential to keep a copy before "
+                    "replacing it. Nothing was changed."
+                )
+            installed = self._prepare_credentials_for_activation(
+                credentials, previous
+            )
+            try:
+                self._write_credentials(installed)
+            except BaseException:
+                self._restore_live_login(previous, installed, locked=True)
+                raise
+        self._logger.info("Login install: live credential replaced")
+        try:
+            yield installed
+        except BaseException:
+            self._restore_live_login(previous, installed, locked=False)
+            raise
+
+    def _restore_live_login(
+        self, previous: str, installed: str, *, locked: bool
+    ) -> None:
+        """Undo ``_live_login_installed``'s live write, best effort.
+
+        Restores only while live still holds what was installed (or, mid-
+        write, anything but the previous login): a Claude Code refresh or a
+        switch that landed since owns the store now. Never raises; the
+        original failure is the one the caller reports.
+        """
+
+        def restore() -> None:
+            current = self._read_credentials()
+            if current == previous:
+                return
+            if locked or current == installed:
+                if not previous:
+                    self._logger.error(
+                        "Login install: no previous live credential to restore"
+                    )
+                    return
+                self._write_credentials(previous)
+                self._logger.warning("Login install: previous live credential restored")
+            else:
+                self._logger.error(
+                    "Login install: live credential changed since it was "
+                    "replaced; not restoring over it"
+                )
+
+        try:
+            if locked:
+                restore()
+            else:
+                with (
+                    FileLock(self.lock_file),
+                    claude_credentials_lock(),
+                    claude_config_lock(),
+                ):
+                    restore()
+        except Exception as e:
+            self._logger.error(
+                "Login install: failed to restore the previous live credential: "
+                "%s: %s", type(e).__name__, redact(e),
+            )
+
     def add_account(
         self,
         slot: int | None = None,
@@ -2790,10 +2887,12 @@ class ClaudeAccountSwitcher:
         and the credential from that profile's store (its hashed keychain item
         on macOS, its ``.credentials.json`` elsewhere), read through
         ``session.read_config_dir_credentials`` with the EXACT string that was
-        exported as ``CLAUDE_CONFIG_DIR``. The active account is never touched:
-        ``activeAccountNumber`` stays put, and a staged login of the account
-        that is active right now is refused (its live copy is Claude Code's,
-        and a second lineage in the backup would fork it).
+        exported as ``CLAUDE_CONFIG_DIR``. ``activeAccountNumber`` stays put.
+        A staged login of the account that is active right now replaces the
+        live credential too (see ``_live_login_installed``): writing only the
+        backup would fork the lineage, the live copy staying on the old login.
+        Every staged install logs its start, result and any failure reason to
+        rota.log, with emails and tokens masked.
 
         Args:
             slot: Specify the slot number to store the account in.
@@ -2805,6 +2904,26 @@ class ClaudeAccountSwitcher:
             alias: Optional short display alias to set on this account.
                   When omitted, an existing alias on the slot is preserved.
         """
+        if source_dir is None:
+            self._add_account(slot, assume_yes, alias, source_dir=None)
+            return
+        try:
+            self._add_account(slot, assume_yes, alias, source_dir=source_dir)
+        except BaseException as e:
+            self._logger.error(
+                "Login install failed: %s: %s", type(e).__name__, redact(e)
+            )
+            raise
+
+    def _add_account(
+        self,
+        slot: int | None,
+        assume_yes: bool,
+        alias: str | None,
+        *,
+        source_dir: str | None,
+    ) -> None:
+        """The body of :meth:`add_account`, which documents it."""
         self._refuse_session_shell()
         self._setup_directories()
         self._init_sequence_file()
@@ -2843,14 +2962,21 @@ class ClaudeAccountSwitcher:
                 )
             raise ConfigError("No active Claude account found. Please log in first.")
         current_email, current_org_uuid, current_account_uuid = identity
-        if source_dir is not None and self._live_identity_matches(
+        relogin_active = source_dir is not None and self._live_identity_matches(
             current_email, current_org_uuid
-        ):
-            raise ValidationError(
-                f"{current_email} is the active account; its live login belongs "
-                "to Claude Code. Log in again inside Claude Code (/login), then "
-                "press a in rota to update the stored copy. Nothing was changed."
+        )
+        if source_dir is not None:
+            known_slot = self._find_account_slot(
+                self._get_sequence_data(), current_email, current_org_uuid
             )
+            if relogin_active:
+                kind = "re-login of the active account"
+            elif known_slot:
+                kind = "re-login"
+            else:
+                kind = "new account"
+            target = slot if slot is not None else (known_slot or "next free")
+            self._logger.info("Login install started: %s, slot %s", kind, target)
 
         # When no slot specified and account already exists, refresh credentials in place
         if slot is None and self._account_exists(current_email, current_org_uuid):
@@ -2897,22 +3023,30 @@ class ClaudeAccountSwitcher:
             # on a race.
             self._reject_identity_drift_since_verify(identity, **staged_identity)
 
-            self._write_account_credentials(account_num, current_email, current_creds)
-            self._write_account_config(account_num, current_email, current_config)
-            self._usage_store.clear_dead_token(
-                [account_num], {account_num: (current_email, current_org_uuid)}
-            )
+            with self._live_login_installed(
+                current_creds, current_email, current_org_uuid, relogin_active
+            ) as current_creds:
+                self._write_account_credentials(
+                    account_num, current_email, current_creds
+                )
+                self._write_account_config(account_num, current_email, current_config)
+                self._usage_store.clear_dead_token(
+                    [account_num], {account_num: (current_email, current_org_uuid)}
+                )
 
-            if alias is not None:
-                seq["accounts"][account_num]["alias"] = alias
+                if alias is not None:
+                    seq["accounts"][account_num]["alias"] = alias
 
-            if source_dir is None:
-                seq["activeAccountNumber"] = int(account_num)
-            seq["lastUpdated"] = get_timestamp()
-            self._write_json(self.sequence_file, seq)
+                if source_dir is None:
+                    seq["activeAccountNumber"] = int(account_num)
+                seq["lastUpdated"] = get_timestamp()
+                self._write_json(self.sequence_file, seq)
 
             tag = self._get_display_tag(current_email, matched_org_name, current_org_uuid)
-            self._logger.info(f"Updated credentials for account {account_num}: {current_email}")
+            self._logger.info(
+                f"Updated credentials for account {account_num}"
+                + (" (live login replaced)" if relogin_active else "")
+            )
             print(
                 f"{accent('Updated credentials')} for Account {account_num} "
                 f"({current_email} {muted(f'[{tag}]')})."
@@ -3019,54 +3153,62 @@ class ClaudeAccountSwitcher:
 
         self._reject_identity_drift_since_verify(identity, **staged_identity)
 
-        # Now safe to perform destructive cleanup (new account data is in memory)
-        if displace_slot:
-            d_num, d_email, _org = displace_slot
-            self._delete_account_files(d_num, d_email)
+        # A live-write failure raises before any of this runs; a failure in
+        # here puts the previous live login back (see _live_login_installed).
+        with self._live_login_installed(
+            current_creds, current_email, current_org_uuid, relogin_active
+        ) as current_creds:
+            # Now safe to perform destructive cleanup (new account data is in memory)
+            if displace_slot:
+                d_num, d_email, _org = displace_slot
+                self._delete_account_files(d_num, d_email)
+                data = self._get_sequence_data()
+                if int(d_num) in data["sequence"]:
+                    data["sequence"].remove(int(d_num))
+                del data["accounts"][d_num]
+                self._write_json(self.sequence_file, data)
+
+            if migrate_from:
+                data = self._get_sequence_data()
+                old_email = data["accounts"][migrate_from].get("email", "")
+                self._delete_account_files(migrate_from, old_email)
+                if int(migrate_from) in data["sequence"]:
+                    data["sequence"].remove(int(migrate_from))
+                del data["accounts"][migrate_from]
+                self._write_json(self.sequence_file, data)
+
+            # Store backups
+            self._write_account_credentials(account_num, current_email, current_creds)
+            self._write_account_config(account_num, current_email, current_config)
+            self._usage_store.clear_dead_token(
+                [account_num], {account_num: (current_email, organization_uuid)}
+            )
+
+            # Update sequence.json
             data = self._get_sequence_data()
-            if int(d_num) in data["sequence"]:
-                data["sequence"].remove(int(d_num))
-            del data["accounts"][d_num]
+            data["accounts"][account_num] = {
+                "email": current_email,
+                "uuid": account_uuid,
+                "organizationUuid": organization_uuid,
+                "organizationName": organization_name,
+                "added": get_timestamp(),
+            }
+            carried_alias = alias if alias is not None else existing_alias
+            if carried_alias:
+                data["accounts"][account_num]["alias"] = carried_alias
+            if int(account_num) not in data["sequence"]:
+                data["sequence"].append(int(account_num))
+                data["sequence"].sort()
+            if source_dir is None:
+                data["activeAccountNumber"] = int(account_num)
+            data["lastUpdated"] = get_timestamp()
+
             self._write_json(self.sequence_file, data)
-
-        if migrate_from:
-            data = self._get_sequence_data()
-            old_email = data["accounts"][migrate_from].get("email", "")
-            self._delete_account_files(migrate_from, old_email)
-            if int(migrate_from) in data["sequence"]:
-                data["sequence"].remove(int(migrate_from))
-            del data["accounts"][migrate_from]
-            self._write_json(self.sequence_file, data)
-
-        # Store backups
-        self._write_account_credentials(account_num, current_email, current_creds)
-        self._write_account_config(account_num, current_email, current_config)
-        self._usage_store.clear_dead_token(
-            [account_num], {account_num: (current_email, organization_uuid)}
-        )
-
-        # Update sequence.json
-        data = self._get_sequence_data()
-        data["accounts"][account_num] = {
-            "email": current_email,
-            "uuid": account_uuid,
-            "organizationUuid": organization_uuid,
-            "organizationName": organization_name,
-            "added": get_timestamp(),
-        }
-        carried_alias = alias if alias is not None else existing_alias
-        if carried_alias:
-            data["accounts"][account_num]["alias"] = carried_alias
-        if int(account_num) not in data["sequence"]:
-            data["sequence"].append(int(account_num))
-            data["sequence"].sort()
-        if source_dir is None:
-            data["activeAccountNumber"] = int(account_num)
-        data["lastUpdated"] = get_timestamp()
-
-        self._write_json(self.sequence_file, data)
         tag = self._get_display_tag(current_email, organization_name, organization_uuid)
-        self._logger.info(f"Added account {account_num}: {current_email} (org: {organization_uuid or 'personal'})")
+        self._logger.info(
+            f"Added account {account_num} (org: {organization_uuid or 'personal'})"
+            + (" (live login replaced)" if relogin_active else "")
+        )
         if migrate_from:
             print(f"{dimmed(f'Moved from slot {migrate_from} → {slot}')}")
         print(f"{accent('Added')} Account {account_num}: {current_email} {muted(f'[{tag}]')}")

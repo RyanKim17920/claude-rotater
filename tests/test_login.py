@@ -229,12 +229,125 @@ class TestLoginSuccess:
         assert switcher._read_account_credentials("2", "new@example.com") == fresh
         assert switcher._usage_store.entries(ident)["2"].auth_dead_strikes == 0
 
-    def test_active_account_login_is_refused_and_cleaned(self, switcher, platform, block_real_keychain):
-        fake = FakeClaude(email="test@example.com", platform=platform, keychain=block_real_keychain)
-        with pytest.raises(ValidationError, match="active account"):
-            login_account(switcher, runner=fake)
-        assert switcher._read_account_credentials("1", "test@example.com") == _creds("live")
+    def test_active_account_login_installs_live_and_backup(self, switcher, platform, block_real_keychain):
+        fresh = _creds("fresh")
+        fake = FakeClaude(email="test@example.com", platform=platform,
+                          keychain=block_real_keychain, creds=fresh)
+        login_account(switcher, runner=fake)
+        live = switcher._read_credentials()
+        assert json.loads(live) == json.loads(fresh)
+        assert switcher._read_account_credentials("1", "test@example.com") == live
+        seq = switcher._get_sequence_data()
+        assert sorted(seq["accounts"]) == ["1"]
+        assert seq["activeAccountNumber"] == 1
         assert _stages(switcher) == []
+
+    def test_active_account_login_keeps_live_shared_fields(self, switcher, block_real_keychain):
+        # The machine-shared MCP state belongs to the live credential, as on a
+        # switch; the fresh login does not carry it and must not drop it.
+        live = json.loads(_creds("live"))
+        live["mcpOAuth"] = {"server": {"accessToken": "mcp-live"}}
+        switcher._write_credentials(json.dumps(live))
+        login_account(switcher, runner=FakeClaude(email="test@example.com",
+                                                  creds=_creds("fresh")))
+        now = json.loads(switcher._read_credentials())
+        assert now["claudeAiOauth"]["refreshToken"] == "rt-fresh"
+        assert now["mcpOAuth"] == live["mcpOAuth"]
+        assert json.loads(switcher._read_account_credentials("1", "test@example.com")) == now
+
+    def test_active_account_live_write_failure_leaves_backup(self, switcher, block_real_keychain):
+        from claude_rotater.exceptions import CredentialWriteError
+
+        switcher._write_credentials(_creds("live"))  # Claude Code's live copy
+        live_before = switcher._read_credentials()
+        fake = FakeClaude(email="test@example.com", creds=_creds("fresh"))
+        with patch.object(switcher._store, "_write_credentials",
+                          side_effect=CredentialWriteError("disk full")):
+            with pytest.raises(CredentialWriteError):
+                login_account(switcher, runner=fake)
+        assert switcher._read_account_credentials("1", "test@example.com") == _creds("live")
+        assert switcher._read_credentials() == live_before
+        assert _stages(switcher) == []
+
+    def test_active_account_partial_live_write_is_rolled_back(self, switcher, block_real_keychain):
+        from claude_rotater.exceptions import CredentialWriteError
+
+        switcher._write_credentials(_creds("live"))  # Claude Code's live copy
+        live_before = switcher._read_credentials()
+        real_write = switcher._store._write_credentials
+        calls: list[str] = []
+
+        def write_then_fail(creds):
+            calls.append(creds)
+            real_write(creds)
+            if len(calls) == 1:  # the install lands, then its tail fails
+                raise CredentialWriteError("clear managed key failed")
+
+        fake = FakeClaude(email="test@example.com", creds=_creds("fresh"))
+        with patch.object(switcher._store, "_write_credentials", side_effect=write_then_fail):
+            with pytest.raises(CredentialWriteError):
+                login_account(switcher, runner=fake)
+        assert switcher._read_credentials() == live_before
+        assert switcher._read_account_credentials("1", "test@example.com") == _creds("live")
+
+    def test_active_account_backup_failure_restores_live(self, switcher, block_real_keychain):
+        from claude_rotater.exceptions import CredentialWriteError
+
+        switcher._write_credentials(_creds("live"))  # Claude Code's live copy
+        live_before = switcher._read_credentials()
+        fake = FakeClaude(email="test@example.com", creds=_creds("fresh"))
+        with patch.object(switcher, "_write_account_credentials",
+                          side_effect=CredentialWriteError("backup store")):
+            with pytest.raises(CredentialWriteError):
+                login_account(switcher, runner=fake)
+        assert switcher._read_credentials() == live_before
+        assert switcher._read_account_credentials("1", "test@example.com") == _creds("live")
+
+    def test_active_account_with_empty_live_keeps_new_live_on_backup_failure(
+        self, switcher, block_real_keychain, caplog
+    ):
+        # No previous live credential to restore: live keeps the new login
+        # (live ahead of its backup, the state every switch-out reconciles),
+        # and the backup is never left ahead of live.
+        from claude_rotater.exceptions import CredentialWriteError
+
+        assert switcher._read_credentials() == ""
+        fake = FakeClaude(email="test@example.com", creds=_creds("fresh"))
+        with patch.object(switcher, "_write_account_credentials",
+                          side_effect=CredentialWriteError("backup store")):
+            with pytest.raises(CredentialWriteError):
+                login_account(switcher, runner=fake)
+        assert json.loads(switcher._read_credentials()) == json.loads(_creds("fresh"))
+        assert switcher._read_account_credentials("1", "test@example.com") == _creds("live")
+        assert "Login install: no previous live credential to restore" in caplog.messages
+
+    def test_active_account_switched_away_under_lock_changes_nothing(self, switcher, block_real_keychain):
+        # A switch landing between the pre-lock identity check and the lock:
+        # the live store is another account's now.
+        switcher._write_credentials(_creds("live"))
+        fake = FakeClaude(email="test@example.com", creds=_creds("fresh"))
+        with patch.object(switcher, "_live_identity_matches", side_effect=[True, False]):
+            with pytest.raises(ValidationError, match="active account changed"):
+                login_account(switcher, runner=fake)
+        assert switcher._read_credentials() == _creds("live")
+        assert switcher._read_account_credentials("1", "test@example.com") == _creds("live")
+
+    def test_active_account_live_moved_on_is_not_clobbered(self, switcher, block_real_keychain):
+        # Claude Code rotated the live token between the install and the
+        # failure: restoring the old login over it would destroy that rotation.
+        from claude_rotater.exceptions import CredentialWriteError
+
+        rotated = _creds("rotated")
+
+        def rotate_then_fail(*_a, **_kw):
+            switcher._store._write_credentials(rotated)
+            raise CredentialWriteError("backup store")
+
+        fake = FakeClaude(email="test@example.com", creds=_creds("fresh"))
+        with patch.object(switcher, "_write_account_credentials", side_effect=rotate_then_fail):
+            with pytest.raises(CredentialWriteError):
+                login_account(switcher, runner=fake)
+        assert switcher._read_credentials() == rotated
 
     def test_env_drops_auth_overrides_and_exports_exact_dir(self, monkeypatch):
         monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-x")
@@ -336,6 +449,87 @@ class TestSweep:
 
     def test_missing_root_is_fine(self, tmp_path):
         assert sweep_stale_stages(tmp_path, now=time.time()) == 0
+
+
+
+# -- rota.log ---------------------------------------------------------------------
+
+
+class TestLoginLogging:
+    """Every staged install logs its start, its result and any failure reason;
+    never an email or a token."""
+
+    @staticmethod
+    def _rota_lines(caplog) -> list[str]:
+        return [r.getMessage() for r in caplog.records if r.name == "rota"]
+
+    @staticmethod
+    def _assert_no_secrets(lines: list[str], *secrets: str) -> None:
+        for line in lines:
+            assert "@" not in line, line
+            assert "sk-ant-" not in line, line
+            for secret in secrets:
+                assert secret not in line, line
+
+    def test_new_account_success(self, switcher, caplog):
+        caplog.set_level("INFO", logger="rota")
+        caplog.clear()
+        login_account(switcher, runner=FakeClaude())
+        lines = self._rota_lines(caplog)
+        assert "Login install started: new account, slot next free" in lines
+        assert "Added account 2 (org: personal)" in lines
+        self._assert_no_secrets(lines, "rt-new")
+
+    def test_relogin_of_inactive_account(self, switcher, caplog):
+        login_account(switcher, runner=FakeClaude(creds=_creds("old")))
+        caplog.set_level("INFO", logger="rota")
+        caplog.clear()
+        login_account(switcher, runner=FakeClaude(creds=_creds("fresh")))
+        lines = self._rota_lines(caplog)
+        assert "Login install started: re-login, slot 2" in lines
+        assert "Updated credentials for account 2" in lines
+        self._assert_no_secrets(lines, "rt-fresh")
+
+    def test_relogin_of_active_account(self, switcher, block_real_keychain, caplog):
+        caplog.set_level("INFO", logger="rota")
+        caplog.clear()
+        login_account(switcher, runner=FakeClaude(email="test@example.com",
+                                                  creds=_creds("fresh")))
+        lines = self._rota_lines(caplog)
+        assert "Login install started: re-login of the active account, slot 1" in lines
+        assert "Login install: live credential replaced" in lines
+        assert "Updated credentials for account 1 (live login replaced)" in lines
+        self._assert_no_secrets(lines, "rt-fresh")
+
+    def test_failure_logs_class_and_masked_reason(self, switcher, block_real_keychain, caplog):
+        from claude_rotater.exceptions import CredentialWriteError
+
+        switcher._write_credentials(_creds("live"))
+        caplog.set_level("INFO", logger="rota")
+        caplog.clear()
+        fake = FakeClaude(email="test@example.com", creds=_creds("fresh"))
+        with patch.object(
+            switcher, "_write_account_credentials",
+            side_effect=CredentialWriteError(
+                "cannot store test@example.com token sk-ant-oat01-fresh"
+            ),
+        ):
+            with pytest.raises(CredentialWriteError):
+                login_account(switcher, runner=fake)
+        lines = self._rota_lines(caplog)
+        assert (
+            "Login install failed: CredentialWriteError: "
+            "cannot store <email> token <token>"
+        ) in lines
+        assert "Login install: previous live credential restored" in lines
+        self._assert_no_secrets(lines, "rt-fresh")
+
+    def test_rota_add_is_not_logged_as_a_login(self, switcher, caplog):
+        caplog.set_level("INFO", logger="rota")
+        caplog.clear()
+        with patch.object(switcher, "_read_capture_credentials", return_value=_creds("live")):
+            switcher.add_account()
+        assert not any("Login install" in m for m in self._rota_lines(caplog))
 
 
 class TestRedact:
