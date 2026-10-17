@@ -49,7 +49,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, ClassVar
 
-from claude_rotater import expiring_first, oauth, poll_policy, preempt
+from claude_rotater import expiring_first, oauth, pace_strategy, poll_policy, preempt
 from claude_rotater.estimator import estimate_window
 from claude_rotater.exceptions import ClaudeSwitchError
 from claude_rotater.json_output import (
@@ -131,7 +131,7 @@ IDLE_HOLD_MAX_S = 30 * 60.0
 # The trailing window ``autoswitch.maxSwitchesPerHour`` counts over.
 SWITCH_BUDGET_WINDOW_S = 3600.0
 
-# expiring-first: a proactive move must be wanted by two evaluations at
+# pace / expiring-first: a proactive move must be wanted by two evaluations at
 # least this far apart (with a fresh reading each), so one odd sample or a
 # reading taken mid-rollover never moves the user.
 PROACTIVE_CONFIRM_S = 120.0
@@ -396,14 +396,14 @@ class PollEvent(AutoSwitchEvent):
 class SwitchEvent(AutoSwitchEvent):
     kind: ClassVar[str] = "switch"
     # "proactive" | "at-limit" | "pre-empt" | "failover" | "consume-first" |
-    # "expiring-first" | "repair" ("repair": the active account re-activated
+    # "pace" | "expiring-first" | "repair" ("repair": the active account re-activated
     # from its own backup).
     trigger: str
     from_ref: dict | None
     to_ref: dict | None
     warnings: list[str] = field(default_factory=list)
     dry_run: bool = False
-    # One line on why, when the strategy explains itself (expiring-first's
+    # One line on why, when the strategy explains itself (pace's
     # "switch → #2: ..."). Additive field, omitted from JSON when empty.
     reason: str = ""
 
@@ -610,7 +610,10 @@ def decision_from_event(event: AutoSwitchEvent) -> Decision | None:
 
 # Proactive triggers: the ones the cooldown holds. at-limit and failover are
 # escapes and never wait.
-_COOLDOWN_TRIGGERS = ("proactive", "consume-first", "expiring-first")
+# Strategies that move below the threshold by a policy that explains itself
+# (choose/rank over AccountViews): see pace_strategy.py, expiring_first.py.
+_POLICY_STRATEGIES = ("pace", "expiring-first")
+_COOLDOWN_TRIGGERS = ("proactive", "consume-first", *_POLICY_STRATEGIES)
 # The active account will be over its switch point by its next reading (see
 # preempt.py). A limit move like at-limit: no cooldown, no manual hold; it
 # still counts against the hourly budget and needs a target with headroom.
@@ -830,7 +833,7 @@ def note_manual_switch(
             state["schemaVersion"] = STATE_SCHEMA_VERSION
             state["lastSwitchAt"] = clock()
             # Separate from lastSwitchAt (which engine switches also write):
-            # expiring-first holds its proactive moves off this one.
+            # pace and expiring-first hold their proactive moves off this one.
             state["lastManualSwitchAt"] = state["lastSwitchAt"]
             state["lastSwitchTo"] = str(to_number)
             for key in ("lastSwitchFrom", "leftHeadroom", "leftRecoveryAt", "leftTrigger"):
@@ -911,7 +914,7 @@ class AutoSwitchEngine:
         # The last stop logged, so a held stop is logged once, not per tick.
         self._halt_logged: tuple[str, str] | None = None
         self._paused_logged_until: float | None = None
-        # expiring-first: the proactive target the previous evaluation
+        # pace / expiring-first: the proactive target the previous evaluation
         # wanted and when it first wanted it (see PROACTIVE_CONFIRM_S).
         self._proactive_pending: tuple[str, float] | None = None
 
@@ -1234,7 +1237,7 @@ class AutoSwitchEngine:
                 trigger = PREEMPT_TRIGGER
                 failover_reason = projection.reason()
             elif utilization < settings.threshold:
-                if settings.strategy not in ("consume-first", "expiring-first"):
+                if settings.strategy not in ("consume-first", *_POLICY_STRATEGIES):
                     self._emit(
                         NoSwitchEvent(
                             reason="below-threshold",
@@ -1247,10 +1250,10 @@ class AutoSwitchEngine:
                         )
                     )
                     return TickOutcome.NO_ACTION
-                # consume-first / expiring-first: below the threshold we still
-                # proactively move to whichever account's weekly window resets
-                # soonest, to burn the most-perishable quota first. Candidate
-                # selection decides whether such a move is worth making.
+                # consume-first / pace / expiring-first: below the threshold
+                # the strategy may still move, to spend perishable weekly
+                # quota before it expires. Candidate selection decides
+                # whether such a move is worth making.
                 trigger = settings.strategy
             else:
                 trigger = "at-limit" if active_headroom <= 0 else "proactive"
@@ -1329,7 +1332,7 @@ class AutoSwitchEngine:
         if trigger in _COOLDOWN_TRIGGERS and self._in_cooldown(state):
             self._emit(NoSwitchEvent(reason="cooldown"))
             return TickOutcome.NO_ACTION
-        if trigger == "expiring-first":
+        if trigger in _POLICY_STRATEGIES:
             hold_left = self._manual_hold_left(state)
             if hold_left > 0:
                 self._emit(
@@ -1378,7 +1381,7 @@ class AutoSwitchEngine:
             else []
         )
         if (
-            trigger in ("consume-first", "expiring-first")
+            trigger in ("consume-first", *_POLICY_STRATEGIES)
             and not oauth_candidates
             and active_headroom is not None
         ):
@@ -1409,8 +1412,8 @@ class AutoSwitchEngine:
             self._emit(NoSwitchEvent(reason="no-candidates"))
             return TickOutcome.BLOCKED
 
-        if trigger == "expiring-first":
-            return self._expiring_first_move(
+        if trigger in _POLICY_STRATEGIES:
+            return self._policy_move(
                 current, oauth_candidates, candidates, usage, entries
             )
 
@@ -1537,7 +1540,7 @@ class AutoSwitchEngine:
             )
 
         if (
-            settings.strategy == "expiring-first"
+            settings.strategy in _POLICY_STRATEGIES
             and len(ordered) > 1
             and not _every_account_above_threshold(
                 oauth_candidates, headroom, active_headroom, settings.threshold
@@ -1545,9 +1548,9 @@ class AutoSwitchEngine:
         ):
             # A move the engine has to make anyway (at the threshold, or
             # failing over): the gates above decided WHO qualifies; the policy
-            # only re-orders them, soonest-expiring quota first. With every
+            # only re-orders them, most-perishable quota first. With every
             # account above the threshold the recovery ranking stays in charge.
-            ordered = self._expiring_first_order(current, ordered, usage)
+            ordered = self._policy_order(current, ordered, usage)
 
         if not ordered and trigger == PREEMPT_TRIGGER:
             return self._no_headroom(current)
@@ -1665,7 +1668,7 @@ class AutoSwitchEngine:
         systemic = ""
         for num in ordered:
             email = self.switcher.account_email(num)
-            if trigger in ("consume-first", "expiring-first"):
+            if trigger in ("consume-first", *_POLICY_STRATEGIES):
                 # The phase-2 refetch is best-effort: the collector refuses
                 # accounts in failure backoff or claimed by a concurrent
                 # poller, which then serve their stored entries. Consume-first
@@ -2310,7 +2313,7 @@ class AutoSwitchEngine:
         qualifying.sort(key=lambda t: t[0])
         return [num for _, num in qualifying], any_known, active_reset_ts
 
-    # -- expiring-first ----------------------------------------------------------
+    # -- pace / expiring-first ---------------------------------------------------
 
     def _manual_hold_left(self, state: dict) -> float:
         """Seconds of the post-manual-switch hold still to run (0 = none)."""
@@ -2444,7 +2447,7 @@ class AutoSwitchEngine:
             return None
         return est.rate_pct_per_h
 
-    def _expiring_first_choice(
+    def _policy_choice(
         self,
         current: str,
         oauth_candidates: Sequence[str],
@@ -2464,17 +2467,28 @@ class AutoSwitchEngine:
             and view.headroom > 0
             and 100.0 - view.headroom < settings.threshold
         ]
+        burn = self._burn_rate(current, now) if healthy else None
+        if settings.strategy == "pace":
+            return pace_strategy.choose(
+                active,
+                healthy,
+                threshold=settings.threshold,
+                margin=settings.pace_margin,
+                hysteresis_pct=settings.hysteresis_pct,
+                burn_pct_per_h=burn,
+                now=now,
+            )
         return expiring_first.choose(
             active,
             healthy,
             threshold=settings.threshold,
             similar_reset_s=settings.similar_reset_hours * 3600.0,
             hysteresis_pct=settings.hysteresis_pct,
-            burn_pct_per_h=self._burn_rate(current, now) if healthy else None,
+            burn_pct_per_h=burn,
             now=now,
         )
 
-    def _expiring_first_move(
+    def _policy_move(
         self,
         current: str,
         oauth_candidates: Sequence[str],
@@ -2490,13 +2504,13 @@ class AutoSwitchEngine:
         anything moves. The target must then be freshly measured, and a
         failed freshen never slides to a worse-ranked account.
         """
-        choice = self._expiring_first_choice(current, oauth_candidates, usage)
+        choice = self._policy_choice(current, oauth_candidates, usage)
         if choice.action == "switch":
             entries = self.switcher.usage_entries_by_account(
                 fetch={current, *fetchable}
             )
             usage = {num: entry.decision_value() for num, entry in entries.items()}
-            choice = self._expiring_first_choice(current, oauth_candidates, usage)
+            choice = self._policy_choice(current, oauth_candidates, usage)
         if choice.action == "stay":
             self._proactive_pending = None
             self._emit(NoSwitchEvent(reason=STAY_REASON, detail=choice.reason))
@@ -2523,10 +2537,11 @@ class AutoSwitchEngine:
             _binding_recovery_ts(active_value, self._models, decided_now),
         )
         return self._freshen_and_switch(
-            [choice.target], "expiring-first", entries, left_snapshot, choice.reason
+            [choice.target], self.settings.strategy, entries, left_snapshot,
+            choice.reason,
         )
 
-    def _expiring_first_order(
+    def _policy_order(
         self,
         current: str,
         ordered: list[str],
@@ -2539,12 +2554,22 @@ class AutoSwitchEngine:
             for num in ordered
             if (view := self._account_view(num, usage.get(num), now)) is not None
         ]
-        ranked = expiring_first.rank(
-            views,
-            similar_reset_s=self.settings.similar_reset_hours * 3600.0,
-            burn_pct_per_h=self._burn_rate(current, now),
-            now=now,
-        )
+        burn = self._burn_rate(current, now)
+        if self.settings.strategy == "pace":
+            ranked = pace_strategy.rank(
+                views,
+                threshold=self.settings.threshold,
+                margin=self.settings.pace_margin,
+                burn_pct_per_h=burn,
+                now=now,
+            )
+        else:
+            ranked = expiring_first.rank(
+                views,
+                similar_reset_s=self.settings.similar_reset_hours * 3600.0,
+                burn_pct_per_h=burn,
+                now=now,
+            )
         return ranked + [num for num in ordered if num not in ranked]
 
     # -- adaptive usage scheduling ---------------------------------------------

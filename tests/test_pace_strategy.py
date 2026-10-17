@@ -420,3 +420,217 @@ class TestWeekReplay:
         row = table["2 accounts, resets 50h/20h, demand 95%"]
         assert row["pace"].wasted < row["expiring-first"].wasted
         assert row["pace"].wasted < row["best"].wasted
+
+
+# ---------------------------------------------------------------------------
+# Engine wiring
+# ---------------------------------------------------------------------------
+
+from claude_rotater.autoswitch import (  # noqa: E402
+    PROACTIVE_CONFIRM_S,
+    Decision,
+    TickOutcome,
+    note_manual_switch,
+)
+from claude_rotater.json_output import USAGE_RELOGIN_REQUIRED  # noqa: E402
+from claude_rotater.settings import (  # noqa: E402
+    SETTING_GROUPS,
+    SETTING_SPECS,
+    load_settings,
+    set_setting,
+)
+from tests.test_expiring_first import (  # noqa: E402
+    confirmed,
+    make,
+    no_switch,
+    switches,
+    usage_at,
+)
+
+
+def make_pace(temp_home, n: int = 2, **settings):
+    settings.setdefault("strategy", "pace")
+    return make(temp_home, n=n, **settings)
+
+
+def owners(h, *, a: str, b: str) -> dict:
+    now = h.clock.now
+    return {
+        a: usage_at(now, seven=85, reset_h=50, five=2),
+        b: usage_at(now, seven=63, reset_h=19 + 40 / 60, five=37),
+    }
+
+
+class TestEngine:
+    def test_owners_case_on_a_moves_to_b_with_reason(self, temp_home):
+        h = make_pace(temp_home)  # slot 1 active = A
+        assert confirmed(h, owners(h, a="1", b="2")) is TickOutcome.SWITCHED
+        assert h.active_number() == 2
+        (event,) = switches(h)
+        assert event.trigger == "pace"
+        assert event.reason == (
+            "switch → #2: #2 resets in 19h38m with 27% left (needs 1.4%/h) "
+            "vs #1 needs 0.1%/h"
+        )
+        assert event.to_json()["reason"] == event.reason
+        assert h.engine.last_decision == Decision(
+            action="switch", line=event.reason, ts=event.ts, target="2"
+        )
+
+    def test_owners_case_on_b_stays_with_reason(self, temp_home):
+        h = make_pace(temp_home)  # slot 1 active = B
+        assert h.tick_with_usage(owners(h, a="2", b="1")) is TickOutcome.NO_ACTION
+        line = "stay: #1 resets in 19h40m with 27% left (needs 1.4%/h), next #2 0.1%/h"
+        assert [(e.reason, e.detail) for e in no_switch(h)] == [("stay", line)]
+        assert h.engine.last_decision.line == line
+
+    def test_start_of_week_spreads_then_hands_over_on_a_tight_5h(self, temp_home):
+        h = make_pace(temp_home, n=3)
+        now = h.clock.now
+        u = {
+            "1": usage_at(now, seven=10, reset_h=150, five=40),
+            "2": usage_at(now, seven=5, reset_h=160, five=30),
+            "3": usage_at(now, seven=0, reset_h=165, five=0, five_reset_h=None),
+        }
+        assert h.tick_with_usage(u) is TickOutcome.NO_ACTION
+        assert no_switch(h)[-1].detail.startswith("stay: spreading — ")
+        u["1"] = usage_at(now, seven=10, reset_h=150, five=75)
+        assert confirmed(h, u) is TickOutcome.SWITCHED
+        assert h.active_number() == 2  # #3's fresh window stays in reserve
+        assert "#3 kept fresh as backup" in switches(h)[0].reason
+
+    def test_dry_run_reports_the_reason_and_moves_nothing(self, temp_home):
+        h = make_pace(temp_home)
+        h.engine = h._make_engine(dry_run=True)
+        assert confirmed(h, owners(h, a="1", b="2")) is TickOutcome.SWITCHED
+        (event,) = switches(h)
+        assert event.dry_run and event.reason.startswith("switch → #2")
+        assert h.active_number() == 1
+
+    def test_disabled_account_is_never_a_target(self, temp_home):
+        h = make_pace(temp_home)
+        h.switcher.set_account_disabled("2", True)
+        h.tick_with_usage(owners(h, a="1", b="2"))
+        assert h.active_number() == 1 and not switches(h)
+
+    def test_manual_hold_blocks_proactive_moves_only(self, temp_home):
+        h = make_pace(temp_home, cooldown_seconds=0, manual_hold_minutes=60)
+        note_manual_switch(h.switcher.backup_dir, "1", clock=h.clock)
+        u = owners(h, a="1", b="2")
+        assert h.tick_with_usage(u) is TickOutcome.NO_ACTION
+        assert no_switch(h)[-1].reason == "manual-hold"
+        u["1"] = usage_at(h.clock.now, seven=95, reset_h=50)
+        assert h.tick_with_usage(u) is TickOutcome.SWITCHED
+        assert switches(h)[-1].trigger == "proactive"
+
+    def test_cooldown_holds_a_second_proactive_move(self, temp_home):
+        h = make_pace(temp_home, n=3, cooldown_seconds=600)
+        now = h.clock.now
+        u = {
+            "1": usage_at(now, seven=40, reset_h=100),
+            "2": usage_at(now, seven=50, reset_h=30),  # 1.3%/h vs 0.5%/h
+            "3": usage_at(now, seven=90.5, reset_h=5),  # at threshold: not yet
+        }
+        assert confirmed(h, u) is TickOutcome.SWITCHED
+        assert h.active_number() == 2
+        h.clock.advance(60)
+        u["3"] = usage_at(h.clock.now, seven=40, reset_h=5)  # rolled into view
+        assert h.tick_with_usage(u) is TickOutcome.NO_ACTION
+        assert no_switch(h)[-1].reason == "cooldown"
+        h.clock.advance(600)
+        assert confirmed(h, u) is TickOutcome.SWITCHED
+        assert h.active_number() == 3
+
+    def test_at_threshold_targets_the_leader_not_the_most_headroom(self, temp_home):
+        h = make_pace(temp_home, n=3)
+        now = h.clock.now
+        u = {
+            "1": usage_at(now, seven=92, reset_h=100),
+            "2": usage_at(now, seven=10, reset_h=150),  # most headroom, 0.5%/h
+            "3": usage_at(now, seven=50, reset_h=20),  # 2%/h
+        }
+        assert h.tick_with_usage(u) is TickOutcome.SWITCHED
+        assert h.active_number() == 3
+        assert switches(h)[0].trigger == "proactive"
+
+    def test_failover_still_moves(self, temp_home):
+        h = make_pace(temp_home, unhealthy_ticks=1)
+        u = {"1": USAGE_RELOGIN_REQUIRED, "2": usage_at(h.clock.now, seven=40, reset_h=20)}
+        assert h.tick_with_usage(u) is TickOutcome.SWITCHED
+        assert switches(h)[0].trigger == "failover"
+
+    @pytest.mark.parametrize("margin, outcome", [
+        (1.2, TickOutcome.SWITCHED), (1.5, TickOutcome.NO_ACTION),
+    ])
+    def test_margin_setting_reaches_the_policy(self, temp_home, margin, outcome):
+        h = make_pace(temp_home, pace_margin=margin)
+        now = h.clock.now
+        u = {
+            "1": usage_at(now, seven=50, reset_h=80, five=30),  # 0.5%/h
+            "2": usage_at(now, seven=55, reset_h=50),  # 0.7%/h: a 1.4x lead
+        }
+        h.tick_with_usage(u)
+        h.clock.advance(PROACTIVE_CONFIRM_S)
+        assert h.tick_with_usage(u) is outcome
+
+    def test_heavy_burn_from_history_spreads(self, temp_home):
+        """B needs 1.4%/h, A 0.9%/h: B leads by the margin, but the active
+        account's own history says the user burns 6 points an hour, so B
+        needs no rescuing and A's running 5h window is used."""
+        def fleet(now):
+            return {
+                "1": usage_at(now, seven=40, reset_h=56, five=20),
+                "2": usage_at(now, seven=63, reset_h=19 + 40 / 60, five=37),
+            }
+
+        without_history = choose(
+            view("1", seven=40, reset_h=56, five=20),
+            view("2", seven=63, reset_h=19 + 40 / 60, five=37),
+        )
+        assert without_history.target == "2"
+
+        h = make_pace(temp_home)
+        history = h.switcher.usage_history
+        history.clock = h.clock
+        ident = {"1": ("a@example.com", "")}
+        start = h.clock.now
+        for k in range(7):  # 7d window: 4% -> 40% over 6h = 6 pts/h
+            history.record(
+                {"1": usage_at(start, seven=4 + 6 * k, reset_h=62)}, ident, start + k * H
+            )
+        h.clock.now = start + 6 * H
+        assert h.engine._burn_rate("1", h.clock.now) == pytest.approx(6.0, rel=0.05)
+        assert h.tick_with_usage(fleet(h.clock.now)) is TickOutcome.NO_ACTION
+        assert no_switch(h)[-1].detail.startswith("stay: spreading — all resets far")
+
+    def test_walk_does_not_flap(self, temp_home):
+        """Sixty ticks with jittering 5h readings: one move, then it holds."""
+        h = make_pace(temp_home)
+        actives = []
+        for i in range(60):
+            h.clock.advance(120)
+            now = h.clock.now
+            jitter = (i * 7) % 5
+            u = {
+                "1": usage_at(now, seven=60, reset_h=50 - i / 30, five=10 + jitter),
+                "2": usage_at(now, seven=55 + i / 10, reset_h=20 - i / 30, five=20 + jitter),
+            }
+            h.tick_with_usage(u)
+            actives.append(h.active_number())
+        assert actives[0] == 1  # the first evaluation only confirms
+        assert set(actives[1:]) == {2}
+        assert len(switches(h)) == 1
+
+
+class TestSettings:
+    def test_pace_is_a_strategy_choice(self, tmp_path):
+        set_setting(tmp_path, "autoswitch.strategy", "pace")
+        assert load_settings(tmp_path).strategy == "pace"
+
+    def test_margin_spec(self, tmp_path):
+        spec = SETTING_SPECS["autoswitch.paceMargin"]
+        assert spec.default == 1.5
+        assert (spec.lo, spec.hi, spec.step) == (1.0, 5.0, 0.1)
+        assert spec.group in dict(SETTING_GROUPS) and spec.label and spec.unit == "x"
+        set_setting(tmp_path, "autoswitch.paceMargin", "2.5")
+        assert load_settings(tmp_path).pace_margin == 2.5

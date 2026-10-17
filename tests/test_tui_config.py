@@ -133,7 +133,8 @@ def test_stepped_clamps_and_cycles():
     strat = SETTING_SPECS["autoswitch.strategy"]
     assert stepped(strat, "consume-first", 1) == "expiring-first"
     assert stepped(strat, "expiring-first", -1) == "consume-first"
-    assert stepped(strat, "expiring-first", 1) == "best"
+    assert stepped(strat, "expiring-first", 1) == "pace"
+    assert stepped(strat, "pace", 1) == "best"
 
 
 def test_numbers_show_their_unit_and_labels_carry_none():
@@ -374,6 +375,8 @@ class TestStepping:
         async with app.run_test(size=(120, 40)) as pilot:
             await pilot.pause()
             await go_to(pilot, app, "autoswitch.strategy")
+            await pilot.press("right")
+            assert section(tmp_path, "autoswitch") == {"strategy": "pace"}
             await pilot.press("right")
             assert section(tmp_path, "autoswitch") == {"strategy": "best"}
             await pilot.press("right")

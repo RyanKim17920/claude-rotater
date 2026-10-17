@@ -48,11 +48,14 @@ class AutoSwitchSettings:
     threshold: float = 90.0
     cooldown_seconds: float = 300.0
     hysteresis_pct: float = 10.0
-    # "expiring-first" (spend the account whose weekly window resets soonest,
-    # balancing 5h windows when resets are similar; see expiring_first.py),
-    # "best" (most headroom, only at the threshold) or "consume-first"
-    # (soonest weekly reset, strictly). A data dir that never set the key
-    # follows this default; an explicit value in settings.json is kept.
+    # "pace" (spread usage while every account's weekly quota is safe,
+    # concentrate on one whose quota would otherwise expire; see
+    # pace_strategy.py), "expiring-first" (spend the account whose weekly
+    # window resets soonest, balancing 5h windows when resets are similar;
+    # see expiring_first.py), "best" (most headroom, only at the threshold)
+    # or "consume-first" (soonest weekly reset, strictly). A data dir that
+    # never set the key follows this default; an explicit value in
+    # settings.json is kept.
     strategy: str = "expiring-first"
     include_api_key_accounts: bool = False
     unhealthy_ticks: int = 3
@@ -66,7 +69,11 @@ class AutoSwitchSettings:
     # expiring-first: 7-day resets this close together count as tied, and
     # the tie is broken by 5h headroom instead of reset order.
     similar_reset_hours: float = 12.0
-    # expiring-first: after a manual switch, no proactive move for this long
+    # pace: concentrate on an account once the pace its weekly headroom
+    # needs (headroom / hours to its reset) is this many times every other
+    # account's.
+    pace_margin: float = 1.5
+    # pace / expiring-first: after a manual switch, no proactive move for this long
     # (threshold and failover moves still happen).
     manual_hold_minutes: float = 60.0
     # Safety net against any flapping loop: at most this many automatic
@@ -206,7 +213,7 @@ def _cadence_specs() -> tuple[SettingSpec, ...]:
 
 # Auto-switch strategies, the default first. cli.py's --strategy reads this
 # too, so the flag and the setting accept the same names.
-STRATEGY_CHOICES: tuple[str, ...] = ("expiring-first", "best", "consume-first")
+STRATEGY_CHOICES: tuple[str, ...] = ("expiring-first", "pace", "best", "consume-first")
 
 # settings.json uses camelCase (matching the repo's other JSON artifacts);
 # dataclass fields stay snake_case.
@@ -231,8 +238,9 @@ SETTING_SPECS: dict[str, SettingSpec] = {
         SettingSpec(
             "autoswitch", "strategy", "strategy", "choice",
             choices=STRATEGY_CHOICES,
-            help="How auto-switch picks the target account: expiring-first "
-            "spends the account whose weekly quota expires soonest",
+            help="How auto-switch picks the target account: pace spreads "
+            "usage and concentrates on an account whose weekly quota would "
+            "otherwise expire; expiring-first spends the soonest-expiring one",
             group="autoswitch", label="Strategy",
         ),
         SettingSpec(
@@ -243,10 +251,16 @@ SETTING_SPECS: dict[str, SettingSpec] = {
             group="autoswitch", label="Similar resets within", step=1.0, unit="h",
         ),
         SettingSpec(
+            "autoswitch", "paceMargin", "pace_margin", "float", 1.0, 5.0,
+            help="pace: concentrate on an account once the pace its weekly "
+            "headroom needs is this many times every other account's",
+            group="autoswitch", label="Concentrate at", step=0.1, unit="x",
+        ),
+        SettingSpec(
             "autoswitch", "manualHoldMinutes", "manual_hold_minutes", "float",
             0.0, 1440.0,
-            help="expiring-first: no proactive switch for this long after a "
-            "manual switch",
+            help="pace / expiring-first: no proactive switch for this long "
+            "after a manual switch",
             group="autoswitch", label="Manual switch hold", step=5.0, unit="m",
         ),
         SettingSpec(

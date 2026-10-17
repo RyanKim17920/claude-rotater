@@ -643,4 +643,4 @@ class TestSettings:
     def test_strategy_choices_lead_with_the_default(self):
         spec = SETTING_SPECS["autoswitch.strategy"]
         assert spec.choices[0] == AutoSwitchSettings().strategy == "expiring-first"
-        assert set(spec.choices) == {"expiring-first", "best", "consume-first"}
+        assert set(spec.choices) == {"expiring-first", "pace", "best", "consume-first"}
