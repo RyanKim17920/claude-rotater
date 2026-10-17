@@ -81,6 +81,7 @@ from claude_rotater.paths import (
     get_credentials_path,
     get_default_claude_config_home,
     get_global_config_path,
+    is_inside_sessions_dir,
 )
 from claude_rotater.legacy_import import import_legacy_data
 from claude_rotater.process_detection import get_running_instances
@@ -5991,13 +5992,9 @@ class ClaudeAccountSwitcher:
         One call per mutating entry point is the honest cost of that.
         """
         cfg_dir = os.environ.get("CLAUDE_CONFIG_DIR")
-        if not cfg_dir:
-            return
-        try:
-            Path(cfg_dir).resolve().relative_to(
-                (self.backup_dir / "sessions").resolve()
-            )
-        except ValueError:
+        if not cfg_dir or not is_inside_sessions_dir(
+            cfg_dir, self.backup_dir / "sessions"
+        ):
             return
         raise SwitchError(
             "This shell is inside a rota run session profile "

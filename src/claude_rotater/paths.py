@@ -96,6 +96,50 @@ def get_default_global_config_path() -> Path:
     )
 
 
+def is_inside_sessions_dir(config_dir: str | Path, sessions_dir: Path) -> bool:
+    """True when ``config_dir`` is (inside) one of rota's session profiles.
+
+    ``sessions_dir`` is ``<rota data dir>/sessions``. Both sides are resolved
+    so a symlinked or relative spelling of a session profile still counts.
+    """
+    try:
+        Path(config_dir).resolve().relative_to(sessions_dir.resolve())
+    except ValueError:
+        return False
+    return True
+
+
+def _base_profile_env(sessions_dir: Path) -> str | None:
+    """``CLAUDE_CONFIG_DIR`` when it names the operator's own profile.
+
+    None when it is unset or points at a rota session profile: a ``rota run``
+    shell exports its session dir, which is never the profile to mirror.
+    """
+    env = os.environ.get("CLAUDE_CONFIG_DIR")
+    if not env or is_inside_sessions_dir(env, sessions_dir):
+        return None
+    return env
+
+
+def get_base_claude_config_home(sessions_dir: Path) -> Path:
+    """The config home of the profile a session is launched from.
+
+    ``CLAUDE_CONFIG_DIR`` when it names a non-default profile the operator
+    runs (e.g. ``~/.claude-work``), else ``~/.claude`` -- also when it names
+    a rota session profile, since a nested ``rota run`` must not source from
+    the session it runs inside.
+    """
+    env = _base_profile_env(sessions_dir)
+    return Path(env) if env else get_default_claude_config_home()
+
+
+def get_base_global_config_path(sessions_dir: Path) -> Path:
+    """The global config of :func:`get_base_claude_config_home`'s profile."""
+    if _base_profile_env(sessions_dir):
+        return get_global_config_path()
+    return get_default_global_config_path()
+
+
 def get_credentials_path() -> Path:
     """Return the path to the Claude credentials file."""
     return get_claude_config_home() / ".credentials.json"
