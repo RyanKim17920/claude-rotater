@@ -839,8 +839,8 @@ class TestAccountRowText:
     def test_countdown_only_no_clock(self):
         now = time.time()
         row = self._row(make_account(1, entry=make_entry(80.0, 10.0)), now=now, width=160)
-        assert "↻1h59m" in row or "↻2h00m" in row
-        assert "↻2d" in row  # coarse once past two days
+        assert "↻ 1h59m" in row or "↻ 2h00m" in row
+        assert "↻ 2d" in row  # coarse once past two days
         assert ":" not in row  # reset clocks live on the charts, not here
 
     def test_unused_window_drops_its_countdown(self):
@@ -896,7 +896,7 @@ class TestAccountRowText:
 
     def test_no_estimate_is_unsure(self):
         text = self._text(make_account(1, entry=make_entry(40.0, 10.0)))
-        assert text.plain.rstrip().endswith("↻2d23h")  # no guess: the forecast cell is blank
+        assert text.plain.rstrip().endswith("↻ 2d23h")  # no guess: the forecast cell is blank
         assert "~" not in text.plain and "?" not in text.plain
 
     def test_model_window_column(self):
@@ -917,7 +917,7 @@ class TestAccountRowText:
                         name_need=19, short_name_need=10)
         assert len(row) <= width
         # name, 5h % and its reset, 7d % at every width
-        assert "62%" in row and "31%" in row and ("↻1h59m" in row or "↻2h00m" in row)
+        assert "62%" in row and "31%" in row and ("↻ 1h59m" in row or "↻ 2h00m" in row)
         assert ("~5h" in row) or width <= 60  # at 60: name, 5h, 7d and the reset
         # a long name keeps its local part: it gives way to the forecast
         assert ("someone@example.com" in row) or width < 80
@@ -928,7 +928,7 @@ class TestAccountRowText:
 
         for width in (50, 60, 80, 100, 120, 160):
             row = self._row(make_account(1, entry=make_entry(62.0, 31.0)), width=width, name_need=10)
-            assert re.search(r"5h  62%[^↻]*↻\d", row), (width, row)
+            assert re.search(r"5h  62%[^↻]*↻ \d", row), (width, row)
 
     def test_org_column_goes_before_the_name_shrinks_warnings_stay(self):
         from claude_rotater.tui.main import RowLayout
@@ -1481,7 +1481,7 @@ class TestMainPage:
             page = "\n".join([painted(app, "#status"), *(row_plain(app, n) for n in "123"),
                               painted(app, "#detail")])
             assert page.count(clock) == 1 and clock in painted(app, "#detail")
-            assert "↻1h59m" in row_plain(app, "1") or "↻2h00m" in row_plain(app, "1")
+            assert "↻ 1h59m" in row_plain(app, "1") or "↻ 2h00m" in row_plain(app, "1")
 
     @pytest.mark.parametrize("size", [(80, 24), (120, 40)])
     async def test_four_accounts_fit_without_scrolling(self, tmp_path, size):

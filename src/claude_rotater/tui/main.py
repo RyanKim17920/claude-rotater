@@ -322,12 +322,12 @@ class RowLayout:
         return self.level.reset if label in PRIMARY_WINDOWS else self.level.model_reset
 
     def window_w(self, label: str) -> int:
-        """``5h  58% ▆▆▆▆ ↻1h20m``: label, pct, optional meter, countdown."""
+        """``5h  58% ▆▆▆▆ ↻ 1h20m``: label, pct, optional meter, countdown."""
         w = len(label) + 5
         if self.bar_w:
             w += 1 + self.bar_w
         if self.has_reset(label):
-            w += 2 + _REL_W  # " ↻1h20m"
+            w += 3 + _REL_W  # " ↻ 1h20m"
         return w
 
     @classmethod
@@ -534,7 +534,7 @@ def window_cell(
     projected: float | None = None,
 ) -> Text:
     """One window column, exactly ``layout.window_w(label)`` cells:
-    ``5h  58% ███▌░░░▕ ↻1h20m``. The pct, the solid fill and the countdown
+    ``5h  58% ███▌░░░▕ ↻ 1h20m``. The pct, the solid fill and the countdown
     are measured; the hatch is the projection to the reset, coloured by its
     outcome. An unused window drops its countdown; an absent one is blank. A stale reading keeps its
     colours: the row's tag says how old it is."""
@@ -551,7 +551,7 @@ def window_cell(
             ))
         if layout.has_reset(label) and resets_at is not None and pct > 0:
             rel = countdown_text(resets_at - now) if resets_at > now else "now"
-            cell.append(f" {_RESET_GLYPH}{rel}", style=palette.muted)
+            cell.append(f" {_RESET_GLYPH} {rel}", style=palette.muted)
     cell.truncate(width)
     cell.pad_right(width - cell.cell_len)
     return cell
@@ -689,7 +689,7 @@ def account_row_text(
     selected: bool = False,
 ) -> Text:
     """One account on one line, laid out by ``layout``:
-    ``›● me@x.com  Acme  5h 58% ↻1h20m  7d 48% ↻23h  ~7d limit in 15h``.
+    ``›● me@x.com  Acme  5h 58% ↻ 1h20m  7d 48% ↻ 23h  ~7d limit in 15h``.
 
     ``›`` and a bold name mark the row under the cursor (its band is CSS);
     ``●`` and an accent name mark the account on duty, so the two read apart
@@ -1178,7 +1178,7 @@ class MainScreen(Screen):
         Binding("k", "cursor_up", show=False),
     ]
 
-    # Countdowns ("↻1h20m") are minute-grained, so one coarse tick keeps
+    # Countdowns ("↻ 1h20m") are minute-grained, so one coarse tick keeps
     # them honest; everything else repaints on data change.
     CLOCK_TICK_S = 30.0
 
