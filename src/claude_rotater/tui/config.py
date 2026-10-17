@@ -74,13 +74,21 @@ _MARKER_W = 8
 HELP_COLUMN_MIN_WIDTH = 110
 
 
+def range_text(spec: SettingSpec) -> str:
+    """``50-99.9`` for a number spec."""
+    return f"{format_setting_value(spec.lo)}-{format_setting_value(spec.hi)}"
+
+
+def with_unit(spec: SettingSpec, value) -> str:
+    """A number as the page shows it, with its unit: ``90%``, ``300s``, ``3d``."""
+    return f"{format_setting_value(value)}{spec.unit}"
+
+
 def spec_detail(spec: SettingSpec) -> str:
     """Footer text for the selected setting: help, allowed values, default."""
     if spec.kind in ("float", "int"):
-        allowed = (
-            f"{format_setting_value(spec.lo)}-{format_setting_value(spec.hi)}, "
-            f"step {format_setting_value(spec.step_size)}"
-        )
+        allowed = f"{range_text(spec)}{spec.unit}, step {with_unit(spec, spec.step_size)}"
+        return f"{spec.dotted}: {spec.help}  [{allowed}, default {with_unit(spec, spec.default)}]"
     elif spec.kind == "choice":
         allowed = " | ".join(spec.choices)
     elif spec.kind == "bool":
@@ -115,11 +123,6 @@ def stepped(spec: SettingSpec, value, direction: int):
     return value
 
 
-def range_text(spec: SettingSpec) -> str:
-    """``50-99.9`` for a number spec."""
-    return f"{format_setting_value(spec.lo)}-{format_setting_value(spec.hi)}"
-
-
 def check_typed(spec: SettingSpec, raw: str) -> str | None:
     """Why typed text cannot be stored, or None when it can. A number out of
     range is refused with the range, never clamped into it."""
@@ -129,7 +132,7 @@ def check_typed(spec: SettingSpec, raw: str) -> str | None:
         except ValueError:
             number = None
         if number is not None and math.isfinite(number) and not spec.lo <= number <= spec.hi:
-            return f"{raw} is out of range: {spec.label or spec.dotted} takes {range_text(spec)}"
+            return f"{raw} is out of range: {spec.label or spec.dotted} takes {range_text(spec)}{spec.unit}"
     try:
         parse_setting_value(spec, raw)
     except ConfigError as e:
@@ -260,6 +263,8 @@ class SettingsList(Widget, can_focus=True):
             shown = "● on" if value else "○ off"
         elif value is None:
             shown = "(none)"
+        elif spec.kind in ("float", "int"):
+            shown = with_unit(spec, value)
         else:
             shown = format_setting_value(value)
         if selected and spec.kind != "string":

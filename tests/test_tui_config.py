@@ -124,6 +124,17 @@ def test_stepped_clamps_and_cycles():
     assert stepped(strat, "best", -1) == "consume-first"
 
 
+def test_numbers_show_their_unit_and_labels_carry_none():
+    thr = SETTING_SPECS["autoswitch.threshold"]
+    assert "50-99.9%" in spec_detail(thr) and "default 90%" in spec_detail(thr)
+    assert "pct" not in spec_detail(thr)
+    for spec in SETTING_SPECS.values():
+        assert "(s)" not in spec.label and "%" not in spec.label and "pct" not in spec.help
+    cool = SETTING_SPECS["autoswitch.cooldownSeconds"]
+    poll = SETTING_SPECS["autoswitch.pollSpareSeconds"]
+    assert cool.unit == poll.unit == "s"  # every duration in the same style
+
+
 def test_check_typed_refuses_out_of_range_with_the_range():
     thr = SETTING_SPECS["autoswitch.threshold"]
     assert check_typed(thr, "85") is None
@@ -175,7 +186,7 @@ class TestLayout:
             lines = plain(app).splitlines()
             thr = next(l for l in lines if "Threshold" in l)
             cool = next(l for l in lines if "Cooldown" in l)
-            assert "80" in thr and "custom" in thr
+            assert "80%" in thr and "custom" in thr and "300s" in cool
             assert "default" in cool
 
     @pytest.mark.parametrize("size", [(80, 24), (60, 20)])
@@ -295,7 +306,7 @@ class TestStepping:
             await go_to(pilot, app, "autoswitch.threshold")
             await pilot.press(*["right"] * 40)
             assert section(tmp_path, "autoswitch") == {"threshold": 99.9}
-            assert "‹ 99.9 ›" in plain(app)
+            assert "‹ 99.9% ›" in plain(app)
             app.changes.clear()
             await pilot.press("right")
             await pilot.pause()
@@ -463,7 +474,7 @@ class TestExactEntry:
             await pilot.press("escape")
             assert lst(app).editing is None
             assert isinstance(app.screen, ConfigScreen)  # esc cancelled, did not close
-            assert "‹ 90 ›" in plain(app)
+            assert "‹ 90% ›" in plain(app)
             assert footer(app) == spec_detail(lst(app).spec)
 
     async def test_down_commits_and_moves(self, tmp_path):

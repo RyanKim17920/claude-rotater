@@ -129,6 +129,7 @@ class SettingSpec:
     # dataclass (AutoSwitchSettings / UiSettings).
     source_key: str = ""
     step: float | None = None  # Config page ←/→ increment for float/int kinds
+    unit: str = ""  # Config page suffix for a number: "%", "s", "d"
 
     @property
     def step_size(self) -> float:
@@ -153,7 +154,7 @@ class SettingSpec:
 # `config set` validation and the clamp on load share one range.
 _CADENCE_TEXT: dict[str, tuple[str, str]] = {
     "pollSpareSeconds": (
-        "Poll interval (s)",
+        "Poll interval",
         "Seconds between usage polls of each account; the active one is "
         "skipped while its statusline feed is fresh",
     ),
@@ -162,7 +163,7 @@ _CADENCE_TEXT: dict[str, tuple[str, str]] = {
         "Most usage polls per account in any trailing hour (hard cap)",
     ),
     "feedStaleSeconds": (
-        "Feed stale after (s)",
+        "Feed stale after",
         "Poll the active account again once rota feed has been quiet this long",
     ),
 }
@@ -176,6 +177,7 @@ def _cadence_specs() -> tuple[SettingSpec, ...]:
             group="polling", label=_CADENCE_TEXT[json_key][0],
             source_key="cadence",
             step=30.0 if json_key.endswith("Seconds") else 1.0,
+            unit="s" if json_key.endswith("Seconds") else "",
         )
         for json_key, (field, kind, lo, hi) in CADENCE_SETTING_KEYS.items()
     )
@@ -188,18 +190,18 @@ SETTING_SPECS: dict[str, SettingSpec] = {
     for spec in (
         SettingSpec(
             "autoswitch", "threshold", "threshold", "float", 50.0, 99.9,
-            help="Switch when the binding 5h/7d window reaches this pct",
-            group="autoswitch", label="Threshold %", step=1.0,
+            help="Switch when the binding 5h/7d window reaches this %",
+            group="autoswitch", label="Threshold", step=1.0, unit="%",
         ),
         SettingSpec(
             "autoswitch", "cooldownSeconds", "cooldown_seconds", "float", 0.0, 86400.0,
             help="Minimum seconds between proactive switches",
-            group="autoswitch", label="Cooldown (s)", step=30.0,
+            group="autoswitch", label="Cooldown", step=30.0, unit="s",
         ),
         SettingSpec(
             "autoswitch", "hysteresisPct", "hysteresis_pct", "float", 0.0, 50.0,
-            help="A target must beat the active account by this many pct",
-            group="autoswitch", label="Hysteresis %", step=1.0,
+            help="A target must beat the active account by this many % points",
+            group="autoswitch", label="Hysteresis", step=1.0, unit="%",
         ),
         SettingSpec(
             "autoswitch", "strategy", "strategy", "choice",
@@ -215,7 +217,7 @@ SETTING_SPECS: dict[str, SettingSpec] = {
         SettingSpec(
             "autoswitch", "unhealthyTicks", "unhealthy_ticks", "int", 1, 100,
             help="Consecutive failed polls before an account is unhealthy",
-            group="autoswitch", label="Unhealthy after (polls)", step=1.0,
+            group="autoswitch", label="Unhealthy after", step=1.0, unit=" polls",
         ),
         SettingSpec(
             "autoswitch", "model", "model", "string",
@@ -231,7 +233,7 @@ SETTING_SPECS: dict[str, SettingSpec] = {
         SettingSpec(
             "ui", "loginWarnDays", "login_warn_days", "int", 0, 60,
             help="Warn when an account's login ends within this many days (0 = never)",
-            group="ui", label="Login warning (days)", step=1.0,
+            group="ui", label="Login warning", step=1.0, unit="d",
         ),
         SettingSpec(
             "run", "shareDefault", "share_default", "bool",
