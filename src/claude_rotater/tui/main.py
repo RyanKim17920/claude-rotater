@@ -3,7 +3,7 @@
 Layout, top to bottom, as tall as the terminal allows:
 
 - header band: the ``rota`` chip, the auto-switch state, the statusline feed
-  state, why a switch is held (only while one is), and the estimate legend;
+  state and why a switch is held (only while one is);
 - one ``AccountRow`` per account, measured now: "›" (and an accent band, bold
   name) on the row under the cursor, "●" on the account on duty, the account, a
   short tag only when it matters (a dead or lapsing login, "off", a real
@@ -11,7 +11,8 @@ Layout, top to bottom, as tall as the terminal allows:
   short bar (measured fill, then a ``░`` hatch out to the projection at
   the reset, coloured by its outcome) and a countdown to its
   reset, then one forecast cell for the binding window
-  (``ok``, ``~7d limit in 15h``, ``~?``). Columns give way as the width runs
+  (``ok``, ``~7d limit in 15h``; blank while there is too little history).
+  Columns give way as the width runs
   short (:data:`LEVELS`): bars, then the org, then countdowns past the 5h
   one, then per-model windows; a long email keeps its local part
   (``work@…``). A row is always one line, and the 5h reset always shows;
@@ -27,8 +28,9 @@ Layout, top to bottom, as tall as the terminal allows:
 One convention for estimates everywhere: measured values are plain, anything
 extrapolated is told apart by its glyph (``~`` prefix, ``░`` hatch, dotted
 line) and coloured by its outcome (green under, yellow close, red over the
-threshold), and an
-estimate too thin to trust reads ``~?`` rather than a precise-looking number.
+threshold), and is said in words where it is shown ("est. ~86% at reset").
+An estimate too thin to trust shows nothing rather than a precise-looking
+number.
 Each fact appears once: countdowns in the table, reset clocks on the charts.
 
 The renderers below are plain functions of (snapshot row, estimate, now) so
@@ -117,10 +119,10 @@ def event_text(event: AutoSwitchEvent, *, palette: Palette = Palette.DARK) -> Te
 # its glyph, never by greying: the "~" prefix on text, the ░ hatch in a bar,
 # the dotted line in a chart. Its colour says the outcome (outcome_color):
 # green stays comfortably under the threshold, yellow gets close, red
-# crosses it before the reset. The header carries the legend once.
+# crosses it before the reset. Each chart title says "est." in words.
 ESTIMATE_MARK = "~"
-LEGEND = f"{ESTIMATE_MARK} = estimate"
-UNSURE = f"{ESTIMATE_MARK}?"  # an estimate too thin to put a number on
+ESTIMATE_WORD = "est."
+NO_ESTIMATE = "—"  # a chart title with too little history to estimate
 _TRUSTED = ("medium", "high")  # confidences good enough for a number
 
 
@@ -226,11 +228,10 @@ def status_text(
     over_threshold: bool = False,
     profile: str | None = None,
 ) -> Text:
-    """`` rota · work   auto on   ● feed live   switch held: cooldown 4m      ~ = estimate``.
+    """`` rota · work   auto on   ● feed live   switch held: cooldown 4m``.
 
     Only the engine state, the feed state and, when a switch is blocked,
-    why; the estimate legend sits at the right edge. The note goes first
-    when the width runs short, then the legend."""
+    why; the note goes when the width runs short."""
     head = Text(no_wrap=True, overflow="ellipsis")
     head.append(brand_chip(palette))
     if profile:  # a named profile, so it is obvious which one is open
@@ -246,13 +247,8 @@ def status_text(
         head.append(f"   {glyph} ", style=getattr(palette, role))
         head.append(words, style=palette.muted)
     note = switch_note(status, now=now, over_threshold=over_threshold)
-    legend_w = len(LEGEND) + 2
-    if note and head.cell_len + 3 + len(note) + legend_w <= width:
+    if note and head.cell_len + 3 + len(note) <= width:
         head.append(f"   {note}", style=palette.sev_warn)
-    gap = width - head.cell_len - len(LEGEND)
-    if gap >= 2:
-        head.append(" " * gap)
-        head.append(LEGEND, style=palette.muted)
     return head
 
 
@@ -634,8 +630,8 @@ def forecast(
     now: float,
     models: Sequence[str] = (),
 ) -> Forecast | None:
-    """``ok``, ``~7d limit in 15h``, ``5h at limit`` (measured) or ``~?``
-    (not enough history to say). None when there is nothing to forecast."""
+    """``ok``, ``~7d limit in 15h`` or ``5h at limit`` (measured). None when
+    there is nothing to forecast or too little history to say."""
     if threshold is None or acc.disabled or acc.usage.sentinel is not None:
         return None
     pcts = window_pcts(acc, models)
@@ -644,9 +640,9 @@ def forecast(
     label, (pct, _r) = max(pcts.items(), key=lambda kv: kv[1][0])
     if pct >= threshold:
         return Forecast(f"{label} at limit", f"{label} limit", "crit", False)
-    unsure = Forecast(UNSURE, UNSURE, "muted", True)
+    # Too little history to say: the cell stays blank rather than guess.
     if est is None or not est.windows:
-        return unsure
+        return None
     hits = []
     for west in est.windows.values():
         west = _at_measured_reset(west, pcts.get(west.window, (0.0, None))[1])
@@ -656,14 +652,14 @@ def forecast(
     if hits:
         eta, west = min(hits, key=lambda h: h[0])
         if west.confidence not in _TRUSTED:
-            return unsure
+            return None
         mark, name = ESTIMATE_MARK, west.window
         if eta <= 0:
             return Forecast(f"{mark}{name} at limit", f"{mark}{name} limit", "crit", True)
         when = rough_duration(eta)
         return Forecast(f"{mark}{name} limit in {when}", f"{mark}{name} in {when}", "crit", True)
     if any(w.rate_pct_per_h is None for w in est.windows.values()):
-        return unsure
+        return None
     # Stays under: yellow when some window ends the window close to it.
     landing = [
         projected_at_reset(w, pcts.get(w.window, (0.0, None))[1], now) for w in est.windows.values()
@@ -804,31 +800,32 @@ def chart_title(
     threshold: float | None,
     palette: Palette,
 ) -> Text:
-    """``5h  ~81% at reset`` / ``7d  ~limit in 15h`` / ``5h  not enough data yet``.
+    """``5h · est. ~81% at reset`` / ``7d · est. ~limit in 15h`` / ``5h · —``.
 
-    Only the forecast: the pct is in the table and the reset clock is the
-    chart's right edge."""
+    Only the forecast, said to be an estimate in words: the pct is in the
+    table and the reset clock is the chart's right edge."""
     text = Text(no_wrap=True, overflow="ellipsis")
     text.append(west.window, style=f"bold {palette.accent}")
-    mark = ESTIMATE_MARK
+    sep = " · "
+    est = f"{ESTIMATE_WORD} {ESTIMATE_MARK}"
     rate = west.rate_pct_per_h
     if threshold is not None and measured_pct >= threshold:
-        text.append("  at limit", style=palette.sev_warn)
+        text.append(f"{sep}at limit", style=palette.sev_crit)
     elif measured_pct <= 0 and not rate:
-        text.append("  unused", style=palette.muted)
+        text.append(f"{sep}unused", style=palette.muted)
     elif rate is None or west.confidence not in _TRUSTED:
-        text.append(f"  {UNSURE} not enough data yet", style=palette.muted)
+        text.append(f"{sep}{NO_ESTIMATE}", style=palette.muted)
     else:
         eta = west.eta_s(threshold, now) if threshold is not None else None
         if eta is not None:
-            words = f"{mark}at limit" if eta <= 0 else f"{mark}limit in {rough_duration(eta)}"
-            text.append(f"  {words}", style=palette.sev_crit)
+            words = f"{est}at limit" if eta <= 0 else f"{est}limit in {rough_duration(eta)}"
+            text.append(f"{sep}{words}", style=palette.sev_crit)
         else:
             future = west.resets_at is not None and west.resets_at > now
             at_reset = west.projected_pct(west.resets_at - 1) if future else None
             if at_reset is not None:
                 color = outcome_color(at_reset, threshold, palette)
-                text.append(f"  {mark}{at_reset:.0f}% at reset", style=color)
+                text.append(f"{sep}{est}{at_reset:.0f}% at reset", style=color)
     return text
 
 

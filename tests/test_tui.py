@@ -892,7 +892,8 @@ class TestAccountRowText:
 
     def test_no_estimate_is_unsure(self):
         text = self._text(make_account(1, entry=make_entry(40.0, 10.0)))
-        assert text.plain.rstrip().endswith("~?") and not has_color(text, "~?", SEV_OK)
+        assert text.plain.rstrip().endswith("↻2d")  # no guess: the forecast cell is blank
+        assert "~" not in text.plain and "?" not in text.plain
 
     def test_model_window_column(self):
         entry = make_entry(10.0, 20.0, scoped=[("Fable", 55.0)])
@@ -1055,13 +1056,13 @@ class TestStatusText:
 
         return status_text(status, now=now or time.time(), width=width, **kw).plain
 
-    def test_engine_state_and_legend_only(self):
+    def test_engine_state_only_no_legend(self):
         now = time.time()
         text = self._text(
             self._status(running=True, threshold=90.0, next_check_at=now + 80, last_check_at=now - 5), now
         )
         assert text.startswith(" rota ") and "auto on" in text
-        assert text.rstrip().endswith("~ = estimate") and len(text) == 120
+        assert text.rstrip().endswith("auto on") and "estimate" not in text and "~" not in text
         assert "90%" not in text and "next" not in text and "checked" not in text
 
     def test_stopped_engine_says_off(self):
@@ -1097,11 +1098,11 @@ class TestStatusText:
         now = time.time()
         assert "switched" not in self._text(self._status(running=True, last_switch_at=now, last_switch="2 → 1"), now)
 
-    def test_narrow_keeps_legend_drops_note(self):
+    def test_narrow_drops_the_note(self):
         status = self._status(running=True, last_outcome="no switch: no-viable-target", last_reason="no-viable-target")
-        text = self._text(status, width=60, feed="live")
-        assert "feed live" in text and "~ = estimate" in text
-        assert "no-viable-target" not in text and len(text) <= 60
+        text = self._text(status, width=40, feed="live")
+        assert "feed live" in text
+        assert "no-viable-target" not in text and len(text) <= 40
 
 
 class TestForecast:
@@ -1117,13 +1118,12 @@ class TestForecast:
         assert fc.estimate and fc.text == "~5h limit in 60m" and fc.short == "~5h in 60m"
 
     @pytest.mark.parametrize("conf", ["low", "none"])
-    def test_thin_estimate_is_unsure(self, conf):
+    def test_thin_estimate_says_nothing(self, conf):
         est, now = window_est(conf=conf)
-        fc = self._fc(est, now=now)
-        assert fc.text == "~?" and fc.estimate
+        assert self._fc(est, now=now) is None
 
-    def test_no_estimate_is_unsure(self):
-        assert self._fc(None).text == "~?"
+    def test_no_estimate_says_nothing(self):
+        assert self._fc(None) is None
 
     def test_stays_under_is_ok(self):
         est, now = window_est(rate=0.5, conf="high")  # 60% → ~61% by the reset
@@ -1290,7 +1290,7 @@ class TestMainPage:
             await settle(pilot)
             status = painted(app, "#status")
             assert "rota" in status and "auto on" in status
-            assert status.rstrip().endswith("~ = estimate")  # the legend, once
+            assert "estimate" not in status and "~" not in status  # no legend: titles say it
             assert "90%" not in status
             labels = [str(b.label) for b in app.screen.query(Button)]
             assert len(labels) == 5
@@ -1488,10 +1488,10 @@ class TestMainPage:
         app = make_app(three_accounts(tmp_path))
         async with app.run_test(size=(120, 40)) as pilot:
             await settle(pilot)
-            assert row_plain(app, "1").rstrip().endswith("~?")
+            assert "~" not in row_plain(app, "1") and "?" not in row_plain(app, "1")
             detail = painted(app, "#detail")
-            # measured pcts still get a chart each, flagged as too thin to project
-            assert detail.count("~? not enough data yet") == 2
+            # measured pcts still get a chart each, with a dash for the estimate
+            assert detail.count("· —") == 2 and "?" not in detail
             assert "62%" not in detail  # the pct is the table's
 
     async def test_synthetic_history_gives_forecast_and_charts(self, tmp_path):
@@ -1505,9 +1505,10 @@ class TestMainPage:
             assert "~5h limit in 2h" in first, first
             assert "%/h" not in first
             title = painted(app, "#detail").splitlines()[1]
-            assert title.startswith("5h  ~limit in 2h") and "7d  ~" in title and "% at reset" in title
-            # account 2 has no history: its forecast is unsure, not a number
-            assert row_plain(app, "2").rstrip().endswith("~?")
+            assert title.startswith("5h · est. ~limit in 2h") and "7d · est. ~" in title
+            assert "% at reset" in title
+            # account 2 has no history: no forecast, rather than a guess
+            assert "~" not in row_plain(app, "2") and "?" not in row_plain(app, "2")
 
     async def test_highlight_moves_detail(self, tmp_path):
         fake = three_accounts(tmp_path)
@@ -1518,7 +1519,7 @@ class TestMainPage:
             assert "~limit in 2h" in painted(app, "#detail")  # account 1 has history
             await pilot.press("down")
             await pilot.pause()
-            assert "not enough data yet" in painted(app, "#detail")  # account 2 has none
+            assert "· —" in painted(app, "#detail")  # account 2 has none
             await pilot.press("k")
             await pilot.pause()
             assert "~limit in 2h" in painted(app, "#detail")
@@ -1549,7 +1550,7 @@ class TestMainPage:
         async with app.run_test(size=(120, 40)) as pilot:
             await settle(pilot)
             assert app.estimates == {}
-            assert row_plain(app, "1").rstrip().endswith("~?")
+            assert "~" not in row_plain(app, "1")
 
     async def test_poller_reads_store_only(self, tmp_path):
         fake = three_accounts(tmp_path)
@@ -2431,7 +2432,7 @@ class TestChartLines:
     def test_titles_carry_only_the_forecast(self):
         title = self._lines(120)[1]
         five = title.plain.split("7d")[0]
-        assert "~limit in 2h" in five  # 62% at 15%/h, 90% before the 2h reset
+        assert "est. ~limit in 2h" in five  # 62% at 15%/h, 90% before the 2h reset
         assert has_color(title, "~limit in 2h", SEV_CRIT)
         assert "62%" not in title.plain and "31%" not in title.plain  # pcts are in the table
         assert ":" not in title.plain  # the reset clock is the chart's right edge
@@ -2445,7 +2446,7 @@ class TestChartLines:
     def test_thin_history_draws_no_projection(self):
         lines = self._lines(120, series={}, est=None)
         title = lines[1].plain
-        assert title.count("~? not enough data yet") == 2
+        assert title.count("· —") == 2 and "?" not in title and "est." not in title
         from claude_rotater.tui.plot import NOW_GLYPH
 
         now_col = lines[-2].plain.index(NOW_GLYPH, 4)
@@ -2456,7 +2457,7 @@ class TestChartLines:
 
     def test_unused_and_at_limit_titles(self):
         title = self._lines(120, series={}, est=None, entry=make_entry(0.0, 95.0))[1].plain
-        assert "5h  unused" in title and "7d  at limit" in title and "~" not in title
+        assert "5h · unused" in title and "7d · at limit" in title and "~" not in title
 
     def test_hidden_below_the_minimum_and_filling_above(self):
         from claude_rotater.tui.main import chart_min_rows
@@ -2754,7 +2755,7 @@ class TestWidths:
             await settle(pilot)
             width = size[0]
             status = painted(app, "#status")
-            assert len(status) <= width and "rota" in status and "~ = estimate" in status
+            assert len(status) <= width and "rota" in status and "estimate" not in status
             for number in ("1", "2", "3"):
                 assert len(row_plain(app, number)) <= width - 1
             first = row_plain(app, "1")
