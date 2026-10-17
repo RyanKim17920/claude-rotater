@@ -433,8 +433,14 @@ class NoSwitchEvent(AutoSwitchEvent):
     def _fields(self) -> dict:
         return {"reason": self.reason, "detail": self.detail}
 
+    @property
+    def self_explained(self) -> bool:
+        """Whether ``detail`` is a whole "stay: ..." line a person can read,
+        rather than a machine reason ("cooldown", "below-threshold")."""
+        return self.reason in _SELF_EXPLAINED
+
     def human(self) -> str:
-        if self.reason in _SELF_EXPLAINED:
+        if self.self_explained:
             return self.detail  # already a whole "stay: ..." line
         return f"no switch: {self.reason}" + (f" ({self.detail})" if self.detail else "")
 

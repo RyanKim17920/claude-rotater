@@ -57,6 +57,8 @@ from claude_rotater.tui.main import (
     AutoStatus,
     LongTerm,
     MainScreen,
+    header_decision,
+    same_verdict,
 )
 from claude_rotater.tui.prompt import Choice, PromptLine
 from claude_rotater.tui.theme import ROTA_DARK, ROTA_LIGHT
@@ -246,6 +248,9 @@ class RotaApp(App):
             status = replace(status, last_outcome=event.human(), last_reason=event.reason)
         elif kind in ("error", "all-exhausted"):
             status = replace(status, last_outcome=event.human(), last_reason=kind)
+        decision = header_decision(event)
+        if decision is not None and not same_verdict(decision, status.decision):
+            status = replace(status, decision=decision)
         self.auto_status = status
         if self.main_screen.is_attached:
             self.main_screen.write_event(event)

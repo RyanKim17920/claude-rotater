@@ -62,7 +62,14 @@ from textual.screen import Screen
 from textual.widgets import ListItem, ListView, RichLog, Static
 
 from claude_rotater import oauth, profiles
-from claude_rotater.autoswitch import AutoSwitchEvent, pct_label
+from claude_rotater.autoswitch import (
+    AutoSwitchEvent,
+    Decision,
+    NoSwitchEvent,
+    SwitchEvent,
+    decision_from_event,
+    pct_label,
+)
 from claude_rotater.estimator import (
     WINDOW_LEN_S,
     AccountEstimate,
@@ -190,6 +197,7 @@ class AutoStatus:
     last_switch: str = ""  # "2 → 1" when this session saw the switch
     last_outcome: str = ""  # most recent no-switch reason / error summary
     last_reason: str = ""  # its machine reason ("cooldown", "no-candidates", "error", ...)
+    decision: Decision | None = None  # the engine's latest verdict, for the header
 
 
 FEED_LABELS = {
@@ -220,6 +228,27 @@ def switch_note(status: AutoStatus, *, now: float, over_threshold: bool) -> str:
     return status.last_outcome if reason in BLOCKED_REASONS else ""
 
 
+def header_decision(event: AutoSwitchEvent) -> Decision | None:
+    """The verdict the header shows for an event, or None to keep the last.
+
+    Switches and the strategy's own "stay: ..." lines; a machine outcome
+    ("no switch: cooldown") is the held-switch note's job, which shows it
+    only when it actually holds something."""
+    if isinstance(event, SwitchEvent) or (isinstance(event, NoSwitchEvent) and event.self_explained):
+        return decision_from_event(event)
+    return None
+
+
+def same_verdict(new: Decision, old: Decision | None) -> bool:
+    """Whether a decision repeats the one the header shows; its time alone
+    does not count, so a steady verdict is not re-stored every tick."""
+    return old is not None and (new.action, new.line, new.target) == (old.action, old.line, old.target)
+
+
+DECISION_SEP = " · "
+MIN_DECISION_W = 12  # narrower than "stay: reset…" says nothing; drop it
+
+
 def status_text(
     status: AutoStatus,
     *,
@@ -230,10 +259,11 @@ def status_text(
     over_threshold: bool = False,
     profile: str | None = None,
 ) -> Text:
-    """`` rota · work   auto on   ● feed live   switch held: cooldown 4m``.
+    """`` rota · work   auto on · stay: resets soonest (19h40m)   ● feed live``.
 
-    Only the engine state, the feed state and, when a switch is blocked,
-    why; the note goes when the width runs short."""
+    The engine state with its latest verdict (dim, cut to fit), the feed
+    state and, when a switch is blocked, why in place of the verdict; the
+    note goes, then the verdict, when the width runs short."""
     head = Text(no_wrap=True, overflow="ellipsis")
     head.append(brand_chip(palette))
     if profile:  # a named profile, so it is obvious which one is open
@@ -244,13 +274,24 @@ def status_text(
         head.append("on", style=f"bold {palette.accent}")
     else:
         head.append("off", style=f"bold {palette.sev_crit}")
+    tail = Text(no_wrap=True)
     if feed in FEED_LABELS:
         glyph, role, words = FEED_LABELS[feed]
-        head.append(f"   {glyph} ", style=getattr(palette, role))
-        head.append(words, style=palette.muted)
+        tail.append(f"   {glyph} ", style=getattr(palette, role))
+        tail.append(words, style=palette.muted)
     note = switch_note(status, now=now, over_threshold=over_threshold)
-    if note and head.cell_len + 3 + len(note) <= width:
-        head.append(f"   {note}", style=palette.sev_warn)
+    if note:
+        if head.cell_len + tail.cell_len + 3 + len(note) <= width:
+            tail.append(f"   {note}", style=palette.sev_warn)
+    elif status.running and status.decision is not None:
+        # A held switch's note already says the latest verdict, louder.
+        room = width - head.cell_len - tail.cell_len - len(DECISION_SEP)
+        if room >= MIN_DECISION_W:
+            line = Text(status.decision.line, style=palette.muted, no_wrap=True)
+            line.truncate(room, overflow="ellipsis")
+            head.append(DECISION_SEP, style=palette.muted)
+            head.append_text(line)
+    head.append_text(tail)
     return head
 
 

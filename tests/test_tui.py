@@ -1134,6 +1134,72 @@ class TestStatusText:
         assert "feed live" in text
         assert "no-viable-target" not in text and len(text) <= 40
 
+    def _decision(self, line="stay: resets soonest (19h40m), 37% headroom", action="stay"):
+        from claude_rotater.autoswitch import Decision
+
+        return Decision(action=action, line=line, ts="2026-10-16T00:00:00Z")
+
+    def test_latest_verdict_follows_auto_on(self):
+        text = self._text(self._status(running=True, decision=self._decision()), feed="live")
+        assert "auto on · stay: resets soonest (19h40m), 37% headroom   ● feed live" in text
+
+    def test_verdict_is_dim(self):
+        from claude_rotater.tui.main import status_text
+
+        head = status_text(self._status(running=True, decision=self._decision()), now=time.time(), width=120)
+        start = head.plain.index("stay:")
+        styles = {str(span.style) for span in head.spans if span.start <= start < span.end}
+        assert styles == {Palette.DARK.muted}
+
+    def test_verdict_is_cut_to_fit_and_keeps_the_feed(self):
+        text = self._text(self._status(running=True, decision=self._decision()), width=50, feed="live")
+        assert len(text) <= 50 and text.endswith("● feed live")
+        assert "· stay: resets" in text and "…" in text
+
+    def test_too_narrow_drops_the_verdict(self):
+        text = self._text(self._status(running=True, decision=self._decision()), width=34, feed="live")
+        assert "stay" not in text and "·" not in text.split("rota", 1)[1] and "feed live" in text
+
+    def test_no_verdict_while_the_engine_is_off(self):
+        assert "stay" not in self._text(self._status(running=False, decision=self._decision()))
+
+    def test_held_switch_note_replaces_the_verdict(self):
+        status = self._status(
+            running=True, decision=self._decision(),
+            last_outcome="no switch: no-candidates", last_reason="no-candidates",
+        )
+        text = self._text(status)
+        assert "no switch: no-candidates" in text and "stay:" not in text
+
+
+class TestHeaderDecision:
+    def test_switch_and_explained_stay_are_shown(self):
+        from claude_rotater.tui.main import header_decision
+
+        switch = header_decision(SwitchEvent(
+            trigger="expiring-first", from_ref={"number": "1"}, to_ref={"number": "2", "email": "b@x.com"},
+            reason="switch → #2: #1's 7d resets in 6d, #2's in 19h",
+        ))
+        assert switch.action == "switch" and switch.target == "2" and switch.line.startswith("switch → #2")
+        stay = header_decision(NoSwitchEvent(reason="stay", detail="stay: resets soonest (19h40m)"))
+        assert stay.action == "stay" and stay.line == "stay: resets soonest (19h40m)"
+
+    @pytest.mark.parametrize("reason", ["cooldown", "below-threshold", "no-candidates"])
+    def test_machine_outcomes_keep_the_last_verdict(self, reason):
+        from claude_rotater.tui.main import header_decision
+
+        assert header_decision(NoSwitchEvent(reason=reason)) is None
+        assert header_decision(PollEvent(active={"number": 1}, headroom={}, threshold=90.0)) is None
+
+    def test_same_verdict_ignores_the_time(self):
+        from claude_rotater.autoswitch import Decision
+        from claude_rotater.tui.main import same_verdict
+
+        a = Decision(action="stay", line="stay: x", ts="t1")
+        assert same_verdict(dataclasses.replace(a, ts="t2"), a)
+        assert not same_verdict(dataclasses.replace(a, line="stay: y"), a)
+        assert not same_verdict(a, None)
+
 
 class TestForecast:
     def _fc(self, est, acc=None, threshold=90.0, now=None, entry=None):
@@ -2154,6 +2220,28 @@ class TestEngineHosting:
             assert "cooldown" not in status
             assert "no switch" not in log_plain(app)
             assert "sleeping" not in log_plain(app)
+
+    @pytest.mark.parametrize("cols", [60, 120])
+    async def test_header_shows_the_latest_verdict(self, tmp_path, fake_engine, cols):
+        app = make_app(three_accounts(tmp_path))
+        async with app.run_test(size=(cols, 30)) as pilot:
+            await settle(pilot)
+            engine = fake_engine.instances[0]
+            await emit(engine, NoSwitchEvent(reason="stay", detail="stay: resets soonest (19h40m), 37% headroom"))
+            await settle(pilot)
+            first = app.auto_status.decision
+            status = painted(app, "#status")
+            assert "auto on · stay: resets" in status and len(status) <= cols
+            if cols >= 120:
+                assert "stay: resets soonest (19h40m), 37% headroom" in status
+            else:
+                assert "…" in status
+            # a machine outcome keeps the verdict; a repeat keeps the stored one
+            await emit(engine, NoSwitchEvent(reason="below-threshold"))
+            await emit(engine, NoSwitchEvent(reason="stay", detail="stay: resets soonest (19h40m), 37% headroom"))
+            await settle(pilot)
+            assert app.auto_status.decision is first
+            assert "no switch" not in painted(app, "#status")
 
     async def test_header_says_why_a_switch_is_held(self, tmp_path):
         """At its threshold with a cooldown running, the header says the
