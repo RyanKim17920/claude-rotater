@@ -15,14 +15,9 @@ Screen {
     background: $surface;
 }
 
-#columns {
-    height: 1;
-    padding: 0 1;
-    margin-top: 1;
-}
-
 #accounts {
     height: auto;
+    margin-top: 1;
     max-height: 60%;
     background: $background;
     padding: 0 1 0 0;
@@ -45,8 +40,8 @@ Screen {
     text-style: none;
 }
 
-/* As tall as its content: the strip is 2-4 lines and the history view
-   caps its graphs, so the page never pads itself out with a plot. */
+/* As tall as its content: the charts fill the spare rows up to a cap (or
+   are hidden when too few are spare) and the history view caps its graphs. */
 #detail {
     height: auto;
     padding: 0 1;
@@ -87,7 +82,7 @@ Screen {
 
 /* -- modals ----------------------------------------------------------------- */
 
-ConfirmModal, AddTokenModal, OutputModal {
+ConfirmModal, AddTokenModal, OutputModal, KeysModal {
     align: center middle;
     background: $background 60%;
 }

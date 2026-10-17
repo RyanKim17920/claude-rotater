@@ -231,11 +231,11 @@ class RotaApp(App):
         elif kind == "switch":
             src = (getattr(event, "from_ref", None) or {}).get("number", "?")
             dst = (getattr(event, "to_ref", None) or {}).get("number", "?")
-            status = replace(status, last_switch_at=now, last_switch=f"{src} → {dst}")
+            status = replace(status, last_switch_at=now, last_switch=f"{src} → {dst}", last_reason="")
         elif kind == "no-switch":
-            status = replace(status, last_outcome=event.human())
+            status = replace(status, last_outcome=event.human(), last_reason=event.reason)
         elif kind in ("error", "all-exhausted"):
-            status = replace(status, last_outcome=event.human())
+            status = replace(status, last_outcome=event.human(), last_reason=kind)
         self.auto_status = status
         if self.main_screen.is_attached:
             self.main_screen.write_event(event)
