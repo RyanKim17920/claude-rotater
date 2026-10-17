@@ -43,7 +43,11 @@ from typing import TYPE_CHECKING, ClassVar
 
 from claude_rotater import oauth, poll_policy
 from claude_rotater.exceptions import ClaudeSwitchError
-from claude_rotater.json_output import SCHEMA_VERSION, USAGE_TOKEN_EXPIRED
+from claude_rotater.json_output import (
+    SCHEMA_VERSION,
+    USAGE_FOREIGN_CREDENTIAL,
+    USAGE_TOKEN_EXPIRED,
+)
 from claude_rotater.locking import FileLock
 from claude_rotater.poll_policy import (
     ESCALATION_MARGIN_PCT,
@@ -373,7 +377,9 @@ class PollEvent(AutoSwitchEvent):
 @dataclass(frozen=True)
 class SwitchEvent(AutoSwitchEvent):
     kind: ClassVar[str] = "switch"
-    trigger: str  # "proactive" | "at-limit" | "failover" | "consume-first"
+    # "proactive" | "at-limit" | "failover" | "consume-first" | "repair"
+    # ("repair": the active account re-activated from its own backup).
+    trigger: str
     from_ref: dict | None
     to_ref: dict | None
     warnings: list[str] = field(default_factory=list)
@@ -1100,6 +1106,10 @@ class AutoSwitchEngine:
             else:
                 trigger = "at-limit" if active_headroom <= 0 else "proactive"
         else:
+            if usage.get(current) == USAGE_FOREIGN_CREDENTIAL and self._repair_active(
+                current, active_ref
+            ):
+                return TickOutcome.SWITCHED
             if usage.get(current) == USAGE_TOKEN_EXPIRED:
                 # Expired and the refresh could not complete this pass (lock
                 # contention, unattributable lineage, failed persist, or the
@@ -2261,6 +2271,39 @@ class AutoSwitchEngine:
             )
         )
         return TickOutcome.SWITCHED
+
+    def _repair_active(self, current: str, active_ref: dict) -> bool:
+        """Put the active account's own login back when another account's
+        credential sits in the live store. Returns whether it worked.
+
+        The live store holding a foreign credential means something outside
+        rota wrote it (another profile, a ``/login``); the account rota marks
+        active did not run out of anything. Failing over would move the user
+        to a third account they never chose, so re-activate the marked one
+        from its backup instead (a self-switch stashes the foreign credential
+        first). Failover stays the fallback when the backup cannot be
+        restored. Not a switch for cooldown purposes: the account is unchanged.
+        """
+        if self.dry_run:
+            self._emit(SwitchEvent(
+                trigger="repair", from_ref=active_ref, to_ref=active_ref,
+                dry_run=True,
+            ))
+            return True
+        email = active_ref.get("email", "")
+        with self._state_lock():
+            try:
+                result = self.switcher.switch_to(current, json_output=True)
+            except ClaudeSwitchError as e:
+                _logger.warning(f"Could not restore Account-{current}'s login: {e}")
+                return False
+            if not self.switcher._live_matches_slot_backup(current, email):
+                return False
+        self._emit(SwitchEvent(
+            trigger="repair", from_ref=active_ref, to_ref=active_ref,
+            warnings=(result or {}).get("warnings", []),
+        ))
+        return True
 
     # -- helpers --------------------------------------------------------------
 

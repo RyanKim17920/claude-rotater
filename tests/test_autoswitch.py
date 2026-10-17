@@ -644,8 +644,9 @@ class TestIdleHold:
     ):
         """The foreign sentinel (live credential proven to be another
         account's) must NOT idle-hold like TOKEN_EXPIRED: holding preserves
-        the drift, while the failover switch stashes the foreign credential
-        and restores the slot's backup — the switch IS the repair."""
+        the drift. When the active slot's own login cannot be restored (here
+        the self-switch cannot classify the live bytes), failover is the
+        fallback repair."""
         foreign = {
             "1": USAGE_FOREIGN_CREDENTIAL, "2": _usage(10), "3": _usage(20),
         }
@@ -655,6 +656,51 @@ class TestIdleHold:
         switch = next(e for e in harness.events if isinstance(e, SwitchEvent))
         assert switch.trigger == "failover"
         assert harness.engine._idle_hold_since is None
+
+    def test_foreign_credential_restores_the_active_account_in_place(
+        self, harness
+    ):
+        """Another profile wrote its token into this live store. The marked
+        active account did not run out of anything, so the engine puts its own
+        login back rather than failing over to an account nobody chose (the
+        incident: a personal profile landed on a third account after a work
+        switch clobbered its live item)."""
+        real_switch_to = harness.switcher.switch_to
+        calls: list[str] = []
+
+        def reconcile(number, json_output=False):
+            # Stand-in for a provenance-proven self-switch: rewrite the live
+            # login from the slot's backup.
+            calls.append(number)
+            return real_switch_to(number, json_output=json_output, force=True)
+
+        foreign = {
+            "1": USAGE_FOREIGN_CREDENTIAL, "2": _usage(10), "3": _usage(20),
+        }
+        with patch.object(harness.switcher, "switch_to", side_effect=reconcile):
+            assert harness.tick_with_usage(foreign) is TickOutcome.SWITCHED
+
+        assert calls == ["1"]
+        assert harness.active_number() == 1
+        assert harness.switcher._live_matches_slot_backup("1", "a@example.com")
+        switch = next(e for e in harness.events if isinstance(e, SwitchEvent))
+        assert switch.trigger == "repair"
+        assert switch.to_ref["number"] == 1
+        # Not a switch: no cooldown or no-return bookkeeping.
+        assert "lastSwitchAt" not in harness.state()
+
+    def test_foreign_credential_repair_is_not_performed_in_dry_run(
+        self, harness
+    ):
+        harness.engine = harness._make_engine(dry_run=True)
+        foreign = {
+            "1": USAGE_FOREIGN_CREDENTIAL, "2": _usage(10), "3": _usage(20),
+        }
+        with patch.object(harness.switcher, "switch_to") as switch_to:
+            assert harness.tick_with_usage(foreign) is TickOutcome.SWITCHED
+        switch_to.assert_not_called()
+        switch = next(e for e in harness.events if isinstance(e, SwitchEvent))
+        assert (switch.trigger, switch.dry_run) == ("repair", True)
 
 
 class TestAdaptiveScheduler:
