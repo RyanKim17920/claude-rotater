@@ -314,3 +314,24 @@ class TestSwitcherRunsTheImport:
 
         ClaudeAccountSwitcher()  # second construction: silent no-op
         assert "imported" not in capsys.readouterr().err
+
+
+class TestImportedAt:
+    def test_reads_the_import_record(self, tmp_path):
+        import json as _json
+
+        from claude_rotater import legacy_import
+
+        (tmp_path / legacy_import.IMPORT_RECORD).write_text(
+            _json.dumps({"importedAt": "2026-10-16T22:54:06Z"})
+        )
+        assert legacy_import.imported_at(tmp_path) == 1792191246.0
+
+    def test_missing_or_bad_record_is_none(self, tmp_path):
+        from claude_rotater import legacy_import
+
+        assert legacy_import.imported_at(tmp_path) is None
+        (tmp_path / legacy_import.IMPORT_RECORD).write_text("{nope")
+        assert legacy_import.imported_at(tmp_path) is None
+        (tmp_path / legacy_import.IMPORT_RECORD).write_text('{"importedAt": 5}')
+        assert legacy_import.imported_at(tmp_path) is None

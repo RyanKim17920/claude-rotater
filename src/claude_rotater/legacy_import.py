@@ -37,6 +37,7 @@ import os
 import shutil
 import tempfile
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 
 from claude_rotater import macos_keychain
@@ -170,6 +171,22 @@ def _copy_tree(source: Path, staging: Path) -> None:
         src = source / name
         if src.is_dir():
             shutil.copytree(src, staging / name, symlinks=True, ignore=ignore)
+
+
+def imported_at(target: Path) -> float | None:
+    """Epoch seconds when ``target`` was imported from claude-swap, or None
+    when it never was (or the record is unreadable). Never raises.
+
+    Everything copied over, such as the auto engine's ``lastSwitchAt``, is
+    claude-swap's history; a reader that wants rota's own uses this to tell
+    them apart.
+    """
+    try:
+        record = json.loads((Path(target) / IMPORT_RECORD).read_text(encoding="utf-8"))
+        stamp = record.get("importedAt") if isinstance(record, dict) else None
+        return datetime.fromisoformat(str(stamp).replace("Z", "+00:00")).timestamp()
+    except (OSError, ValueError, TypeError, UnicodeDecodeError):
+        return None
 
 
 def import_legacy_data(target: Path, platform: Platform) -> ImportResult | None:

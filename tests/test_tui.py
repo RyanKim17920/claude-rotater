@@ -1668,6 +1668,25 @@ class TestEngineHosting:
             assert "cooldown 4m" in status
             assert "last switch" in status
 
+    async def test_imported_claude_swap_switch_is_not_rotas(self, tmp_path):
+        """lastSwitchAt copied over by the claude-swap import is not shown as
+        rota's last switch; a switch after the import is."""
+        imported = time.time() - 3600
+        (tmp_path / ".imported-from.json").write_text(
+            json.dumps({"importedAt": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(imported))})
+        )
+        state = tmp_path / "autoswitch_state.json"
+        state.write_text(json.dumps({"lastSwitchAt": imported - 9 * 86400}))
+        app = make_app(three_accounts(tmp_path))
+        async with app.run_test(size=(120, 40)) as pilot:
+            await settle(pilot)
+            assert "last switch" not in painted(app, "#status")
+            assert app.auto_status.last_switch_at is None
+            state.write_text(json.dumps({"lastSwitchAt": time.time() - 30}))
+            app._tick()
+            await settle(pilot)
+            assert "last switch" in painted(app, "#status")
+
     async def test_settings_change_restarts_engine(self, tmp_path, fake_engine):
         from claude_rotater.settings import set_setting
 

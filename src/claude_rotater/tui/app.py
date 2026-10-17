@@ -26,7 +26,7 @@ from textual.binding import Binding
 from textual.reactive import reactive
 from textual.worker import WorkerState
 
-from claude_rotater import printer
+from claude_rotater import legacy_import, printer
 from claude_rotater.autoswitch import STATE_FILENAME, AutoSwitchEvent
 from claude_rotater.estimator import AccountEstimate, estimate_account
 from claude_rotater import statusline_setup
@@ -421,15 +421,23 @@ class RotaApp(App):
 
     def _read_last_switch_at(self) -> float | None:
         """The engine's shared ``lastSwitchAt``: covers switches made by
-        another process (``rota auto``, ``rota switch``). Lock-free read."""
+        another process (``rota auto``, ``rota switch``). Lock-free read.
+
+        A stamp no newer than the claude-swap import came over with it: it is
+        claude-swap's switch, not rota's, so the header shows nothing for it.
+        """
+        backup_dir = self.switcher.backup_dir
         try:
-            raw = json.loads(
-                (self.switcher.backup_dir / STATE_FILENAME).read_text(encoding="utf-8")
-            )
+            raw = json.loads((backup_dir / STATE_FILENAME).read_text(encoding="utf-8"))
             value = raw.get("lastSwitchAt")
-            return float(value) if isinstance(value, (int, float)) else None
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                return None
         except Exception:
             return None
+        imported = legacy_import.imported_at(backup_dir)
+        if imported is not None and value <= imported:
+            return None
+        return float(value)
 
     def _apply_snapshot(
         self,
