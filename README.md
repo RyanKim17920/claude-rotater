@@ -17,11 +17,20 @@ Windows.
 - Automatic switching while the TUI is open, or headless with `rota auto`.
   By default it spends the account whose weekly quota expires soonest and
   keeps a 5-hour backup when resets are close (`autoswitch.strategy`:
-  `expiring-first`, `best` or `consume-first`).
+  `expiring-first`, `best` or `consume-first`). Below the threshold it moves
+  only for a large gain confirmed by two readings. It fails over only when
+  the active login is dead (never on unknown usage such as a 429), restores
+  the marked account's own login if another account's login appears in its
+  place (or stops and asks for a re-login), and pauses after
+  `autoswitch.maxSwitchesPerHour` (default 4) switches in an hour.
   Switches take Claude Code's own credential locks, so they never collide
-  with a token refresh.
-- Log accounts in from the TUI without touching the account you are using.
-  Idle accounts are kept logged in.
+  with a token refresh, and the active token is never refreshed while a
+  claude is running.
+- One auto engine per data dir: a second rota on the same data dir is
+  view-only and says which process (and whether it runs older code) owns it.
+- Log accounts in from the TUI without touching the account you are using,
+  including a fresh login for the active account. Idle accounts' tokens are
+  refreshed ahead of expiry only when `accounts.proactiveTokenRefresh` is on.
 - `rota run <account>`: run Claude Code as another account in one terminal
   only, so two accounts can work in parallel.
 - Reads live usage from Claude Code's statusline, so the active account is
