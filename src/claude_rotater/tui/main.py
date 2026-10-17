@@ -5,7 +5,8 @@ Layout, top to bottom, as tall as the terminal allows:
 - header band: the ``rota`` chip, the auto-switch state, the statusline feed
   state and why a switch is held (only while one is);
 - one ``AccountRow`` per account, measured now: "›" (and an accent band, bold
-  name) on the row under the cursor, "●" on the account on duty, the account, a
+  name) on the row under the cursor, "●" and an accent name on the account
+  on duty, the account, a
   short tag only when it matters (a dead or lapsing login, "off", a real
   org), then per window (5h, 7d, each per-model window in use) its pct, a
   short bar (measured fill, then a ``░`` hatch out to the projection at
@@ -263,7 +264,7 @@ _PREFIX_W = 3  # "›● ": cursor, on duty, space
 _GAP = 2  # between table columns
 _REL_W = 5  # "1h20m" (countdown_text)
 _RESET_GLYPH = "↻"
-_MAX_TAG_W = 14
+_MAX_TAG_W = 16  # "login ends 5h03m"
 _MIN_NAME_W = 8
 _MAX_NAME_W = 32
 _FORECAST_W = 20  # "~Fable limit in 15h"
@@ -411,6 +412,13 @@ def short_name_len(name: str) -> int:
     return min(len(name), len(name.split("@", 1)[0].split("(")[-1].strip()) + 2)
 
 
+def name_color(acc: AccountSnapshot, palette: Palette) -> str:
+    """The accent for the account on duty, muted when it is off."""
+    if acc.disabled:
+        return palette.muted
+    return palette.accent if acc.is_active else palette.foreground
+
+
 def account_name(acc: AccountSnapshot) -> str:
     return f"{acc.alias} ({acc.email})" if acc.alias else acc.email
 
@@ -478,7 +486,7 @@ def row_tag(
 def login_warning(acc: AccountSnapshot, now: float, warn_days: int) -> str | None:
     """Short tag when the stored login lapses within ``warn_days`` (or has).
 
-    ``login 2d`` / ``login 5h 3m`` / ``login ended``; None when the end is
+    ``login ends 2d`` / ``login ends 5h03m`` / ``login ended``; None when the end is
     unknown, far off, or warnings are off (0 days).
     """
     if acc.login_expires_at is None or warn_days <= 0:
@@ -489,8 +497,8 @@ def login_warning(acc: AccountSnapshot, now: float, warn_days: int) -> str | Non
     if remaining > warn_days * 86400:
         return None
     if remaining >= 86400:
-        return f"login {int(remaining // 86400)}d"
-    return f"login {data.format_duration(remaining)}"
+        return f"login ends {int(remaining // 86400)}d"
+    return f"login ends {data.compact_duration(remaining)}"
 
 
 def window_pcts(acc: AccountSnapshot, models: Sequence[str]) -> dict[str, tuple[float, float | None]]:
@@ -660,13 +668,9 @@ def forecast(
         return Forecast(f"{mark}{name} limit in {when}", f"{mark}{name} in {when}", "crit", True)
     if any(w.rate_pct_per_h is None for w in est.windows.values()):
         return None
-    # Stays under: yellow when some window ends the window close to it.
-    landing = [
-        projected_at_reset(w, pcts.get(w.window, (0.0, None))[1], now) for w in est.windows.values()
-    ]
-    peak = max((p for p in landing if p is not None), default=None)
-    close = peak is not None and peak >= threshold - NEAR_PTS
-    return Forecast("ok", "ok", "warn" if close else "ok", False)
+    # Stays under: "ok" is always the same green; how close it lands is the
+    # bar's and the chart's to say.
+    return Forecast("ok", "ok", "ok", False)
 
 
 def forecast_text(fc: Forecast | None, width: int, *, long: bool, palette: Palette) -> Text:
@@ -696,12 +700,13 @@ def account_row_text(
     ``›● me@x.com  Acme  5h 58% ↻1h20m  7d 48% ↻23h  ~7d limit in 15h``.
 
     ``›`` and a bold name mark the row under the cursor (its band is CSS);
-    ``●`` marks the account on duty, so the two read apart at a glance."""
+    ``●`` and an accent name mark the account on duty, so the two read apart
+    at a glance."""
     text = Text(no_wrap=True, overflow="ellipsis")
     text.append(CURSOR_MARK if selected else " ", style=f"bold {palette.accent}")
     text.append(ON_DUTY_MARK if acc.is_active else " ", style=palette.accent)
     text.append(" ")
-    name_style = palette.muted if acc.disabled else palette.foreground
+    name_style = name_color(acc, palette)
     text.append(fit_name(account_name(acc), layout.name_w), style=f"bold {name_style}" if selected else name_style)
     if layout.tag_w:
         if layout.level.org:
@@ -911,14 +916,13 @@ class LongTerm:
 
 
 def account_title(acc: AccountSnapshot, palette: Palette, suffix: str = "") -> Text:
-    """``me@x.com  Acme  on duty`` above the graphs."""
+    """``me@x.com  Acme`` above the graphs: the name in the accent when it
+    is the account on duty, as in its row."""
     text = Text(no_wrap=True, overflow="ellipsis")
-    text.append(account_name(acc), style=f"bold {palette.foreground}")
-    tag = "disabled" if acc.disabled else acc.display_tag
+    text.append(account_name(acc), style=f"bold {name_color(acc, palette)}")
+    tag = "off" if acc.disabled else acc.display_tag
     if tag != "personal":
         text.append(f"  {tag}", style=palette.muted)
-    if acc.is_active:
-        text.append("  on duty", style=palette.accent)
     if suffix:
         text.append(f"  {suffix}", style=palette.muted)
     return text

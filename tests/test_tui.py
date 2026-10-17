@@ -1130,6 +1130,11 @@ class TestForecast:
         fc = self._fc(est, now=now)
         assert fc.text == "ok" and not fc.estimate
 
+    def test_ok_is_always_green_even_close_to_the_threshold(self):
+        est, now = window_est(rate=12.0, conf="high", ago=0.0, resets_in=7200)  # 60% → ~84%
+        fc = self._fc(est, now=now)
+        assert fc.text == "ok" and fc.role == "ok"
+
     def test_measured_at_threshold_is_not_an_estimate(self):
         fc = self._fc(None, entry=make_entry(95.0, 10.0))
         assert fc.text == "5h at limit" and not fc.estimate and fc.role == "crit"
@@ -1390,7 +1395,11 @@ class TestMainPage:
             assert band.a > 0 and band != rows["1"].styles.background
             name = rows["2"].children[0].render()
             assert any("bold" in st for st in styles_of(name, "work@y.com"))
-            assert not any("bold" in st for st in styles_of(rows["1"].children[0].render(), "me@x.com"))
+            on_duty = rows["1"].children[0].render()
+            assert not any("bold" in st for st in styles_of(on_duty, "me@x.com"))
+            accent = Palette.from_theme(app.current_theme).accent
+            assert has_color(on_duty, "me@x.com", accent)  # one marker: ● plus the accent name
+            assert not has_color(name, "work@y.com", accent)
             # the charts say whose they are
             assert painted(app, "#detail").splitlines()[0].startswith("› work@y.com")
             await pilot.hover(rows["3"])
@@ -1825,8 +1834,8 @@ class TestLoginWarning:
         [
             (None, 3, None),
             (10 * 86400, 3, None),
-            (2.5 * 86400, 3, "login 2d"),
-            (5 * 3600 + 330, 3, "login 5h 5m"),
+            (2.5 * 86400, 3, "login ends 2d"),
+            (5 * 3600 + 330, 3, "login ends 5h05m"),
             (-10, 3, "login ended"),
             (86400, 0, None),  # warnings off
         ],
@@ -1840,9 +1849,9 @@ class TestLoginWarning:
         from claude_rotater.tui.main import RowLayout, account_row_text
 
         acc = self._acc(86400 + 60)
-        layout = RowLayout.for_width(120, ("5h", "7d"), tag_need=8)
+        layout = RowLayout.for_width(120, ("5h", "7d"), tag_need=13)
         text = account_row_text(acc, None, layout, now=time.time(), threshold=90)
-        assert "login 1d" in text.plain and "personal" not in text.plain
+        assert "login ends 1d" in text.plain and "personal" not in text.plain
 
     def test_row_without_warning_has_no_personal_tag(self):
         from claude_rotater.tui.main import RowLayout, account_row_text
@@ -1857,7 +1866,7 @@ class TestLoginWarning:
 
         dead = dataclasses.replace(self._acc(3600), usage=UsageEntry(sentinel=USAGE_RELOGIN_REQUIRED))
         assert row_tag(dead, time.time(), 3) == ("re-login", True)
-        assert row_tag(self._acc(3600), time.time(), 3)[0].startswith("login ")
+        assert row_tag(self._acc(3600), time.time(), 3)[0].startswith("login ends ")
         assert row_tag(self._acc(30 * 86400), time.time(), 3) == ("", False)
 
 
@@ -1904,12 +1913,12 @@ class TestRefresherHosting:
         app = make_app(fake)
         async with app.run_test(size=(120, 40)) as pilot:
             await settle(pilot)
-            assert "login 5d" not in row_plain(app, "2")
+            assert "login ends" not in row_plain(app, "2")
             set_setting(tmp_path, "ui.loginWarnDays", "7")
             app.on_settings_changed("ui.loginWarnDays")
             await pilot.pause()
             assert app.login_warn_days == 7
-            assert "login 4d" in row_plain(app, "2") or "login 5d" in row_plain(app, "2")
+            assert "login ends 4d" in row_plain(app, "2") or "login ends 5d" in row_plain(app, "2")
 
 
 def test_default_factory_builds_live_engine(monkeypatch, tmp_path):
@@ -2402,9 +2411,16 @@ class TestChartLines:
 
     def test_side_by_side_when_wide(self):
         lines = self._lines(120)
-        assert lines[0].plain.startswith("› me@x.com") and "on duty" in lines[0].plain
+        assert lines[0].plain.startswith("› me@x.com") and "on duty" not in lines[0].plain
+        assert has_color(lines[0], "me@x.com", Palette.DARK.accent)  # on duty: the accent name
         assert lines[1].plain.startswith("5h") and "7d" in lines[1].plain
         assert all(len(line.plain) <= 120 for line in lines)
+
+    def test_off_account_title_says_off_like_its_row(self):
+        from claude_rotater.tui.main import account_title
+
+        title = account_title(make_account(3, disabled=True, email="old@z.com"), Palette.DARK).plain
+        assert "off" in title and "disabled" not in title
 
     def test_stacked_when_narrow(self):
         lines = [line.plain for line in self._lines(80, 19)]
