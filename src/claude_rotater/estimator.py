@@ -11,6 +11,15 @@ close points is mostly quantization noise. The estimator therefore fits an
 exponentially weighted least-squares line over a recent lookback, refuses to
 fit spans shorter than ``MIN_SPAN_S``, and reports a confidence tier the
 callers use to decide how much to trust it.
+
+A slope is the user's, not the account's: whoever is on duty is the one
+being burned. After a switch the account that was on duty stops climbing
+and the new one starts, so a fit across the switch would keep projecting the
+old account's burn onto it (and none onto the new one). Callers therefore
+pass the last switch as ``since``: only measurements from then on set the
+slope, and until there are enough of them the rate is unknown, except for
+an account that was flat before the switch too (an idle account stays
+idle).
 """
 
 from __future__ import annotations
@@ -140,11 +149,23 @@ def _clamp_rate(rate: float) -> float:
     return min(max(rate, 0.0), MAX_RATE_PCT_PER_H)
 
 
+def _fit_of(seg: list[Point], now: float, params: WindowParams) -> tuple[float, float] | None:
+    span = seg[-1].t - seg[0].t
+    if len(seg) < 2 or span < MIN_SPAN_S:
+        return None
+    return _ewls(seg, now, params.half_life_s)
+
+
 def estimate_window(
-    points: Sequence[Point], *, window: str, now: float
+    points: Sequence[Point], *, window: str, now: float, since: float | None = None
 ) -> WindowEstimate | None:
     """Estimate one window from its measured points (any order). None when
-    there are no points."""
+    there are no points.
+
+    ``since`` is the last account switch (see the module docstring): only
+    points from then on set the slope. A segment the switch leaves too short
+    keeps the whole segment's fit only when that fit is flat; otherwise the
+    rate is unknown."""
     if not points:
         return None
     pts = sorted(points, key=lambda p: p.t)
@@ -157,10 +178,18 @@ def estimate_window(
         )
     params = window_params(window)
     seg = _segment(pts, newest, now - params.lookback_s)
+    fit = _fit_of(seg, now, params)
+    switched = since is not None and since > seg[0].t
+    if switched:
+        after = [p for p in seg if p.t >= since]
+        after_fit = _fit_of(after, now, params) if after else None
+        if after_fit is not None:
+            seg, fit = after, after_fit
+        elif fit is not None and _clamp_rate(fit[0]) > MIN_ETA_RATE_PCT_PER_H:
+            fit = None  # the slope before the switch was someone else's burn
     span = seg[-1].t - seg[0].t
     rate: float | None = None
     confidence: Confidence = "none"
-    fit = _ewls(seg, now, params.half_life_s) if len(seg) >= 2 and span >= MIN_SPAN_S else None
     if fit is not None:
         slope, rms = fit
         rate = _clamp_rate(slope)
@@ -172,9 +201,11 @@ def estimate_window(
         else:
             confidence = "low"
     elif newest.resets_at is not None:
-        # Average burn since the window opened.
-        elapsed = newest.t - (newest.resets_at - window_len_s(window))
-        if elapsed >= MIN_FALLBACK_ELAPSED_S:
+        # Average burn since the window opened (meaningless across a switch
+        # inside the window: part of it was another account's duty).
+        opened = newest.resets_at - window_len_s(window)
+        elapsed = newest.t - opened
+        if elapsed >= MIN_FALLBACK_ELAPSED_S and (since is None or since <= opened):
             rate = _clamp_rate(newest.pct / elapsed * 3600.0)
             confidence = "low"
     return WindowEstimate(
@@ -218,12 +249,15 @@ def estimate_account(
     models: tuple[str, ...],
     threshold: float,
     now: float,
+    since: float | None = None,
 ) -> AccountEstimate:
+    """Every relevant window's estimate; ``since`` is the last account switch
+    (see :func:`estimate_window`)."""
     windows: dict[str, WindowEstimate] = {}
     for label, points in series.items():
         if not is_relevant_window(label, models):
             continue
-        est = estimate_window(points, window=label, now=now)
+        est = estimate_window(points, window=label, now=now, since=since)
         if est is not None:
             windows[label] = est
     if not windows:

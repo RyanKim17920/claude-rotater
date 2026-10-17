@@ -228,6 +228,73 @@ class TestProjectionAndEta:
         assert w.eta_s(90.0, NOW) is None  # needs ~1.5 h, resets in 10 min
 
 
+class TestSinceSwitch:
+    """``since`` (the last switch): a slope belongs to whoever was on duty."""
+
+    SWITCH = NOW - 1800
+
+    def test_old_account_stops_projecting_its_pre_switch_burn(self):
+        # Burned at 30%/h until the switch, nothing measured since.
+        burning = line(30.0, start_pct=40.0, n=8, step_s=300, end_t=self.SWITCH)
+        before = estimate_window(burning, window="5h", now=NOW)
+        assert before.rate_pct_per_h == pytest.approx(30.0)
+        w = estimate_window(burning, window="5h", now=NOW, since=self.SWITCH)
+        assert w.rate_pct_per_h is None and w.confidence == "none"
+        assert w.projected_pct(NOW) is None and w.eta_s(90.0, NOW) is None
+        assert w.last_pct == pytest.approx(burning[-1].pct)  # still measured
+
+    def test_old_account_polled_flat_after_the_switch_reads_flat(self):
+        burning = line(30.0, start_pct=40.0, n=8, step_s=300, end_t=self.SWITCH)
+        idle = [Point(self.SWITCH + 600, burning[-1].pct, RESET),
+                Point(NOW, burning[-1].pct, RESET)]
+        w = estimate_window(burning + idle, window="5h", now=NOW, since=self.SWITCH)
+        assert w.rate_pct_per_h == pytest.approx(0.0, abs=1e-9)
+        assert w.points == (burning[-1], *idle)  # the switch moment onwards
+        assert w.eta_s(90.0, NOW) is None
+
+    def test_new_account_rate_comes_only_from_after_the_switch(self):
+        flat = [Point(self.SWITCH - 3000 + i * 600, 10.0, RESET) for i in range(5)]
+        rising = line(24.0, start_pct=10.0, n=6, step_s=300, end_t=NOW)
+        assert rising[0].t >= self.SWITCH
+        mixed = estimate_window(flat + rising, window="5h", now=NOW)
+        w = estimate_window(flat + rising, window="5h", now=NOW, since=self.SWITCH)
+        assert w.rate_pct_per_h == pytest.approx(24.0)
+        assert mixed.rate_pct_per_h < w.rate_pct_per_h  # the flat past diluted it
+
+    def test_new_account_jump_without_enough_points_is_unknown(self):
+        flat = [Point(self.SWITCH - 3000 + i * 600, 10.0, RESET) for i in range(5)]
+        jump = [Point(NOW, 25.0, RESET)]
+        w = estimate_window(flat + jump, window="5h", now=NOW, since=self.SWITCH)
+        assert w.rate_pct_per_h is None
+
+    def test_idle_account_stays_idle_across_a_switch(self):
+        flat = [Point(self.SWITCH - 3000 + i * 600, 10.0, RESET) for i in range(5)]
+        w = estimate_window(flat, window="5h", now=NOW, since=self.SWITCH)
+        assert w.rate_pct_per_h == pytest.approx(0.0, abs=1e-9)
+        assert w.confidence != "none"
+
+    def test_no_window_average_fallback_across_a_switch(self):
+        reset = NOW + 3 * 3600  # opened two hours ago
+        lone = [Point(NOW, 40.0, reset)]
+        assert estimate_window(lone, window="5h", now=NOW).rate_pct_per_h is not None
+        w = estimate_window(lone, window="5h", now=NOW, since=NOW - 600)
+        assert w.rate_pct_per_h is None
+
+    def test_switch_older_than_the_segment_changes_nothing(self):
+        pts = line(12.0, start_pct=30.0, n=10, step_s=300)
+        plain = estimate_window(pts, window="5h", now=NOW)
+        assert estimate_window(pts, window="5h", now=NOW, since=NOW - 86400) == plain
+
+    def test_account_estimate_passes_since_to_every_window(self):
+        five = line(30.0, start_pct=40.0, n=8, step_s=300, end_t=self.SWITCH)
+        seven = line(2.0, start_pct=50.0, n=8, step_s=300, end_t=self.SWITCH,
+                     resets_at=NOW + 3 * 86400)
+        a = estimate_account({"5h": five, "7d": seven}, models=(), threshold=90.0,
+                             now=NOW, since=self.SWITCH)
+        assert all(w.rate_pct_per_h is None for w in a.windows.values())
+        assert a.eta_threshold_s is None
+
+
 class TestAccount:
     def test_missing_series(self):
         a = estimate_account({}, models=(), threshold=90.0, now=NOW)
