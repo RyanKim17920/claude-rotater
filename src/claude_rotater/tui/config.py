@@ -24,8 +24,9 @@ then posts ``ConfigScreen.SettingChanged`` so the host app can react
 key by ``NOTIFY_DELAY_S``: holding → for a few seconds writes every step but
 restarts the engine once. Leaving the page flushes anything pending.
 
-The footer shows the selected setting's full help, range, step and default,
-wrapped over as many lines as it needs, so nothing is cut off at 80 columns.
+Rows show a label, the value and, only where it differs from the default,
+"custom". The footer shows the focused setting's full help, range, step and
+default, wrapped over as many lines as it needs, so nothing is cut off.
 """
 
 from __future__ import annotations
@@ -67,11 +68,9 @@ HINT_KEYS: tuple[tuple[str, str], ...] = (
 )
 _LABEL_W = 26
 _VALUE_W = 16
-_MARKER_W = 8
-# Below this page width the in-row help column is dropped entirely: at 80
-# columns it could only show a few words cut off mid-sentence, and the footer
-# already shows the selected setting's full help.
-HELP_COLUMN_MIN_WIDTH = 110
+# Rows carry no help text: cut to fit it only ever read as a fragment. The
+# footer shows the focused setting's whole description.
+CUSTOM_MARK = "custom"  # only on rows that differ from the default
 
 
 def range_text(spec: SettingSpec) -> str:
@@ -286,15 +285,9 @@ class SettingsList(Widget, can_focus=True):
         row.append(label, style=f"bold {palette.foreground}" if selected else palette.foreground)
         cell = self._value_cell(spec, selected, palette)
         row.append(cell)
-        row.append(" " * max(1, _VALUE_W - cell.cell_len))
-        row.append(
-            ("custom" if is_set else "default").ljust(_MARKER_W),
-            style=f"bold {palette.accent}" if is_set else palette.muted,
-        )
-        help_w = width - row.cell_len - 4
-        if width >= HELP_COLUMN_MIN_WIDTH and help_w > 0:
-            text = spec.help if len(spec.help) <= help_w else spec.help[: help_w - 1] + "…"
-            row.append("  " + text, style=palette.muted)
+        if is_set:
+            row.append(" " * max(1, _VALUE_W - cell.cell_len))
+            row.append(CUSTOM_MARK, style=f"bold {palette.accent}")
         if selected:
             row.pad_right(max(0, width - 2 - row.cell_len))
             theme = self.app.current_theme

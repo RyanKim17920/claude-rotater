@@ -2797,6 +2797,30 @@ class TestStatuslineKey:
 
 @pytest.mark.asyncio
 class TestWidths:
+    @pytest.mark.parametrize("theme_name", ["dark", "light"])
+    @pytest.mark.parametrize("size", [(60, 20), (80, 24), (120, 40), (160, 50)])
+    async def test_clean_page_at_every_width_and_theme(self, tmp_path, size, theme_name):
+        """The cleanup holds everywhere: no legend, no ~?, no 'on duty', the
+        page inside the terminal, the key strip on the bottom row."""
+        from claude_rotater.settings import set_setting
+        from claude_rotater.tui.main import AccountRow
+
+        set_setting(tmp_path, "ui.theme", theme_name)
+        fake = three_accounts(tmp_path)
+        with_history(fake, long_history(time.time()))
+        app = make_app(fake)
+        async with app.run_test(size=size) as pilot:
+            await settle(pilot)
+            assert app.current_theme.name == f"rota-{theme_name}"
+            strips = app.screen._compositor.render_strips()
+            page = ["".join(seg.text for seg in strip).rstrip() for strip in strips]
+            text = "\n".join(page)
+            assert len(page) == size[1] and all(len(line) <= size[0] for line in page)
+            for gone in ("~ = estimate", "~?", "on duty", "not enough data", "disabled"):
+                assert gone not in text, gone
+            assert page[-1].rstrip().endswith("? more")
+            assert all(row.region.height == 1 for row in app.screen.query(AccountRow))
+
     @pytest.mark.parametrize("size", [(60, 20), (80, 24), (120, 40), (160, 50)])
     async def test_every_account_is_one_line_at_any_width(self, tmp_path, size):
         from claude_rotater.json_output import USAGE_RELOGIN_REQUIRED

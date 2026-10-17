@@ -187,7 +187,8 @@ class TestLayout:
             thr = next(l for l in lines if "Threshold" in l)
             cool = next(l for l in lines if "Cooldown" in l)
             assert "80%" in thr and "custom" in thr and "300s" in cool
-            assert "default" in cool
+            assert "custom" not in cool and "default" not in cool  # a default row is quiet
+            assert sum("custom" in l for l in lines) == 1
 
     @pytest.mark.parametrize("size", [(80, 24), (60, 20)])
     async def test_narrow_terminal_footer_wraps_full_help(self, tmp_path, size):
@@ -205,11 +206,15 @@ class TestLayout:
             assert "…" not in plain(app)
             assert lst(app).spec.help not in plain(app)
 
-    async def test_wide_terminal_shows_help_column(self, tmp_path):
+    @pytest.mark.parametrize("size", [(140, 40), (160, 50)])
+    async def test_rows_carry_no_help_the_footer_has_it_whole(self, tmp_path, size):
         app = Host(tmp_path)
-        async with app.run_test(size=(140, 40)) as pilot:
+        async with app.run_test(size=size) as pilot:
             await pilot.pause()
-            assert SETTING_SPECS["autoswitch.cooldownSeconds"].help in plain(app)
+            text = plain(app)
+            assert all(spec.help not in text for spec in SETTING_SPECS.values())
+            assert "…" not in text
+            assert lst(app).spec.help in footer(app)
 
     async def test_section_heading_shows_with_its_first_row_at_60x20(self, tmp_path):
         app = Host(tmp_path)
