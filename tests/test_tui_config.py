@@ -19,7 +19,7 @@ from claude_rotater.settings import SETTING_GROUPS, SETTING_SPECS, settings_path
 from claude_rotater.tui.config import (
     ConfigScreen,
     SettingsList,
-    clamp_typed,
+    check_typed,
     spec_detail,
     stepped,
 )
@@ -118,14 +118,15 @@ def test_stepped_clamps_and_cycles():
     assert stepped(strat, "best", -1) == "consume-first"
 
 
-def test_clamp_typed():
+def test_check_typed_refuses_out_of_range_with_the_range():
     thr = SETTING_SPECS["autoswitch.threshold"]
-    assert clamp_typed(thr, "85") == ("85", None)
-    raw, note = clamp_typed(thr, "150")
-    assert raw == "99.9" and "clamped" in note
-    assert clamp_typed(thr, "abc") == ("abc", None)
+    assert check_typed(thr, "85") is None
+    note = check_typed(thr, "9085")
+    assert "9085" in note and "50-99.9" in note
+    assert "50-99.9" in check_typed(thr, "10")
+    assert check_typed(thr, "abc") is not None
     ticks = SETTING_SPECS["autoswitch.unhealthyTicks"]
-    assert clamp_typed(ticks, "2.6")[0] == "3"
+    assert check_typed(ticks, "2.6") is not None  # not silently rounded
 
 
 # -- layout ---------------------------------------------------------------------
@@ -385,18 +386,51 @@ class TestExactEntry:
             await go_to(pilot, app, "autoswitch.cooldownSeconds")
             await pilot.press("enter")
             assert lst(app).editing == "300"
-            await pilot.press("backspace", "backspace", "backspace", "4", "5", "enter")
+            await pilot.press("4", "5", "enter")
             assert section(tmp_path, "autoswitch") == {"cooldownSeconds": 45.0}
 
-    async def test_out_of_range_clamps_with_note(self, tmp_path):
+    async def test_typing_over_the_shown_value_replaces_it(self, tmp_path):
+        # The reported bug: enter opened "90", typing 85 gave "9085", which
+        # was clamped to 99.9 and saved. Typing must start a fresh value.
         app = Host(tmp_path)
         async with app.run_test(size=(120, 40)) as pilot:
             await pilot.pause()
             await go_to(pilot, app, "autoswitch.threshold")
-            await pilot.press("1", "5", "0", "enter")
-            assert section(tmp_path, "autoswitch") == {"threshold": 99.9}
+            await pilot.press("enter")
+            assert lst(app).editing == "90"
+            await pilot.press("8", "5")
+            assert lst(app).editing == "85"
+            await pilot.press("enter")
+            assert lst(app).editing is None
+            assert section(tmp_path, "autoswitch") == {"threshold": 85.0}
+
+    async def test_backspace_on_the_shown_value_clears_it(self, tmp_path):
+        app = Host(tmp_path)
+        async with app.run_test(size=(120, 40)) as pilot:
             await pilot.pause()
-            assert "clamped to 99.9" in footer(app)
+            await go_to(pilot, app, "autoswitch.threshold")
+            await pilot.press("enter", "backspace")
+            assert lst(app).editing == ""
+            await pilot.press("7", "5", "backspace")
+            assert lst(app).editing == "7"
+
+    async def test_out_of_range_is_refused_with_the_range_never_clamped(self, tmp_path):
+        app = Host(tmp_path)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            await go_to(pilot, app, "autoswitch.threshold")
+            await pilot.press("9", "0", "8", "5", "enter")
+            await pilot.pause()
+            assert read_file(tmp_path) is None  # nothing saved
+            assert lst(app).editing == "9085"  # still editing, fix it in place
+            assert "50-99.9" in footer(app) and "9085" in footer(app)
+            assert app.screen.query_one("#config-detail").has_class("-error")
+            await pilot.press("down")  # moving away does not sneak it in either
+            assert read_file(tmp_path) is None
+            await pilot.press("backspace", "backspace", "backspace", "enter")
+            assert lst(app).editing == "9"
+            await pilot.press("5", "enter")
+            assert section(tmp_path, "autoswitch") == {"threshold": 95.0}
 
     async def test_garbage_keeps_editing_writes_nothing_then_esc_cancels(self, tmp_path):
         app = Host(tmp_path)

@@ -9,8 +9,10 @@ grouped under the ``SETTING_GROUPS`` headings, and the keys are:
 - ←/→ (or -/+): change the selected value in place. Numbers step by
   ``spec.step_size`` and clamp at the range ends, choices cycle, toggles flip;
 - enter, or typing a digit on a number: inline edit of an exact value. Enter
-  commits (out-of-range numbers clamp to the nearest bound), Esc cancels,
-  ↑/↓ commit and move;
+  opens the current value selected, so the first key typed replaces it (as a
+  digit does); Enter commits, Esc cancels, ↑/↓ commit and move. A value out
+  of range is refused with the range shown and the edit stays open: nothing
+  is ever clamped silently;
 - ctrl+r: back to the default (the key is removed from settings.json);
 - esc (or c / q while not editing): back to the main page.
 
@@ -112,27 +114,26 @@ def stepped(spec: SettingSpec, value, direction: int):
     return value
 
 
-def clamp_typed(spec: SettingSpec, raw: str) -> tuple[str, str | None]:
-    """(raw value to store, note) for typed text: numbers clamp into range
-    instead of erroring; anything else passes through to validation."""
-    if spec.kind not in ("float", "int"):
-        return raw, None
+def range_text(spec: SettingSpec) -> str:
+    """``50-99.9`` for a number spec."""
+    return f"{format_setting_value(spec.lo)}-{format_setting_value(spec.hi)}"
+
+
+def check_typed(spec: SettingSpec, raw: str) -> str | None:
+    """Why typed text cannot be stored, or None when it can. A number out of
+    range is refused with the range, never clamped into it."""
+    if spec.kind in ("float", "int"):
+        try:
+            number = float(raw)
+        except ValueError:
+            number = None
+        if number is not None and math.isfinite(number) and not spec.lo <= number <= spec.hi:
+            return f"{raw} is out of range: {spec.label or spec.dotted} takes {range_text(spec)}"
     try:
-        number = float(raw)
-    except ValueError:
-        return raw, None  # parse_setting_value reports it
-    if not math.isfinite(number):
-        return raw, None
-    if spec.kind == "int":
-        number = float(round(number))
-    clamped = min(max(number, spec.lo), spec.hi)
-    note = None
-    if clamped != number:
-        note = (
-            f"{spec.dotted}: clamped to {_num_text(spec, clamped)} "
-            f"(range {format_setting_value(spec.lo)}-{format_setting_value(spec.hi)})"
-        )
-    return _num_text(spec, clamped), note
+        parse_setting_value(spec, raw)
+    except ConfigError as e:
+        return str(e)
+    return None
 
 
 class SettingsList(Widget, can_focus=True):
@@ -177,6 +178,9 @@ class SettingsList(Widget, can_focus=True):
         ]
         self.cursor = 0
         self.editing: str | None = None  # inline edit buffer; None = not editing
+        # The buffer is the old value, shown selected: the next key typed
+        # replaces it instead of appending (so "85" over "90" is 85, not 9085).
+        self.selected_all = False
         self.error: str | None = None  # rejection or clamp note for the footer
         self.values: dict[str, tuple[object, bool]] = {}
         self.reload()
@@ -245,7 +249,10 @@ class SettingsList(Widget, can_focus=True):
         value, _is_set = self.values[spec.dotted]
         cell = Text(no_wrap=True)
         if selected and self.editing is not None:
-            cell.append(self.editing, style=f"bold {palette.foreground}")
+            if self.selected_all and self.editing:
+                cell.append(self.editing, style=f"bold {palette.background} on {palette.accent}")
+            else:
+                cell.append(self.editing, style=f"bold {palette.foreground}")
             cell.append("▏", style=palette.accent)
             return cell
         if spec.kind == "bool":
@@ -353,11 +360,13 @@ class SettingsList(Widget, can_focus=True):
             return
         value = self.value_of(spec.dotted)
         self.editing = "" if value is None else format_setting_value(value)
+        self.selected_all = bool(self.editing)
         self.error = None
         self._changed_view()
 
     def action_reset(self) -> None:
         self.editing = None
+        self.selected_all = False
         spec = self.spec
         try:
             removed = unset_setting(self.backup_dir, spec.dotted)
@@ -375,6 +384,7 @@ class SettingsList(Widget, can_focus=True):
         if self.editing is None:
             return False
         self.editing = None
+        self.selected_all = False
         self.error = None
         self._changed_view()
         return True
@@ -386,17 +396,13 @@ class SettingsList(Widget, can_focus=True):
         if raw == "":
             self.action_reset()
             return True
-        raw, note = clamp_typed(spec, raw)
-        try:
-            parse_setting_value(spec, raw)
-        except ConfigError as e:
-            self._fail(str(e))
+        problem = check_typed(spec, raw)
+        if problem is not None:
+            self._fail(problem)
             return False
         self.editing = None
+        self.selected_all = False
         self._write(spec, raw)
-        if note is not None and self.error is None:
-            self.error = note
-            self._changed_view()
         return True
 
     def _write(self, spec: SettingSpec, raw: str) -> None:
@@ -429,11 +435,12 @@ class SettingsList(Widget, can_focus=True):
         char = event.character
         if self.editing is not None:
             if event.key == "backspace":
-                self.editing = self.editing[:-1]
+                self.editing = "" if self.selected_all else self.editing[:-1]
             elif char is not None and char.isprintable() and len(char) == 1:
-                self.editing += char
+                self.editing = char if self.selected_all else self.editing + char
             else:
                 return  # enter / escape / arrows: handled by bindings
+            self.selected_all = False
             event.stop()
             event.prevent_default()
             self.refresh()
@@ -443,6 +450,7 @@ class SettingsList(Widget, can_focus=True):
             event.stop()
             event.prevent_default()
             self.editing = char
+            self.selected_all = False
             self.error = None
             self._changed_view()
 
