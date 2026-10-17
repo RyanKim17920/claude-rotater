@@ -773,23 +773,27 @@ class TestAccountRowText:
         assert "5h  62%" in row and "7d  31%" in row
         assert has_bar(row)  # each window carries its bar
 
-    def test_bar_hatches_out_to_the_projection(self):
-        from claude_rotater.tui.main import PROJECTION_HATCH
+    def test_bar_tints_out_to_the_projection(self):
+        from claude_rotater.tui.main import PROJECTION_TINT
+        from claude_rotater.tui.theme import blend
 
+        tint = blend(SEV_OK, Palette.DARK.track, PROJECTION_TINT)
         est, now = window_est(rate=5.0, conf="high")  # 60% → ~67% at the 2h reset
         text = self._text(make_account(1, entry=make_entry(60.0, 10.0)), est, now=now, width=160)
-        assert PROJECTION_HATCH in text.plain
-        assert has_color(text, PROJECTION_HATCH, SEV_OK)  # lands well under 90%: green
+        five = text.plain.index("5h")
+        seven = text.plain.index("7d")
+        tinted = [c for c in range(len(text.plain)) if any(tint in st for st in cell_styles(text, c))]
+        assert tinted and all(five < c < seven for c in tinted)  # lands well under 90%: green tint
         # the 7d window has no estimate: a solid fill only
-        seven = text.plain[text.plain.index("7d"):]
-        assert PROJECTION_HATCH not in seven
 
-    def test_thin_estimate_draws_no_hatch(self):
-        from claude_rotater.tui.main import PROJECTION_HATCH
+    def test_thin_estimate_draws_no_tint(self):
+        from claude_rotater.tui.main import PROJECTION_TINT
+        from claude_rotater.tui.theme import blend
 
         est, now = window_est(conf="low")
         text = self._text(make_account(1, entry=make_entry(60.0, 10.0)), est, now=now, width=160)
-        assert PROJECTION_HATCH not in text.plain
+        tint = blend(SEV_OK, Palette.DARK.track, PROJECTION_TINT)
+        assert not any(tint in str(sp.style) for sp in text.spans)
 
     def test_inactive_has_no_marker(self):
         row = self._row(make_account(2, entry=make_entry(12.0, 44.0), email="work@y.com"))
@@ -957,30 +961,55 @@ class TestAccountRowText:
         assert rows[0].index("7d") == rows[1].index("7d")
 
 
+def cell_styles(text, col: int) -> list[str]:
+    """Styles of the spans covering one cell."""
+    return [str(sp.style) for sp in text.spans if sp.start <= col < sp.end]
+
+
 class TestProjectionBar:
-    def _bar(self, pct, projected, width=10, threshold=90.0):
+    def _bar(self, pct, projected, width=10, threshold=90.0, palette=Palette.DARK):
         from claude_rotater.tui.main import projection_bar
 
-        return projection_bar(pct, projected, width, threshold=threshold, palette=Palette.DARK)
+        return projection_bar(pct, projected, width, threshold=threshold, palette=palette)
 
-    def test_measured_fill_then_hatch_then_tick(self):
+    @staticmethod
+    def _tint(color, palette=Palette.DARK):
+        from claude_rotater.tui.main import PROJECTION_TINT
+        from claude_rotater.tui.theme import blend
+
+        return blend(color, palette.track, PROJECTION_TINT)
+
+    def test_measured_fill_then_tint_then_tick(self):
         bar = self._bar(30.0, 60.0)
-        assert bar.plain == "███│░░  ▕ "  # the divider marks now, the tick the threshold
-        assert has_color(bar, "███", SEV_OK) and has_color(bar, "░░", SEV_OK)  # 60% lands well under
-        assert not any(SEV_WARN in st for st in styles_of(bar, "│"))
-        assert not any("dim" in st for sp in bar.spans for st in [str(sp.style)])
+        assert bar.plain == "██████  ▕ "  # solid blocks: no hatch to squint at
+        assert all(any(SEV_OK + " " in st for st in cell_styles(bar, c)) for c in range(3))
+        tint = self._tint(SEV_OK)  # 60% lands well under: a green tint
+        assert all(any(tint in st for st in cell_styles(bar, c)) for c in (3, 4, 5))
+        assert tint != SEV_OK
+        assert not any("dim" in str(sp.style) for sp in bar.spans)
 
     @pytest.mark.parametrize("projected, color", [(70.0, SEV_OK), (85.0, SEV_WARN), (100.0, SEV_CRIT)])
-    def test_hatch_is_green_yellow_red_by_outcome(self, projected, color):
+    def test_tint_is_green_yellow_red_by_outcome(self, projected, color):
         bar = self._bar(30.0, projected)
-        assert has_color(bar, "░", color)
+        assert any(self._tint(color) in st for st in cell_styles(bar, 4))
+
+    def test_light_theme_tint_reads_on_its_track(self):
+        from claude_rotater.tui.theme import ROTA_LIGHT
+
+        light = Palette.from_theme(ROTA_LIGHT)
+        bar = self._bar(30.0, 60.0, palette=light)
+        tint = self._tint(light.sev_ok, light)
+        assert tint not in (light.sev_ok, light.track)
+        assert any(tint in st for st in cell_styles(bar, 4))
 
     def test_no_projection_is_measured_only(self):
         assert self._bar(30.0, None).plain == "███     ▕ "
-        assert self._bar(30.0, 20.0).plain == "███     ▕ "  # never hatches backwards
+        assert self._bar(30.0, 20.0).plain == "███     ▕ "  # never projects backwards
 
-    def test_divider_follows_a_partial_cell(self):
-        assert self._bar(35.0, 70.0).plain.startswith("███▌│░░")
+    def test_tint_follows_a_partial_cell(self):
+        bar = self._bar(35.0, 70.0)
+        assert bar.plain.startswith("███▌███")
+        assert any(self._tint(SEV_OK) in st for st in cell_styles(bar, 4))
 
     def test_partial_cell_is_an_eighth_block(self):
         assert self._bar(35.0, None).plain.startswith("███▌")

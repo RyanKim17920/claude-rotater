@@ -9,11 +9,11 @@ Windows.
 ## Features
 
 - Live TUI: one line per account with its 5h, 7d and per-model (e.g. Fable)
-  usage, a bar that hatches (`░`) out to where the window is projected to
-  be at its reset, a countdown to each reset and one forecast (`ok`, `~7d
+  usage, a bar whose lighter tint runs out to where the window is projected
+  to be at its reset, a countdown to each reset and one forecast (`ok`, `~7d
   limit in 15h`); the highlighted account's 5h/7d charts below, and long-term history
-  behind `h`. Estimates are marked by `~`, a `░` hatch or a dotted line and
-  coloured by outcome: green under the threshold, yellow close, red over.
+  behind `h`. Estimates are marked by `~`, a lighter tint or a dotted line
+  and coloured by outcome: green under the threshold, yellow close, red over.
 - Automatic switching while the TUI is open, or headless with `rota auto`.
   Switches take Claude Code's own credential locks, so they never collide
   with a token refresh.

@@ -9,7 +9,7 @@ Layout, top to bottom, as tall as the terminal allows:
   on duty, the account, a
   short tag only when it matters (a dead or lapsing login, "off", a real
   org), then per window (5h, 7d, each per-model window in use) its pct, a
-  short bar (measured fill, then a ``░`` hatch out to the projection at
+  short bar (measured fill, then a lighter tint out to the projection at
   the reset, coloured by its outcome) and a countdown to its
   reset, then one forecast cell for the binding window
   (``ok``, ``~7d limit in 15h``; blank while there is too little history).
@@ -27,8 +27,8 @@ Layout, top to bottom, as tall as the terminal allows:
 - the action bar: the everyday keys and ``?`` for the rest.
 
 One convention for estimates everywhere: measured values are plain, anything
-extrapolated is told apart by its glyph (``~`` prefix, ``░`` hatch, dotted
-line) and coloured by its outcome (green under, yellow close, red over the
+extrapolated is told apart by its look (``~`` prefix, a lighter tint in a
+bar, a dotted line) and coloured by its outcome (green under, yellow close, red over the
 threshold), and is said in words where it is shown ("est. ~86% at reset").
 An estimate too thin to trust shows nothing rather than a precise-looking
 number.
@@ -76,7 +76,7 @@ from claude_rotater.tui.plot import (
     windows_per_bar,
 )
 from claude_rotater.tui.modals import KeysModal
-from claude_rotater.tui.theme import Palette, brand_chip
+from claude_rotater.tui.theme import Palette, blend, brand_chip
 from claude_rotater.tui.widgets import BAR_EIGHTHS, BAR_FULL, BAR_TICK
 from claude_rotater.usage_history import Point
 from claude_rotater.usage_store import STALE_OK_S
@@ -117,7 +117,7 @@ def event_text(event: AutoSwitchEvent, *, palette: Palette = Palette.DARK) -> Te
 # ---------------------------------------------------------------------------
 
 # Anything the estimator extrapolated (a projection, an ETA) is told apart by
-# its glyph, never by greying: the "~" prefix on text, the ░ hatch in a bar,
+# its look, never by greying: the "~" prefix on text, a tint in a bar,
 # the dotted line in a chart. Its colour says the outcome (outcome_color):
 # green stays comfortably under the threshold, yellow gets close, red
 # crosses it before the reset. Each chart title says "est." in words.
@@ -557,8 +557,9 @@ def window_cell(
     return cell
 
 
-PROJECTION_HATCH = "░"
-PROJECTION_DIVIDER = "│"  # "now": the measured fill ends, the hatch begins
+# The projected part of a bar: a solid block in a tint of its outcome colour
+# (half way to the track), readable at 8-10 cells where a ░ hatch was a blur.
+PROJECTION_TINT = 0.5
 
 
 def projection_bar(
@@ -569,10 +570,10 @@ def projection_bar(
     threshold: float | None,
     palette: Palette,
 ) -> Text:
-    """``███▌│░░▕``: the measured pct as a solid fill, a divider where the
-    measurement ends, then a hatch out to ``projected`` (the estimate at the
-    reset), green / yellow / red by where it lands (:func:`outcome_color`);
-    the threshold tick (``▕``, warning colour) where nothing covers it."""
+    """``███▌██▕``: the measured pct as a solid fill, then a lighter tint out
+    to ``projected`` (the estimate at the reset), green / yellow / red by
+    where it lands (:func:`outcome_color`); the threshold tick (``▕``,
+    warning colour) where nothing covers it."""
     text = Text(no_wrap=True)
     if width <= 0:
         return text
@@ -586,17 +587,15 @@ def projection_bar(
     tick_at = None
     if threshold is not None:
         tick_at = min(width - 1, max(0, round(threshold / 100.0 * width) - 1))
-    hatch = f"{outcome_color(projected, threshold, palette)} {track}"
+    tint = blend(outcome_color(projected, threshold, palette), palette.track, PROJECTION_TINT)
     fill = f"{palette.severity(pct)} {track}"
     for i in range(width):
         if i < full:
             text.append(BAR_FULL, style=fill)
         elif i == full and part:
             text.append(BAR_EIGHTHS[part], style=fill)
-        elif i == measured_end and proj_end - measured_end >= 2:  # one cell stays hatch
-            text.append(PROJECTION_DIVIDER, style=f"{palette.foreground} {track}")
         elif i < proj_end:
-            text.append(PROJECTION_HATCH, style=hatch)
+            text.append(BAR_FULL, style=f"{tint} {track}")
         elif i == tick_at:
             text.append(BAR_TICK, style=f"{palette.sev_warn} {track}")
         else:

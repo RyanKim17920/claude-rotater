@@ -119,3 +119,13 @@ def test_brand_chip_style_does_not_leak_into_appended_text():
     text.append(" settings")
     assert text.plain == " rota  settings"
     assert str(text.style) == ""  # the chip style lives on its span only
+
+
+def test_bar_track_reads_against_the_page_in_both_themes():
+    assert _contrast(theme.TRACK, theme.BACKGROUND) >= 1.4
+    assert _contrast(theme.TRACK_LIGHT, theme.BACKGROUND_LIGHT) >= 1.55
+
+
+def test_blend_matches_the_test_reference():
+    assert theme.blend("#ffffff", "#000000", 0.5) == _blend("#ffffff", "#000000", 0.5) == "#808080"
+    assert theme.blend(theme.SEV_OK, theme.TRACK, 0.0) == theme.TRACK

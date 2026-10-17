@@ -28,7 +28,7 @@ PANEL = "#232c38"  # most elevated: chips, modals
 
 # Usage severity ramp.
 SEV_OK = "#6fc4aa"  # sea glass: plenty of headroom
-SEV_WARN = "#e3b866"  # saffron: climbing (>= 70%)
+SEV_WARN = "#f2b443"  # saffron: climbing (>= 70%); saturated, never beige
 SEV_CRIT = "#f08c82"  # rose: near the limit (>= 90%)
 TRACK = "#2a3442"  # unfilled meter track
 # The row under the cursor: the accent blended over the page at this
@@ -122,7 +122,7 @@ PANEL_LIGHT = "#d9e0e9"  # most elevated = darkest (inverted from dark)
 SEV_OK_LIGHT = "#17705a"  # deep sea green
 SEV_WARN_LIGHT = "#7d5600"  # dark saffron
 SEV_CRIT_LIGHT = "#ad3229"  # brick rose
-TRACK_LIGHT = "#cfd7e2"
+TRACK_LIGHT = "#bcc6d3"  # deep enough to read as a bar on the near-white page
 
 ROTA_LIGHT = Theme(
     name="rota-light",
@@ -145,6 +145,13 @@ Palette.DARK = Palette(
     sev_ok=SEV_OK, sev_warn=SEV_WARN, sev_crit=SEV_CRIT, track=TRACK,
     background=BACKGROUND,
 )
+
+
+def blend(top: str, bottom: str, alpha: float) -> str:
+    """``top`` at ``alpha`` over ``bottom`` (both ``#rrggbb``): a tint."""
+    a = [int(top[i : i + 2], 16) for i in (1, 3, 5)]
+    b = [int(bottom[i : i + 2], 16) for i in (1, 3, 5)]
+    return "#" + "".join(f"{round(y + (x - y) * alpha):02x}" for x, y in zip(a, b))
 
 
 def brand_chip(palette: Palette) -> Text:
