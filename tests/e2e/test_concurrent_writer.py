@@ -25,6 +25,12 @@ ALICE, BOB, _ = ACCOUNTS
 WRITER = HERE / "writer.py"
 
 
+# Longer than anything the writer can block on by itself (a ``security`` call
+# is cut at 10s, a lock wait ends at the stop file), so a stuck writer is
+# reported by the writer, and a wait here running out is a real stall.
+WRITER_WAIT_S = 60.0
+
+
 class ClaudeWriter:
     """``writer.py`` running against one profile's item, for a ``with`` block."""
 
@@ -32,32 +38,45 @@ class ClaudeWriter:
         self.box = box
         self.config_dir = config_dir
         self.log = box.root / "writer.log"
+        self.err = box.root / "writer.err"
         self.stop_file = box.root / "writer.stop"
         self.proc: subprocess.Popen | None = None
 
     def __enter__(self) -> "ClaudeWriter":
         secure_dir = self.config_dir or str(self.box.home / ".claude")
-        self.proc = subprocess.Popen(
-            [sys.executable, str(WRITER), "--dir", secure_dir,
-             "--service", claude_service(self.config_dir),
-             "--log", str(self.log), "--stop", str(self.stop_file)],
-            env=self.box.env(config_dir=self.config_dir), cwd=str(self.box.home),
-            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
-            text=True,
-        )
+        # stderr to a file, not a pipe: readable while the writer runs, for
+        # the diagnostics below, and never a full pipe stalling the writer.
+        with open(self.err, "wb") as err:
+            self.proc = subprocess.Popen(
+                [sys.executable, str(WRITER), "--dir", secure_dir,
+                 "--service", claude_service(self.config_dir),
+                 "--log", str(self.log), "--stop", str(self.stop_file)],
+                env=self.box.env(config_dir=self.config_dir), cwd=str(self.box.home),
+                stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=err,
+            )
         return self
 
     def __exit__(self, *exc) -> None:
         self.stop_file.touch()
         assert self.proc is not None
         try:
-            _, err = self.proc.communicate(timeout=30)
+            self.proc.wait(timeout=WRITER_WAIT_S)
         except subprocess.TimeoutExpired:
             self.proc.kill()  # our own child
-            self.proc.communicate()
-            raise
+            self.proc.wait()
+            raise AssertionError(
+                f"writer still running {WRITER_WAIT_S}s after the stop file\n"
+                + self.diagnostics()) from None
         if exc[0] is None:
-            assert self.proc.returncode == 0, f"writer failed: {err}"
+            assert self.proc.returncode == 0, f"writer failed\n{self.diagnostics()}"
+
+    def diagnostics(self, lines: int = 25) -> str:
+        """The writer's exit code, stderr and log tail, for a failure message."""
+        rc = self.proc.poll() if self.proc is not None else None
+        err = self.err.read_text(errors="replace") if self.err.exists() else ""
+        log = self.log.read_text().splitlines()[-lines:] if self.log.exists() else []
+        return (f"\n--- writer rc={rc}\n--- writer stderr\n{err}"
+                f"\n--- writer log (last {len(log)})\n" + "\n".join(log))
 
     def events(self) -> list[dict]:
         if not self.log.exists():
@@ -67,13 +86,15 @@ class ClaudeWriter:
     def writes(self) -> list[dict]:
         return [e for e in self.events() if e["event"] == "write"]
 
-    def wait_for_writes(self, n: int, timeout: float = 30) -> None:
+    def wait_for_writes(self, n: int, timeout: float = WRITER_WAIT_S) -> None:
         """Until the writer has completed ``n`` more rounds than now."""
         target = len(self.writes()) + n
         deadline = time.monotonic() + timeout
         while len(self.writes()) < target:
-            assert self.proc is not None and self.proc.poll() is None, "writer exited"
-            assert time.monotonic() < deadline, "writer made no progress"
+            assert self.proc is not None and self.proc.poll() is None, (
+                f"writer exited{self.diagnostics()}")
+            assert time.monotonic() < deadline, (
+                f"writer made no progress in {timeout}s{self.diagnostics()}")
             time.sleep(0.05)
 
 
@@ -96,6 +117,8 @@ def assert_coherent(box: Sandbox, config_dir: str | None, writer: ClaudeWriter, 
     writer's last round on it, as claude reads it."""
     lost = [e for e in writer.events() if e["event"] == "lost"]
     assert not lost, f"rota overwrote the writer's rounds: {lost}"
+    taken = [e for e in writer.events() if e["event"] in ("lock-lost", "takeover")]
+    assert not taken, f"the lock changed hands while held: {taken}"
     writes = writer.writes()
     assert writes, "the writer never wrote"
     item = live_item(box, config_dir)
@@ -126,7 +149,7 @@ def test_switching_while_claude_rewrites_its_login(sandbox: Sandbox, profile):
         writer.wait_for_writes(2)
         for target in targets:
             result = sandbox.rota("switch", target, config_dir=config_dir)
-            assert result.returncode == 0, explain(result)
+            assert result.returncode == 0, explain(result) + writer.diagnostics()
         writer.wait_for_writes(2)  # rounds on the final login too
 
     assert_coherent(sandbox, config_dir, writer, BOB)
@@ -143,10 +166,12 @@ def test_switching_while_claude_rewrites_its_login(sandbox: Sandbox, profile):
     assert sandbox.live_token(config_dir) == latest["bob"]
 
 
-def _auto_once(box: Sandbox, config_dir: str | None) -> tuple[int, list[dict]]:
+def _auto_once(box: Sandbox, config_dir: str | None,
+               writer: ClaudeWriter) -> tuple[int, list[dict]]:
     result = box.rota("auto", "--once", "--json", "--strategy", "best",
                       config_dir=config_dir)
-    assert result.returncode in (0, 2), explain(result)  # switched / no action
+    # switched / no action
+    assert result.returncode in (0, 2), explain(result) + writer.diagnostics()
     events = [json.loads(line) for line in result.stdout.splitlines()
               if line.startswith("{")]
     return result.returncode, events
@@ -166,18 +191,19 @@ def test_auto_repair_while_claude_rewrites_its_login(sandbox: Sandbox, profile):
     # sees whose token is live) instead of serving the seeding's cache.
     (sandbox.home / ".rota" / "cache" / "usage.json").unlink()
 
-    codes, switches = [], []
+    codes, switches, ticks = [], [], []
     with ClaudeWriter(sandbox, config_dir) as writer:
         writer.wait_for_writes(2)
         for _ in range(4):
-            code, events = _auto_once(sandbox, config_dir)
+            code, events = _auto_once(sandbox, config_dir, writer)
             codes.append(code)
+            ticks.append(events)
             switches += [e for e in events if e["event"] == "switch"]
         writer.wait_for_writes(2)
 
     # One repair, then quiet: no flapping, and never a failover to bob.
-    assert [s["trigger"] for s in switches] == ["repair"], switches
-    assert codes == [0, 2, 2, 2], (codes, switches)
+    assert [s["trigger"] for s in switches] == ["repair"], ticks
+    assert codes == [0, 2, 2, 2], (codes, ticks)
     assert switches[0]["to"]["email"] == ALICE.email
     assert_coherent(sandbox, config_dir, writer, ALICE)
     assert live_item(sandbox, config_dir)["claudeAiOauth"]["accessToken"] == (

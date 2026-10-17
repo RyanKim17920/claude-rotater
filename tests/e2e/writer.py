@@ -15,8 +15,17 @@ anything else means another writer replaced the item with a copy read
 before our last write, which is a lost write.
 
 One JSON line per round goes to ``--log``; the loop ends when ``--stop``
-exists. Run with the sandbox environment, so ``security`` sees only the
-sandbox keychain.
+exists, checked while waiting for the lock too. Run with the sandbox
+environment, so ``security`` sees only the sandbox keychain.
+
+The lock is held the way proper-lockfile holds it: its mtime is touched every
+``stale / 2`` so a slow round is never taken over as stale, and it is removed
+on release only while it is still the directory this process made (a lock
+taken from us is logged as ``lock-lost``, never removed from its new holder).
+Between rounds the writer leaves the lock free for longer than a waiter's
+longest poll (rota sleeps up to 0.5s between tries), so every waiter gets in
+within a round: without that gap a waiter can lose every race for the lock
+and time out, which is the writer starving rota, not a lost write.
 """
 
 from __future__ import annotations
@@ -28,43 +37,103 @@ import os
 import re
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 
 SECURITY = "/usr/bin/security"
 STALE_S = 15.0  # claude's ``stale: 15000``
+TOUCH_S = STALE_S / 2  # proper-lockfile's default ``update``
+# Well inside the test's own waits (60s), so a wedged ``security`` ends the
+# writer with its own error on stderr instead of hanging the harness.
+SECURITY_TIMEOUT_S = 10.0
+POLL_S = 0.02
 MARK = "rota-e2e-writer"
 SUFFIX = re.compile(r"-w\d+$")
 
 
-def _lock(lock_dir: Path) -> None:
-    while True:
+def _acquire(lock_dir: Path, stop: Path, log) -> int | None:
+    """Take the lock; its inode, or None once ``stop`` exists."""
+    while not stop.exists():
         try:
             os.mkdir(lock_dir)
-            return
+            return os.stat(lock_dir).st_ino
         except FileExistsError:
             pass
         try:
-            if time.time() - lock_dir.stat().st_mtime > STALE_S:
-                os.rmdir(lock_dir)  # a dead holder, per the protocol
-                continue
+            age = time.time() - lock_dir.stat().st_mtime
         except FileNotFoundError:
             continue
-        time.sleep(0.02)
+        if age > STALE_S:  # a dead holder, per the protocol
+            log.write(json.dumps({"event": "takeover", "age": round(age, 3)}) + "\n")
+            try:
+                os.rmdir(lock_dir)
+            except FileNotFoundError:
+                pass
+            continue
+        time.sleep(POLL_S)
+    return None
+
+
+def _ours(lock_dir: Path, ino: int) -> bool:
+    try:
+        return os.stat(lock_dir).st_ino == ino
+    except FileNotFoundError:
+        return False
+
+
+class _Held:
+    """The lock while held: touched every ``TOUCH_S``, released only if ours."""
+
+    def __init__(self, lock_dir: Path, ino: int, log) -> None:
+        self.lock_dir, self.ino, self.log = lock_dir, ino, log
+        self.done = threading.Event()
+        self.toucher = threading.Thread(target=self._touch, daemon=True)
+
+    def _touch(self) -> None:
+        while not self.done.wait(TOUCH_S):
+            if not _ours(self.lock_dir, self.ino):
+                return
+            try:
+                os.utime(self.lock_dir)
+            except FileNotFoundError:
+                return
+
+    def __enter__(self) -> "_Held":
+        self.toucher.start()
+        return self
+
+    def __exit__(self, *exc) -> None:
+        self.done.set()
+        self.toucher.join()
+        if _ours(self.lock_dir, self.ino):
+            os.rmdir(self.lock_dir)
+        else:
+            self.log.write(json.dumps({"event": "lock-lost"}) + "\n")
+
+
+def _security(*args: str) -> subprocess.CompletedProcess:
+    try:
+        return subprocess.run([SECURITY, *args], capture_output=True, text=True,
+                              timeout=SECURITY_TIMEOUT_S)
+    except subprocess.TimeoutExpired:
+        raise RuntimeError(f"security {args[0]} timed out after {SECURITY_TIMEOUT_S}s") from None
 
 
 def _read(service: str, user: str) -> str | None:
-    r = subprocess.run([SECURITY, "find-generic-password", "-a", user, "-s", service, "-w"],
-                       capture_output=True, text=True, timeout=30)
+    r = _security("find-generic-password", "-a", user, "-s", service, "-w")
     if r.returncode == 44:
         return None
-    r.check_returncode()
+    if r.returncode != 0:
+        raise RuntimeError(f"security find-generic-password rc={r.returncode}: {r.stderr}")
     return r.stdout.removesuffix("\n")
 
 
 def _write(service: str, user: str, value: str) -> None:
-    subprocess.run([SECURITY, "add-generic-password", "-U", "-a", user, "-s", service,
-                    "-X", value.encode().hex()], capture_output=True, timeout=30, check=True)
+    r = _security("add-generic-password", "-U", "-a", user, "-s", service,
+                  "-X", value.encode().hex())
+    if r.returncode != 0:
+        raise RuntimeError(f"security add-generic-password rc={r.returncode}: {r.stderr}")
 
 
 def main(argv: list[str]) -> int:
@@ -74,7 +143,8 @@ def main(argv: list[str]) -> int:
     p.add_argument("--log", required=True)
     p.add_argument("--stop", required=True)
     p.add_argument("--hold", type=float, default=0.15, help="seconds inside the lock")
-    p.add_argument("--gap", type=float, default=0.05, help="seconds between rounds")
+    p.add_argument("--gap", type=float, default=0.75,
+                   help="seconds between rounds, lock free; above any waiter's poll")
     args = p.parse_args(argv)
     user = getpass.getuser()
     lock_dir = Path(args.dir) / ".storage-write.lock"
@@ -82,17 +152,19 @@ def main(argv: list[str]) -> int:
     stop = Path(args.stop)
     last: int | None = None  # None until the first round adopts what is there
     with open(args.log, "a", buffering=1) as log:
-        while not stop.exists():
-            _lock(lock_dir)
-            try:
+        while True:
+            ino = _acquire(lock_dir, stop, log)
+            if ino is None:
+                break
+            with _Held(lock_dir, ino, log):
                 raw = _read(args.service, user)
                 if raw is not None:
                     last = _round(raw, last, args, user, log)
                 else:
                     log.write(json.dumps({"event": "absent"}) + "\n")
-            finally:
-                os.rmdir(lock_dir)
-            time.sleep(args.gap)
+            deadline = time.monotonic() + args.gap
+            while time.monotonic() < deadline and not stop.exists():
+                time.sleep(POLL_S)
     return 0
 
 
