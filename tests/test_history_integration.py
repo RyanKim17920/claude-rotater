@@ -95,6 +95,22 @@ class TestPlanFollowsEstimate:
         assert intervals[-1] < poll_policy.SPARE_INTERVAL_S
         assert all(b <= a for a, b in zip(intervals[1:], intervals[2:]))
 
+    def test_a_switch_drops_the_burn_of_the_previous_duty(self, h):
+        """Account 1 burned while on duty; once a switch is stamped its
+        pre-switch slope no longer drives its polls (it is idle now)."""
+        exact = 40.0
+        for _ in range(5):
+            collect(h, {"1": _usage(int(exact))}, fetch={"1"})
+            interval = plan_of(h, "1", ID1)[1]
+            advance_to_plan(h, "1", ID1)
+            exact += 0.03 * interval  # 108%/h
+        assert interval < poll_policy.SPARE_INTERVAL_S
+        (h.switcher.backup_dir / "autoswitch_state.json").write_text(
+            json.dumps({"lastSwitchAt": h.clock.now - 1})
+        )
+        collect(h, {"1": _usage(int(exact))}, fetch={"1"})
+        assert plan_of(h, "1", ID1)[1] == poll_policy.SPARE_INTERVAL_S
+
     def test_flat_usage_stays_at_baseline(self, h):
         for _ in range(4):
             collect(h, {"1": _usage(40)}, fetch={"1"})

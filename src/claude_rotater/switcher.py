@@ -4714,7 +4714,12 @@ class ClaudeAccountSwitcher:
             if rec.sentinel is None and rec.error is None
         ]
         series: dict[str, dict] = {}
+        last_switch_at: float | None = None
         if identities and successes:
+            from claude_rotater.feed_ingest import read_last_switch_at
+
+            # The burn before the last switch was the previous duty's.
+            last_switch_at = read_last_switch_at(self.backup_dir)
             try:
                 series = self.usage_history.series(
                     {num: identities[num] for num in successes if num in identities}
@@ -4732,7 +4737,7 @@ class ClaudeAccountSwitcher:
                 try:
                     estimate = estimate_account(
                         series.get(num, {}), models=models,
-                        threshold=threshold, now=now,
+                        threshold=threshold, now=now, since=last_switch_at,
                     )
                     attempts = self.usage_history.attempts(
                         num, identities[num], now - poll_policy.TRAILING_HOUR_S
