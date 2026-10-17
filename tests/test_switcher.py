@@ -2534,6 +2534,40 @@ class TestActiveAccountRefresh:
         assert result.sentinel == USAGE_TOKEN_EXPIRED
         mock_fetch.assert_not_called()
 
+    def test_a_transient_live_write_failure_still_lands_in_both_stores(
+        self, temp_home: Path, mock_claude_config: Path, sample_sequence_data: dict,
+        monkeypatch,
+    ):
+        """Both or neither: after the grant is consumed, one locked Keychain
+        moment must not leave the live store on the consumed predecessor (a
+        claude started from it dies with invalid_grant). The write is retried
+        and both stores end on the successor."""
+        monkeypatch.setattr("claude_rotater.switcher.PERSIST_RETRY_S", 0.0)
+        switcher = self._switcher(sample_sequence_data)
+        live_writes = []
+
+        def flaky_live(creds):
+            live_writes.append(creds)
+            if len(live_writes) == 1:
+                raise OSError("keychain locked")
+
+        with patch.object(switcher, "_read_credentials", return_value=self._EXPIRED), \
+             patch.object(
+                 switcher, "_read_account_credentials", return_value=self._EXPIRED
+             ), \
+             patch.object(switcher, "_write_credentials", side_effect=flaky_live), \
+             patch.object(switcher, "_write_account_credentials") as write_backup, \
+             patch("claude_rotater.oauth.try_refresh_oauth_credentials",
+                   side_effect=self._refresh_ok) as post, \
+             patch("claude_rotater.oauth.try_fetch_usage_for_account",
+                   return_value=oauth.UsageOutcome({"five_hour": {"pct": 4}})):
+            result = switcher._fetch_active_usage("1", "test@example.com", self._EXPIRED)
+
+        assert post.call_count == 1
+        assert live_writes == [self._REFRESHED, self._REFRESHED]
+        write_backup.assert_called_once_with("1", "test@example.com", self._REFRESHED)
+        assert result.usage == {"five_hour": {"pct": 4}}
+
     def test_non_expired_fetches_without_refreshing(
         self, temp_home: Path, mock_claude_config: Path, sample_sequence_data: dict
     ):

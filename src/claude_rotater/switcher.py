@@ -274,6 +274,26 @@ def _same_directory(left: Path, right: Path) -> bool:
         return left == right
 
 
+
+# A credential write after a consumed refresh grant is retried this many
+# times (a transiently locked Keychain is the usual failure) before one store
+# is left on the consumed predecessor.
+PERSIST_ATTEMPTS = 3
+PERSIST_RETRY_S = 0.2
+
+
+def _with_write_retries(write: Callable[[], None]) -> None:
+    """Run ``write``, retrying up to ``PERSIST_ATTEMPTS`` times; re-raise the
+    last failure."""
+    for attempt in range(PERSIST_ATTEMPTS):
+        try:
+            write()
+            return
+        except Exception:
+            if attempt == PERSIST_ATTEMPTS - 1:
+                raise
+            time.sleep(PERSIST_RETRY_S)
+
 class ClaudeAccountSwitcher:
     """Multi-account switcher for Claude Code."""
 
@@ -3895,11 +3915,20 @@ class ClaudeAccountSwitcher:
                     # least one of them. Attempt both; tolerate either
                     # failing alone. (For a restore, the backup already holds
                     # it; only the live store needs the write.)
+                    # Both or neither: a consumed grant cannot be un-POSTed,
+                    # so "neither" is impossible once it ran and every write
+                    # is retried before one store is left on the consumed
+                    # predecessor (a claude started from that store dies with
+                    # invalid_grant). A store still failing after the retries
+                    # is completed by the next pass: a backup that holds the
+                    # successor is restored into the live store (no POST).
                     backup_ok = live_ok = True
                     if restore_source is None:
                         try:
-                            self._write_account_credentials(
-                                account_num, email, working
+                            _with_write_retries(
+                                lambda: self._write_account_credentials(
+                                    account_num, email, working
+                                )
                             )
                         except Exception:
                             backup_ok = False
@@ -3914,11 +3943,14 @@ class ClaudeAccountSwitcher:
                         # _clear_managed_key) — the config lock covers just
                         # this write. A timeout here is a live-write failure
                         # (the grant is already consumed), not a defer.
-                        with claude_config_lock():
-                            self._write_credentials(working)  # active store — CC reads this
+                        def _write_live() -> None:
+                            with claude_config_lock():
+                                self._write_credentials(working)  # active store — CC reads this
+
+                        _with_write_retries(_write_live)
                     except Exception:
                         live_ok = False
-                        self._logger.warning(
+                        self._logger.error(
                             "Active-store write failed after a %s for "
                             "account %s%s.",
                             "backup restore" if restore_source is not None
