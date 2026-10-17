@@ -103,6 +103,12 @@ class AccountsSettings:
     managed and listed."""
 
     oauth_only: bool = False
+    # Off by default: a proactive refresh rotates the stored refresh token,
+    # and a running ``claude`` in any profile may still hold that same
+    # token (a shared account, or a login copied by an older switch). It
+    # then dies with invalid_grant on its next refresh. Only for a user who
+    # knows no other process can hold an idle account's login.
+    proactive_token_refresh: bool = False
 
 
 # Where each spec's default (and effective value) lives, by ``SettingSpec.source``.
@@ -275,6 +281,12 @@ SETTING_SPECS: dict[str, SettingSpec] = {
             "accounts", "oauthOnly", "oauth_only", "bool",
             help="Never switch onto API-key accounts, by hand or automatically",
             group="profile", label="OAuth accounts only",
+        ),
+        SettingSpec(
+            "accounts", "proactiveTokenRefresh", "proactive_token_refresh", "bool",
+            help="Refresh idle accounts' tokens ahead of expiry; off because a "
+            "running claude may hold the same token",
+            group="profile", label="Proactive token refresh",
         ),
     )
 }

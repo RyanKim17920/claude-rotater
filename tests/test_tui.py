@@ -2116,6 +2116,21 @@ class TestLoginWarning:
 
 @pytest.mark.asyncio
 class TestRefresherHosting:
+    @pytest.fixture(autouse=True)
+    def _opted_in(self, tmp_path):
+        from claude_rotater.settings import set_setting
+
+        set_setting(tmp_path, "accounts.proactiveTokenRefresh", "true")
+
+    async def test_not_started_without_the_opt_in(self, tmp_path, fake_refresher):
+        from claude_rotater.settings import unset_setting
+
+        unset_setting(tmp_path, "accounts.proactiveTokenRefresh")
+        app = make_app(three_accounts(tmp_path))
+        async with app.run_test(size=(120, 40)) as pilot:
+            await settle(pilot)
+            assert fake_refresher.instances == []
+
     async def test_started_at_mount_stopped_at_unmount(self, tmp_path, fake_refresher):
         fake = three_accounts(tmp_path)
         app = make_app(fake)

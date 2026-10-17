@@ -13,6 +13,7 @@ from claude_rotater.json_output import error_envelope
 from claude_rotater.printer import dimmed, error, force_utf8_output
 from claude_rotater.settings import (
     STRATEGY_CHOICES,
+    load_accounts_settings,
     load_run_settings,
     load_ui_settings,
 )
@@ -315,10 +316,16 @@ Defaults live in settings.json in the backup root; flags override them.
                     f"{' (dry-run)' if args.dry_run else ''} — Ctrl-C to stop"
                 )
             )
-        # The headless loop keeps idle accounts' tokens warm like the TUI
-        # does. Not in --dry-run (a refresh rotates and writes credentials)
-        # and not with --once (a single tick has no timer to host).
-        refresher = None if args.dry_run else _start_token_refresher(switcher, args.json)
+        # Proactive token refresh is opt-in (accounts.proactiveTokenRefresh):
+        # rotating an idle account's refresh token logs out any running
+        # claude that still holds it. Never in --dry-run (a refresh rotates
+        # and writes credentials) and not with --once (no timer to host).
+        refresher = (
+            _start_token_refresher(switcher, args.json)
+            if not args.dry_run
+            and load_accounts_settings(switcher.backup_dir).proactive_token_refresh
+            else None
+        )
         try:
             code = engine.run_loop()
         finally:

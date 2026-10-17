@@ -519,7 +519,12 @@ class TestAutoCommand:
         assert self._run([], temp_home) == 0
         assert self.FakeEngine.instances  # loop path constructed the engine
 
+    def test_loop_leaves_tokens_alone_by_default(self, temp_home):
+        assert self._run([], temp_home) == 0
+        assert self.FakeRefresher.instances == []
+
     def test_loop_hosts_the_token_refresher_and_stops_it(self, temp_home):
+        self._opt_in_refresh()
         assert self._run([], temp_home) == 0
         refresher, = self.FakeRefresher.instances
         assert refresher.ran.wait(5)
@@ -530,8 +535,18 @@ class TestAutoCommand:
         self._run(argv, temp_home)
         assert self.FakeRefresher.instances == []
 
+    @staticmethod
+    def _opt_in_refresh():
+        from claude_rotater.paths import get_backup_root
+        from claude_rotater.settings import set_setting
+
+        get_backup_root().mkdir(parents=True, exist_ok=True)
+        set_setting(get_backup_root(), "accounts.proactiveTokenRefresh", "true")
+
     def _replay(self, argv, temp_home, capsys):
         from claude_rotater.token_refresh import RefreshEvent
+
+        self._opt_in_refresh()
 
         self.FakeRefresher.events = [
             RefreshEvent("refreshed", "2", "a@x.com"),

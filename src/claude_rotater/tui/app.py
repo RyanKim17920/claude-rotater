@@ -41,6 +41,7 @@ from claude_rotater.models import AccountsSnapshot
 from claude_rotater.settings import (
     AutoSwitchSettings,
     UiSettings,
+    load_accounts_settings,
     load_settings,
     load_ui_settings,
     parse_model_names,
@@ -185,7 +186,9 @@ class RotaApp(App):
         printer.set_theme(resolved)
         self.push_screen(self.main_screen)
         self._start_engine()
-        self._start_refresher()
+        # Opt-in only (accounts.proactiveTokenRefresh): see AccountsSettings.
+        if load_accounts_settings(self.switcher.backup_dir).proactive_token_refresh:
+            self._start_refresher()
         # The only timer: the store read. Status text is recomputed whenever
         # a refresh starts or lands, so it needs no clock of its own.
         self.set_interval(self.POLL_INTERVAL_S, self._tick)

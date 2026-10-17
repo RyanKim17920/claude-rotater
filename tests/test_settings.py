@@ -193,7 +193,7 @@ class TestSettingSpecs:
             f.name for f in PollCadence.__dataclass_fields__.values()
         }
         assert by_source["run"] == {"share_default"}
-        assert by_source["accounts"] == {"oauth_only"}
+        assert by_source["accounts"] == {"oauth_only", "proactive_token_refresh"}
 
     def test_every_spec_group_is_a_known_section(self):
         groups = {key for key, _ in SETTING_GROUPS}
