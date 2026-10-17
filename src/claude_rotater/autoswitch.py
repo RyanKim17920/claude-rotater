@@ -131,6 +131,11 @@ IDLE_HOLD_MAX_S = 30 * 60.0
 # The trailing window ``autoswitch.maxSwitchesPerHour`` counts over.
 SWITCH_BUDGET_WINDOW_S = 3600.0
 
+# expiring-first: a proactive move must be wanted by two evaluations at
+# least this far apart (with a fresh reading each), so one odd sample or a
+# reading taken mid-rollover never moves the user.
+PROACTIVE_CONFIRM_S = 120.0
+
 # Anti-flap margin for the every-account-above-threshold escape, measured on
 # the axis that escape ranks by: a target must come back at least this much
 # sooner than the account we are leaving. Five minutes is comfortably longer
@@ -897,6 +902,9 @@ class AutoSwitchEngine:
         # The last stop logged, so a held stop is logged once, not per tick.
         self._halt_logged: tuple[str, str] | None = None
         self._paused_logged_until: float | None = None
+        # expiring-first: the proactive target the previous evaluation
+        # wanted and when it first wanted it (see PROACTIVE_CONFIRM_S).
+        self._proactive_pending: tuple[str, float] | None = None
 
     # -- state file ---------------------------------------------------------
 
@@ -2367,8 +2375,22 @@ class AutoSwitchEngine:
             usage = {num: entry.decision_value() for num, entry in entries.items()}
             choice = self._expiring_first_choice(current, oauth_candidates, usage)
         if choice.action == "stay":
+            self._proactive_pending = None
             self._emit(NoSwitchEvent(reason=STAY_REASON, detail=choice.reason))
             return TickOutcome.NO_ACTION
+        now = self.clock()
+        pending = self._proactive_pending
+        if pending is None or pending[0] != choice.target:
+            self._proactive_pending = (choice.target, now)
+            pending = self._proactive_pending
+        if now - pending[1] < PROACTIVE_CONFIRM_S:
+            _, _, why = choice.reason.partition(": ")
+            self._emit(NoSwitchEvent(
+                reason=STAY_REASON,
+                detail=f"stay: confirming #{choice.target} on the next reading ({why})",
+            ))
+            return TickOutcome.NO_ACTION
+        self._proactive_pending = None
         decided_now = self.clock()
         active_value = usage.get(current)
         left_snapshot = (

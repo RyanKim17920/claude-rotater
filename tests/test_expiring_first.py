@@ -11,6 +11,7 @@ import pytest
 from claude_rotater import expiring_first as ef
 from claude_rotater.json_output import USAGE_RELOGIN_REQUIRED
 from claude_rotater.autoswitch import (
+    PROACTIVE_CONFIRM_S,
     Decision,
     NoSwitchEvent,
     SwitchEvent,
@@ -105,24 +106,29 @@ class TestOwnersCase:
             [view("2", seven=40, reset_h=25, five=0)],
             None, "stay", "1", "keeping #2 as the 5h backup",
         ),
-        # Gain past the margin but under 2x, mid 5h window: hold.
+        # Gain past the margin but under 2x: a small edge waits for the
+        # threshold, whatever the 5h window is doing.
         (
             view("1", seven=40, reset_h=40, five=30),
             [view("2", seven=40, reset_h=25)],
-            None, "stay", "1", "mid 5h window; #2 resets only 15h sooner (needs 1d)",
+            None, "stay", "1",
+            "#2 resets only 15h sooner (a move before the threshold needs 1d)",
         ),
-        # Same gain with no 5h window running: move.
         (
             view("1", seven=40, reset_h=40, five=None),
             [view("2", seven=40, reset_h=25)],
-            None, "switch", "2", "#1's 7d resets in 1d16h, #2's in 1d1h",
+            None, "stay", "1", "#2 resets only 15h sooner",
         ),
-        # Same gain while the active's 5h is near its limit: move (no need
-        # to protect a window that is nearly spent).
         (
             view("1", seven=40, reset_h=40, five=75),
             [view("2", seven=40, reset_h=25)],
-            None, "switch", "2", "switch → #2",
+            None, "stay", "1", "#2 resets only 15h sooner",
+        ),
+        # A large gain (over 2x the margin) moves.
+        (
+            view("1", seven=40, reset_h=60, five=30),
+            [view("2", seven=40, reset_h=25)],
+            None, "switch", "2", "#1's 7d resets in 2d12h, #2's in 1d1h",
         ),
         # Tie, active's 5h near its limit, backup has room: balance move.
         (
@@ -303,6 +309,15 @@ def switches(h: EngineHarness) -> list[SwitchEvent]:
     return [e for e in h.events if isinstance(e, SwitchEvent)]
 
 
+def confirmed(h: EngineHarness, usage: dict) -> TickOutcome:
+    """A proactive move needs two agreeing evaluations PROACTIVE_CONFIRM_S
+    apart: the first only says it is confirming."""
+    assert h.tick_with_usage(usage) is TickOutcome.NO_ACTION
+    assert "confirming" in no_switch(h)[-1].detail
+    h.clock.advance(PROACTIVE_CONFIRM_S)
+    return h.tick_with_usage(usage)
+
+
 class TestEngine:
     def test_owners_case_stays_on_b_with_reason(self, temp_home):
         h = make(temp_home)  # slot 1 active = B
@@ -315,11 +330,11 @@ class TestEngine:
 
     def test_owners_case_on_a_switches_to_b(self, temp_home):
         h = make(temp_home)  # slot 1 active = A
-        assert h.tick_with_usage(owners_usage(h, a="1", b="2")) is TickOutcome.SWITCHED
+        assert confirmed(h, owners_usage(h, a="1", b="2")) is TickOutcome.SWITCHED
         assert h.active_number() == 2
         (event,) = switches(h)
         assert event.trigger == "expiring-first"
-        assert event.reason == "switch → #2: #1's 7d resets in 2d2h, #2's in 19h40m"
+        assert event.reason == "switch → #2: #1's 7d resets in 2d1h, #2's in 19h38m"
         assert event.to_json()["reason"] == event.reason
         assert event.reason in event.human()
         assert h.engine.last_decision == Decision(
@@ -329,7 +344,7 @@ class TestEngine:
     def test_dry_run_reports_the_reason_and_moves_nothing(self, temp_home):
         h = make(temp_home)
         h.engine = h._make_engine(dry_run=True)
-        assert h.tick_with_usage(owners_usage(h, a="1", b="2")) is TickOutcome.SWITCHED
+        assert confirmed(h, owners_usage(h, a="1", b="2")) is TickOutcome.SWITCHED
         (event,) = switches(h)
         assert event.dry_run and event.reason.startswith("switch → #2")
         assert h.active_number() == 1
@@ -372,7 +387,7 @@ class TestEngine:
         assert h.active_number() == 1  # 5h has room: no fresh window opened
         assert "keeping #3 as the 5h backup" in no_switch(h)[-1].detail
         u["1"] = usage_at(now, seven=40, reset_h=30, five=80)
-        assert h.tick_with_usage(u) is TickOutcome.SWITCHED
+        assert confirmed(h, u) is TickOutcome.SWITCHED
         assert h.active_number() == 3  # the one with the most 5h headroom
 
     def test_reset_passed_is_not_a_reason_to_move(self, temp_home):
@@ -450,8 +465,8 @@ class TestEngine:
             }
             h.tick_with_usage(u)
             actives.append(h.active_number())
-        assert actives[0] == 2
-        assert set(actives) == {2}
+        assert actives[0] == 1  # the first evaluation only confirms
+        assert set(actives[1:]) == {2}
         assert len(switches(h)) == 1
 
     def test_cooldown_holds_a_second_proactive_move(self, temp_home):
@@ -462,14 +477,14 @@ class TestEngine:
             "2": usage_at(now, seven=40, reset_h=60),
             "3": usage_at(now, seven=90.5, reset_h=10),  # at threshold: not yet
         }
-        h.tick_with_usage(u)
+        confirmed(h, u)
         assert h.active_number() == 2
         h.clock.advance(60)
         u["3"] = usage_at(h.clock.now, seven=40, reset_h=10)  # rolled into view
         assert h.tick_with_usage(u) is TickOutcome.NO_ACTION
         assert no_switch(h)[-1].reason == "cooldown"
         h.clock.advance(600)
-        assert h.tick_with_usage(u) is TickOutcome.SWITCHED
+        assert confirmed(h, u) is TickOutcome.SWITCHED
         assert h.active_number() == 3
 
     def test_manual_hold_blocks_proactive_moves_only(self, temp_home):
@@ -493,7 +508,7 @@ class TestEngine:
         h.tick_with_usage(owners_usage(h, a="1", b="2"))
         assert h.active_number() == 1
         h.clock.advance(61)
-        assert h.tick_with_usage(owners_usage(h, a="1", b="2")) is TickOutcome.SWITCHED
+        assert confirmed(h, owners_usage(h, a="1", b="2")) is TickOutcome.SWITCHED
 
     def test_engine_switch_does_not_start_a_manual_hold(self, temp_home):
         h = make(temp_home, cooldown_seconds=0)
@@ -535,7 +550,28 @@ class TestEngine:
             "1": usage_at(now, seven=46, reset_h=94),
             "2": usage_at(now, seven=70, reset_h=2),
         }
-        assert h.tick_with_usage(u) is TickOutcome.SWITCHED
+        assert confirmed(h, u) is TickOutcome.SWITCHED
+
+    def test_one_reading_never_moves(self, temp_home):
+        """A move wanted by a single evaluation, then not by the next, never
+        happens: the confirmation starts over."""
+        h = make(temp_home)
+        want = owners_usage(h, a="1", b="2")
+        assert h.tick_with_usage(want) is TickOutcome.NO_ACTION
+        h.clock.advance(PROACTIVE_CONFIRM_S)
+        stay = owners_usage(h, a="2", b="1")  # now account 1 is the one to spend
+        assert h.tick_with_usage(stay) is TickOutcome.NO_ACTION
+        h.clock.advance(PROACTIVE_CONFIRM_S)
+        assert h.tick_with_usage(want) is TickOutcome.NO_ACTION  # starts over
+        assert not switches(h)
+
+    def test_two_quick_evaluations_are_not_two_readings(self, temp_home):
+        h = make(temp_home)
+        u = owners_usage(h, a="1", b="2")
+        h.tick_with_usage(u)
+        h.clock.advance(15)  # a feed-driven tick seconds later
+        assert h.tick_with_usage(u) is TickOutcome.NO_ACTION
+        assert not switches(h)
 
     def test_below_threshold_without_peers_is_no_action(self, temp_home):
         h = make(temp_home, n=1)

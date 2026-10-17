@@ -20,11 +20,13 @@ Two refinements keep that from being naive:
   elsewhere just to balance), then moves to the tied account with the most
   5-hour headroom.
 
-Anti-flap: a reset-axis move needs the target to reset sooner by more than
-the similar margin, and resets only move when a window rolls over, so burn
-alone can never reverse it. Leaving an account mid 5-hour window needs a
-larger gain (``LARGE_GAIN_FACTOR`` x the margin). The engine adds its
-cooldown and the manual-switch hold on top.
+Anti-flap: a proactive reset-axis move needs a LARGE gain, the target
+resetting ``LARGE_GAIN_FACTOR`` x the similar margin sooner (24h at the
+defaults), unless the active account is spent; smaller edges wait for the
+threshold like the plain strategy. Resets only move when a window rolls
+over, so burn alone can never reverse such a move. The engine adds its
+cooldown, the manual-switch hold, and a second agreeing evaluation before
+any proactive move.
 """
 
 from __future__ import annotations
@@ -245,14 +247,11 @@ def choose(
     gain = _reset(active) - _reset(target)
     if active.seven_day_headroom < SPENT_7D_PCT:
         gain = math.inf  # nothing here worth staying for
-    if (
-        active.mid_five_hour_window
-        and gain < LARGE_GAIN_FACTOR * similar_reset_s
-        and 100.0 - active.five_hour_headroom < threshold - FIVE_HOUR_NEAR_MARGIN_PCT
-    ):
+    if gain < LARGE_GAIN_FACTOR * similar_reset_s:
         return stay(
-            f"mid 5h window; #{target.number} resets only {fmt_duration(gain)} "
-            f"sooner (needs {fmt_duration(LARGE_GAIN_FACTOR * similar_reset_s)})"
+            f"#{target.number} resets only {fmt_duration(gain)} sooner "
+            f"(a move before the threshold needs "
+            f"{fmt_duration(LARGE_GAIN_FACTOR * similar_reset_s)})"
         )
     return Choice(
         "switch",
