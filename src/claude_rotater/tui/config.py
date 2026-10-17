@@ -57,10 +57,11 @@ from claude_rotater.settings import (
 )
 from claude_rotater.tui.theme import Palette, brand_chip
 
+# Short enough to fit whole at 60 columns: a cut-off hint loses "esc back".
 HINT_KEYS: tuple[tuple[str, str], ...] = (
     ("↑↓", "move"),
     ("←→", "change"),
-    ("enter/0-9", "exact value"),
+    ("0-9", "type"),
     ("ctrl+r", "default"),
     ("esc", "back"),
 )

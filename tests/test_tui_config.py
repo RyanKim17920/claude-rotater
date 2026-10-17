@@ -71,6 +71,12 @@ def plain(app: Host) -> str:
     return lst(app).render().plain
 
 
+def screen_lines(app: Host) -> list[str]:
+    """What the terminal shows, line by line."""
+    strips = app.screen._compositor.render_strips()
+    return ["".join(seg.text for seg in strip).rstrip() for strip in strips]
+
+
 async def go_to(pilot, app: Host, key: str) -> None:
     """Walk down from the top with ↓ until ``key`` is selected."""
     await pilot.press("home")
@@ -182,6 +188,8 @@ class TestLayout:
             assert detail.size.height >= 2  # wrapped, not cut
             assert footer(app) == full
             assert all(len(l) <= size[0] for l in plain(app).splitlines())
+            hint = screen_lines(app)[-1]
+            assert hint.rstrip().endswith("esc back") and "…" not in hint  # whole, not cut
             # no mid-sentence cut help in the rows: the footer carries it
             assert "…" not in plain(app)
             assert lst(app).spec.help not in plain(app)
@@ -191,6 +199,16 @@ class TestLayout:
         async with app.run_test(size=(140, 40)) as pilot:
             await pilot.pause()
             assert SETTING_SPECS["autoswitch.cooldownSeconds"].help in plain(app)
+
+    async def test_section_heading_shows_with_its_first_row_at_60x20(self, tmp_path):
+        app = Host(tmp_path)
+        async with app.run_test(size=(60, 20)) as pilot:
+            await pilot.pause()
+            first_profile = next(s for s in lst(app).specs if s.group == "profile")
+            await go_to(pilot, app, first_profile.dotted)
+            await pilot.pause()
+            shown = "\n".join(screen_lines(app))
+            assert "PROFILE" in shown and first_profile.label in shown
 
     async def test_selection_scrolls_into_view_at_80x24(self, tmp_path):
         app = Host(tmp_path)
