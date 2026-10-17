@@ -154,15 +154,18 @@ class TestLinePlot:
 
     def test_now_line_splits_measured_from_projection(self, utc):
         _pts, est = burn_5h()
-        lines = line_plot(est, now=NOW, threshold=90, width=40, height=8)
+        lines = line_plot(est, now=NOW, threshold=90, width=40, height=8, projection_color="#123456")
         body = lines[:-1]
         col = next(c for c, ch in enumerate(body[-2].plain) if ch == NOW_GLYPH and c > GUTTER)
         assert lines[-1].plain[col - 1 : col + 2] == "now"
-        solid = [c for line in body for sp in line.spans if "dim" not in str(sp.style)
+        solid = [c for line in body for sp in line.spans if "#123456" not in str(sp.style)
                  for c in range(sp.start, sp.end) if dots(line.plain[c])]
-        dotted = [c for line in body for sp in line.spans if "dim" in str(sp.style)
+        dotted = [c for line in body for sp in line.spans if "#123456" in str(sp.style)
                   for c in range(sp.start, sp.end) if dots(line.plain[c])]
         assert max(solid) <= col <= min(dotted)
+        # told apart by the dots, never by fading
+        assert not any("dim" in str(sp.style) for line in body for sp in line.spans
+                       if dots(line.plain[sp.start]))
 
     def test_empty_series_draws_axes_only(self, utc):
         est = WindowEstimate("5h", 0.0, NOW, NOW + 3600, None, "none", ())

@@ -152,8 +152,13 @@ def line_plot(
     window_len_s: float | None = None,
     lookback_s: float | None = None,
     points: Sequence[Point] | None = None,
+    projection_color: str | None = None,
 ) -> list[Text]:
     """Multi-row plot of one window; ``height`` lines including the time axis.
+
+    The projection is told apart from the measured line by being dotted, not
+    by fading: ``projection_color`` colours it by its outcome (the caller's
+    call), else it takes the height colour like the measured line.
 
     The x range is ``[max(window_start, now - lookback_s), resets_at or now +
     1h]`` (``lookback_s`` defaults to the window length, i.e. the whole
@@ -205,7 +210,10 @@ def line_plot(
         reset_col = dx(est.resets_at) // 2
 
     now_col = dx(now) // 2 if x0 <= now <= x1 else None
-    lines = _grid_rows(canvas, threshold=threshold, reset_col=reset_col, palette=palette, now_col=now_col)
+    lines = _grid_rows(
+        canvas, threshold=threshold, reset_col=reset_col, palette=palette, now_col=now_col,
+        projection_color=projection_color,
+    )
     left_fmt, right_fmt = _clock_fmts(window_len, x1 - x0)
     lines.append(_time_axis(cols, x0, x1, now, left_fmt, palette, right_fmt=right_fmt))
     return lines
@@ -252,6 +260,7 @@ def _grid_rows(
     reset_col: int | None,
     palette: Palette,
     now_col: int | None = None,
+    projection_color: str | None = None,
 ) -> list[Text]:
     """The plot body: y-axis gutter, braille cells, threshold row, reset column."""
     rows, cols = canvas.rows, canvas.cols
@@ -269,7 +278,7 @@ def _grid_rows(
             solid, dotted = canvas.solid[r][c], canvas.dotted[r][c]
             if solid or dotted:
                 glyph = chr(_BRAILLE_BASE | solid | dotted)
-                line.append(glyph, style=color if solid else f"{color} dim")
+                line.append(glyph, style=color if solid else (projection_color or color))
             elif r == thr_row:
                 line.append(THRESHOLD_GLYPH, style=f"{palette.sev_warn} dim")
             elif c == reset_col:

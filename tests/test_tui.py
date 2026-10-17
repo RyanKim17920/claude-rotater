@@ -24,7 +24,7 @@ from claude_rotater.json_output import USAGE_API_KEY, USAGE_TOKEN_EXPIRED
 from claude_rotater.models import AccountSnapshot, AccountsSnapshot
 from claude_rotater.switcher import ClaudeAccountSwitcher
 from claude_rotater.tui import data as tui_data
-from claude_rotater.tui.theme import SEV_WARN, Palette
+from claude_rotater.tui.theme import SEV_CRIT, SEV_OK, SEV_WARN, Palette
 from claude_rotater.usage_store import UsageEntry
 
 sys.path.insert(0, str(Path(__file__).parent))
@@ -718,6 +718,21 @@ def is_dim(text, needle: str) -> bool:
     return any("dim" in style.split() for style in styles_of(text, needle))
 
 
+def has_color(text, needle: str, color: str) -> bool:
+    return any(color in style for style in styles_of(text, needle))
+
+
+def braille_cells(lines, start: int = 0, end: int | None = None) -> list[tuple[int, str]]:
+    """(column, style) of every braille cell in ``lines`` between the columns."""
+    out = []
+    for line in lines:
+        for sp in line.spans:
+            for c in range(sp.start, sp.end):
+                if start <= c < (end if end is not None else 10**6) and 0x2800 <= ord(line.plain[c]) <= 0x28FF:
+                    out.append((c, str(sp.style)))
+    return out
+
+
 def window_est(label="5h", last=60.0, rate=20.0, conf="medium", *, ago=1800.0, resets_in=7200, now=None):
     """60% measured 30 min ago at 20%/h: 90% in an hour, before ``make_entry``'s 2h reset."""
     from claude_rotater.estimator import AccountEstimate, WindowEstimate
@@ -760,7 +775,8 @@ class TestAccountRowText:
 
         est, now = window_est(rate=5.0, conf="high")  # 60% → ~67% at the 2h reset
         text = self._text(make_account(1, entry=make_entry(60.0, 10.0)), est, now=now, width=160)
-        assert PROJECTION_HATCH in text.plain and is_dim(text, PROJECTION_HATCH)
+        assert PROJECTION_HATCH in text.plain
+        assert has_color(text, PROJECTION_HATCH, SEV_OK)  # lands well under 90%: green
         # the 7d window has no estimate: a solid fill only
         seven = text.plain[text.plain.index("7d"):]
         assert PROJECTION_HATCH not in seven
@@ -824,26 +840,27 @@ class TestAccountRowText:
         row = self._row(make_account(1, entry=make_entry(0.0, 10.0)))
         assert "5h   0%" in row and row.count("↻") == 1
 
-    def test_stale_measurement_is_muted_not_dim(self):
-        text = self._text(make_account(1, entry=make_entry(62.0, 31.0, age_s=3600.0)))
-        assert not is_dim(text, "62%")  # dim means estimate; stale is not one
+    def test_stale_measurement_keeps_its_colours_and_says_its_age(self):
+        text = self._text(make_account(1, entry=make_entry(62.0, 31.0, age_s=3600.0)), tag_need=11)
+        assert "stale 1h00m" in text.plain
+        assert has_color(text, "62%", SEV_OK) and has_color(text, "█", SEV_OK)  # never washed out
 
     def test_measured_cells_are_never_estimate_styled(self):
         est, now = window_est()
         text = self._text(make_account(1, entry=make_entry(60.0, 10.0)), est, now=now)
         assert not is_dim(text, "60%") and not is_dim(text, "↻")
-        assert text.plain.count("~") == 1  # only the forecast
+        assert text.plain.count("~") == 1  # only the forecast carries the mark
 
     def test_forecast_cell_is_an_estimate(self):
         est, now = window_est()
         text = self._text(make_account(1, entry=make_entry(60.0, 10.0)), est, now=now)
         assert "~5h limit in 60m" in text.plain
-        assert is_dim(text, "~5h limit")
+        assert has_color(text, "~5h limit", SEV_CRIT) and not is_dim(text, "~5h limit")  # crosses: red
         assert "%/h" not in text.plain  # no burn rates in the table
 
     def test_no_estimate_is_unsure(self):
         text = self._text(make_account(1, entry=make_entry(40.0, 10.0)))
-        assert text.plain.rstrip().endswith("~?") and is_dim(text, "~?")
+        assert text.plain.rstrip().endswith("~?") and not has_color(text, "~?", SEV_OK)
 
     def test_model_window_column(self):
         entry = make_entry(10.0, 20.0, scoped=[("Fable", 55.0)])
@@ -886,16 +903,14 @@ class TestProjectionBar:
     def test_measured_fill_then_hatch_then_tick(self):
         bar = self._bar(30.0, 60.0)
         assert bar.plain == "███│░░  ▕ "  # the divider marks now, the tick the threshold
-        assert not is_dim(bar, "███") and is_dim(bar, "░░") and not is_dim(bar, "│")
+        assert has_color(bar, "███", SEV_OK) and has_color(bar, "░░", SEV_OK)  # 60% lands well under
         assert not any(SEV_WARN in st for st in styles_of(bar, "│"))
+        assert not any("dim" in st for sp in bar.spans for st in [str(sp.style)])
 
-    def test_crossing_the_threshold_turns_the_overflow_warning(self):
-        bar = self._bar(50.0, 100.0)
-        assert bar.plain == "█████│░░░░"
-        over = [str(sp.style) for sp in bar.spans if sp.start == 9]
-        under = [str(sp.style) for sp in bar.spans if sp.start == 5]
-        assert any(SEV_WARN in st and "dim" in st for st in over)
-        assert not any(SEV_WARN in st for st in under)
+    @pytest.mark.parametrize("projected, color", [(70.0, SEV_OK), (85.0, SEV_WARN), (100.0, SEV_CRIT)])
+    def test_hatch_is_green_yellow_red_by_outcome(self, projected, color):
+        bar = self._bar(30.0, projected)
+        assert has_color(bar, "░", color)
 
     def test_no_projection_is_measured_only(self):
         assert self._bar(30.0, None).plain == "███     ▕ "
@@ -1055,7 +1070,7 @@ class TestForecast:
 
     def test_measured_at_threshold_is_not_an_estimate(self):
         fc = self._fc(None, entry=make_entry(95.0, 10.0))
-        assert fc.text == "5h at limit" and not fc.estimate and fc.role == "warn"
+        assert fc.text == "5h at limit" and not fc.estimate and fc.role == "crit"
 
     def test_projected_past_threshold(self):
         est, now = window_est(last=88.0, rate=10.0, conf="high")  # 88% 30 min ago: 93% now
@@ -2295,17 +2310,20 @@ class TestChartLines:
         lines = self._lines(120)
         body = "\n".join(line.plain for line in lines)
         assert THRESHOLD_GLYPH in body and RESET_GLYPH in body and "now" in body
-        # the projection is the dim (estimate) part of the curve; history is solid
-        dims = [line.plain[sp.start:sp.end] for line in lines[1:] for sp in line.spans if "dim" in str(sp.style)]
-        solids = [line.plain[sp.start:sp.end] for line in lines[1:] for sp in line.spans
-                  if "dim" not in str(sp.style)]
-        assert any(braille(s) for s in dims) and any(braille(s) for s in solids)
+        # the 5h projection crosses 90% before the reset: red dots right of now
+        from claude_rotater.tui.plot import NOW_GLYPH
+
+        half = (120 - 3) // 2
+        now_col = lines[-2].plain.index(NOW_GLYPH, 4)
+        right = braille_cells(lines[1:-1], now_col + 1, half)
+        assert right and all(SEV_CRIT in st and "dim" not in st for _c, st in right)
+        assert braille_cells(lines[1:-1], 0, now_col)  # the measured curve
 
     def test_titles_carry_only_the_forecast(self):
         title = self._lines(120)[0]
         five = title.plain.split("7d")[0]
         assert "~limit in 2h" in five  # 62% at 15%/h, 90% before the 2h reset
-        assert is_dim(title, "~limit in 2h")
+        assert has_color(title, "~limit in 2h", SEV_CRIT)
         assert "62%" not in title.plain and "31%" not in title.plain  # pcts are in the table
         assert ":" not in title.plain  # the reset clock is the chart's right edge
 
@@ -2313,14 +2331,16 @@ class TestChartLines:
         now = time.time()
         series = burn_history(now, rate=2.0)["1"]
         title = self._lines(120, series=series)[0]
-        assert "% at reset" in title.plain and is_dim(title, "% at reset")
+        assert "% at reset" in title.plain and has_color(title, "% at reset", SEV_OK)
 
     def test_thin_history_draws_no_projection(self):
         lines = self._lines(120, series={}, est=None)
         title = lines[0].plain
         assert title.count("~? not enough data yet") == 2
-        assert not any("dim" in str(sp.style) and braille(line.plain[sp.start:sp.end])
-                       for line in lines[1:] for sp in line.spans)
+        from claude_rotater.tui.plot import NOW_GLYPH
+
+        now_col = lines[-2].plain.index(NOW_GLYPH, 4)
+        assert not braille_cells(lines[1:-1], now_col + 1, (120 - 3) // 2)  # nothing right of now
 
     def test_unused_and_at_limit_titles(self):
         title = self._lines(120, series={}, est=None, entry=make_entry(0.0, 95.0))[0].plain

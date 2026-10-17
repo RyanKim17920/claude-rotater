@@ -7,13 +7,13 @@ Layout, top to bottom, as tall as the terminal allows:
 - one ``AccountRow`` per account, measured now: on-duty bar, the account, a
   short tag only when it matters (a dead or lapsing login, "off", a real
   org), then per window (5h, 7d, each per-model window in use) its pct, a
-  short bar (measured fill, then a dim ``░`` hatch out to the projection at
-  the reset, warning-coloured past the threshold) and a countdown to its
+  short bar (measured fill, then a ``░`` hatch out to the projection at
+  the reset, coloured by its outcome) and a countdown to its
   reset, then one forecast cell for the binding window
   (``ok``, ``~7d limit in 15h``, ``~?``). Columns shrink as the width runs
   short (:data:`LEVELS`);
 - the highlighted account's 5h and 7d charts (measured history solid, the
-  projection dotted and dim, the threshold line, the reset at the right
+  projection dotted and coloured by outcome, the threshold line, the reset at the right
   edge), filling the spare height and hidden when fewer than
   :data:`CHART_MIN_ROWS` rows are spare.
   ``h`` swaps in the long-term view (past 5h peaks, the 7d curve across
@@ -22,7 +22,9 @@ Layout, top to bottom, as tall as the terminal allows:
 - the action bar: the everyday keys and ``?`` for the rest.
 
 One convention for estimates everywhere: measured values are plain, anything
-extrapolated is dim and prefixed with ``~`` (:data:`ESTIMATE_MARK`), and an
+extrapolated is told apart by its glyph (``~`` prefix, ``░`` hatch, dotted
+line) and coloured by its outcome (green under, yellow close, red over the
+threshold), and an
 estimate too thin to trust reads ``~?`` rather than a precise-looking number.
 Each fact appears once: countdowns in the table, reset clocks on the charts.
 
@@ -106,17 +108,29 @@ def event_text(event: AutoSwitchEvent, *, palette: Palette = Palette.DARK) -> Te
 # Estimate styling: one convention for every extrapolated value
 # ---------------------------------------------------------------------------
 
-# Anything the estimator extrapolated (a projection, an ETA) is prefixed with
-# this mark and drawn dim; measured values are plain. The header carries the
-# legend once.
+# Anything the estimator extrapolated (a projection, an ETA) is told apart by
+# its glyph, never by greying: the "~" prefix on text, the ░ hatch in a bar,
+# the dotted line in a chart. Its colour says the outcome (outcome_color):
+# green stays comfortably under the threshold, yellow gets close, red
+# crosses it before the reset. The header carries the legend once.
 ESTIMATE_MARK = "~"
 LEGEND = f"{ESTIMATE_MARK} = estimate"
 UNSURE = f"{ESTIMATE_MARK}?"  # an estimate too thin to put a number on
 _TRUSTED = ("medium", "high")  # confidences good enough for a number
 
 
-def estimate_style(color: str) -> str:
-    return f"{color} dim"
+NEAR_PTS = 10.0  # a projection this close under the threshold is "close"
+
+
+def outcome_color(projected: float | None, threshold: float | None, palette: Palette) -> str:
+    """Green / yellow / red for where an estimate lands against the threshold."""
+    if projected is None or threshold is None:
+        return palette.muted
+    if projected >= threshold:
+        return palette.sev_crit
+    if projected >= threshold - NEAR_PTS:
+        return palette.sev_warn
+    return palette.sev_ok
 
 
 def rough_duration(seconds: float) -> str:
@@ -363,7 +377,7 @@ _SENTINEL_TAGS = {USAGE_RELOGIN_REQUIRED: "re-login"}
 
 def row_tag(acc: AccountSnapshot, now: float, warn_days: int) -> tuple[str, bool]:
     """(tag, is_warning): a dead login, a login about to lapse, "off" for a
-    disabled account, else a real org name. A personal account has no tag:
+    disabled account, "stale 2h" for an old measurement, else a real org name. A personal account has no tag:
     its org is named after the email (see ``models.org_tag``)."""
     sentinel = acc.usage.sentinel
     if acc.disabled:
@@ -373,6 +387,9 @@ def row_tag(acc: AccountSnapshot, now: float, warn_days: int) -> tuple[str, bool
     warning = login_warning(acc, now, warn_days)
     if warning is not None:
         return warning, True
+    fetched = acc.usage.fetched_at
+    if fetched is not None and now - fetched > STALE_OK_S:
+        return f"stale {countdown_text(now - fetched)}", False
     tag = acc.display_tag
     return ("" if tag == "personal" else tag), False
 
@@ -432,14 +449,13 @@ def window_cell(
     now: float,
     threshold: float | None,
     palette: Palette,
-    stale: bool = False,
     projected: float | None = None,
 ) -> Text:
     """One window column, exactly ``layout.window_w(label)`` cells:
     ``5h  58% ███▌░░░▕ ↻1h20m``. The pct, the solid fill and the countdown
-    are measured (a stale reading is muted, never dim); the hatch is the
-    projection to the reset, in the estimate style. An unused window drops
-    its countdown."""
+    are measured; the hatch is the projection to the reset, coloured by its
+    outcome. An unused window drops its countdown. A stale reading keeps its
+    colours: the row's tag says how old it is."""
     width = layout.window_w(label)
     cell = Text(no_wrap=True)
     cell.append(label, style=palette.muted)
@@ -447,11 +463,11 @@ def window_cell(
         cell.append("    ·", style=palette.track)
     else:
         pct, resets_at = measured
-        cell.append(f" {pct:3.0f}%", style=palette.muted if stale else palette.severity(pct))
+        cell.append(f" {pct:3.0f}%", style=palette.severity(pct))
         if layout.bar_w:
             cell.append(" ")
             cell.append(projection_bar(
-                pct, projected, layout.bar_w, threshold=threshold, palette=palette, stale=stale,
+                pct, projected, layout.bar_w, threshold=threshold, palette=palette,
             ))
         if layout.has_reset(label) and resets_at is not None and pct > 0:
             rel = countdown_text(resets_at - now) if resets_at > now else "now"
@@ -472,11 +488,10 @@ def projection_bar(
     *,
     threshold: float | None,
     palette: Palette,
-    stale: bool = False,
 ) -> Text:
     """``███▌│░░▕``: the measured pct as a solid fill, a divider where the
-    measurement ends, then a dim hatch out to ``projected`` (the estimate at
-    the reset), turning the warning colour where it runs past the threshold;
+    measurement ends, then a hatch out to ``projected`` (the estimate at the
+    reset), green / yellow / red by where it lands (:func:`outcome_color`);
     the threshold tick (``▕``, warning colour) where nothing covers it."""
     text = Text(no_wrap=True)
     if width <= 0:
@@ -491,8 +506,8 @@ def projection_bar(
     tick_at = None
     if threshold is not None:
         tick_at = min(width - 1, max(0, round(threshold / 100.0 * width) - 1))
-    crosses = projected is not None and threshold is not None and projected >= threshold
-    fill = f"{palette.muted} {track}" if stale else f"{palette.severity(pct)} {track}"
+    hatch = f"{outcome_color(projected, threshold, palette)} {track}"
+    fill = f"{palette.severity(pct)} {track}"
     for i in range(width):
         if i < full:
             text.append(BAR_FULL, style=fill)
@@ -501,9 +516,7 @@ def projection_bar(
         elif i == measured_end and proj_end - measured_end >= 2:  # one cell stays hatch
             text.append(PROJECTION_DIVIDER, style=f"{palette.foreground} {track}")
         elif i < proj_end:
-            over = crosses and tick_at is not None and i >= tick_at
-            color = palette.sev_warn if over else palette.foreground
-            text.append(PROJECTION_HATCH, style=f"{estimate_style(color)} {track}")
+            text.append(PROJECTION_HATCH, style=hatch)
         elif i == tick_at:
             text.append(BAR_TICK, style=f"{palette.sev_warn} {track}")
         else:
@@ -526,8 +539,8 @@ class Forecast:
 
     text: str
     short: str  # the same at the narrow width
-    role: str  # "ok" | "warn" | "fg" | "muted"
-    estimate: bool  # extrapolated: dim, and the text carries ESTIMATE_MARK
+    role: str  # "ok" | "warn" | "crit" | "muted": green / yellow / red / grey
+    estimate: bool  # extrapolated: the text carries ESTIMATE_MARK
 
 
 def forecast(
@@ -547,7 +560,7 @@ def forecast(
         return None
     label, (pct, _r) = max(pcts.items(), key=lambda kv: kv[1][0])
     if pct >= threshold:
-        return Forecast(f"{label} at limit", f"{label} limit", "warn", False)
+        return Forecast(f"{label} at limit", f"{label} limit", "crit", False)
     unsure = Forecast(UNSURE, UNSURE, "muted", True)
     if est is None or not est.windows:
         return unsure
@@ -563,23 +576,28 @@ def forecast(
             return unsure
         mark, name = ESTIMATE_MARK, west.window
         if eta <= 0:
-            return Forecast(f"{mark}{name} at limit", f"{mark}{name} limit", "warn", True)
+            return Forecast(f"{mark}{name} at limit", f"{mark}{name} limit", "crit", True)
         when = rough_duration(eta)
-        role = "warn" if eta < 3600 else "fg"
-        return Forecast(f"{mark}{name} limit in {when}", f"{mark}{name} in {when}", role, True)
+        return Forecast(f"{mark}{name} limit in {when}", f"{mark}{name} in {when}", "crit", True)
     if any(w.rate_pct_per_h is None for w in est.windows.values()):
         return unsure
-    return Forecast("ok", "ok", "ok", False)
+    # Stays under: yellow when some window ends the window close to it.
+    landing = [
+        projected_at_reset(w, pcts.get(w.window, (0.0, None))[1], now) for w in est.windows.values()
+    ]
+    peak = max((p for p in landing if p is not None), default=None)
+    close = peak is not None and peak >= threshold - NEAR_PTS
+    return Forecast("ok", "ok", "warn" if close else "ok", False)
 
 
 def forecast_text(fc: Forecast | None, width: int, *, long: bool, palette: Palette) -> Text:
     if fc is None:
         return Text()
     color = {
-        "ok": palette.sev_ok, "warn": palette.sev_warn, "muted": palette.muted,
-    }.get(fc.role, palette.foreground)
+        "ok": palette.sev_ok, "warn": palette.sev_warn, "crit": palette.sev_crit,
+    }.get(fc.role, palette.muted)
     words = fc.text if long else fc.short
-    return Text(_fit(words, width), style=estimate_style(color) if fc.estimate else color, no_wrap=True)
+    return Text(_fit(words, width), style=color, no_wrap=True)
 
 
 def account_row_text(
@@ -612,7 +630,6 @@ def account_row_text(
         text.append(" " * _GAP + "usage unknown", style=palette.muted)
         return text
 
-    stale = acc.usage.age_s is not None and acc.usage.age_s > STALE_OK_S
     for label in layout.windows:
         measured = pcts.get(label)
         projected = None
@@ -622,7 +639,7 @@ def account_row_text(
         text.append(
             window_cell(
                 label, measured, layout, now=now, threshold=threshold, palette=palette,
-                stale=stale, projected=projected,
+                projected=projected,
             )
         )
     fc = forecast(acc, est, threshold=threshold, now=now, models=models)
@@ -692,17 +709,18 @@ def chart_title(
     elif measured_pct <= 0 and not rate:
         text.append("  unused", style=palette.muted)
     elif rate is None or west.confidence not in _TRUSTED:
-        text.append(f"  {UNSURE} not enough data yet", style=estimate_style(palette.muted))
+        text.append(f"  {UNSURE} not enough data yet", style=palette.muted)
     else:
         eta = west.eta_s(threshold, now) if threshold is not None else None
         if eta is not None:
             words = f"{mark}at limit" if eta <= 0 else f"{mark}limit in {rough_duration(eta)}"
-            text.append(f"  {words}", style=estimate_style(palette.sev_warn))
+            text.append(f"  {words}", style=palette.sev_crit)
         else:
             future = west.resets_at is not None and west.resets_at > now
             at_reset = west.projected_pct(west.resets_at - 1) if future else None
             if at_reset is not None:
-                text.append(f"  {mark}{at_reset:.0f}% at reset", style=estimate_style(palette.severity(at_reset)))
+                color = outcome_color(at_reset, threshold, palette)
+                text.append(f"  {mark}{at_reset:.0f}% at reset", style=color)
     return text
 
 
@@ -717,8 +735,9 @@ def chart_blocks(
 ) -> list[tuple[Text, object]]:
     """(title, renderer) for the 5h and 7d charts of the current windows.
 
-    Measured history is solid; the projection is dotted and dim (the estimate
-    style), and left out when the estimate is too thin to trust."""
+    Measured history is solid; the projection is dotted and coloured by its
+    outcome (:func:`outcome_color`), and left out when the estimate is too
+    thin to trust."""
     if acc.usage.sentinel is not None:
         return []
     pcts = window_pcts(acc, ())
@@ -731,11 +750,12 @@ def chart_blocks(
         west = _at_measured_reset(west, resets_at)
         drawn = west if west.confidence in _TRUSTED else dataclasses.replace(west, rate_pct_per_h=None)
         history = [p for p in series.get(label, ()) if p.t <= now]
+        color = outcome_color(projected_at_reset(west, resets_at, now), threshold, palette)
 
-        def render(w: int, h: int, drawn=drawn, history=history) -> list[Text]:
+        def render(w: int, h: int, drawn=drawn, history=history, color=color) -> list[Text]:
             return line_plot(
                 drawn, now=now, threshold=threshold, width=w, height=h,
-                palette=palette, points=history or None,
+                palette=palette, points=history or None, projection_color=color,
             )
 
         title = chart_title(west, pct, now=now, threshold=threshold, palette=palette)
