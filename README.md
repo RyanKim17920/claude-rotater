@@ -9,9 +9,9 @@ Windows.
 ## Features
 
 - Live TUI: one line per account with its 5h, 7d and per-model (e.g. Fable)
-  usage, when each window resets, the burn rate and time to the switch
-  threshold; a short detail strip for the highlighted account, and usage
-  graphs and long-term history behind `h`.
+  usage, a countdown to each reset and one forecast (`ok`, `~7d limit in
+  15h`); the highlighted account's 5h/7d charts below, and long-term history
+  behind `h`. Estimates are always dim and marked `~`.
 - Automatic switching while the TUI is open, or headless with `rota auto`.
   Switches take Claude Code's own credential locks, so they never collide
   with a token refresh.
@@ -57,7 +57,8 @@ revoke the stored refresh token.
 | `d` | disable or enable an account for rotation |
 | `x` | remove an account |
 | `f` | refresh usage now |
-| `h` | history: the current 5h/7d graphs and past windows |
+| `h` | history: past 5h peaks and the 7d curve across weeks |
+| `?` | the keys not on the action bar |
 | `s` | set up or remove the statusline feed |
 | `c` | settings (`↑`/`↓` select, `←`/`→` change, `enter` exact value, `esc` back) |
 | `ctrl+t` | theme |
