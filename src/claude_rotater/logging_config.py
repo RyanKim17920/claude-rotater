@@ -1,8 +1,21 @@
 """Logging configuration for Claude Swap."""
 
 import logging
+import re
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
+
+
+# Free text bound for rota.log (an exception message, a CLI's stderr) may quote
+# an account's email or an OAuth token. Neither belongs in a log file a user
+# might paste into an issue, so both are masked before they are written.
+_EMAIL_RE = re.compile(r"[^\s@<>()\[\]{}\"',;:]+@[^\s@<>()\[\]{}\"',;:]+")
+_TOKEN_RE = re.compile(r"sk-ant-[A-Za-z0-9_\-]+")
+
+
+def redact(text: str) -> str:
+    """Mask email addresses and ``sk-ant-`` tokens in ``text`` for logging."""
+    return _TOKEN_RE.sub("<token>", _EMAIL_RE.sub("<email>", str(text)))
 
 
 class _LazyDirRotatingFileHandler(RotatingFileHandler):

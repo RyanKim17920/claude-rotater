@@ -337,3 +337,15 @@ class TestSweep:
     def test_missing_root_is_fine(self, tmp_path):
         assert sweep_stale_stages(tmp_path, now=time.time()) == 0
 
+
+class TestRedact:
+    def test_masks_emails_and_tokens(self):
+        from claude_rotater.logging_config import redact
+
+        text = 'x "a.b+c@ex-ample.co.uk" sk-ant-ort01-AbC_d-9 (me@x.io), done'
+        assert redact(text) == 'x "<email>" <token> (<email>), done'
+
+    def test_leaves_plain_text(self):
+        from claude_rotater.logging_config import redact
+
+        assert redact("slot 3 failed: timed out") == "slot 3 failed: timed out"
