@@ -63,6 +63,7 @@ from textual.widgets import ListItem, ListView, RichLog, Static
 
 from claude_rotater import oauth, profiles
 from claude_rotater.autoswitch import (
+    ALERT_REASONS,
     AutoSwitchEvent,
     Decision,
     NoSwitchEvent,
@@ -210,7 +211,8 @@ FEED_LABELS = {
 
 # Engine outcomes that mean a switch was wanted and could not happen.
 BLOCKED_REASONS = frozenset(
-    {"no-candidates", "no-viable-target", "no-qualifying-candidate", "error", "all-exhausted"}
+    {"no-candidates", "no-viable-target", "no-qualifying-candidate", "error",
+     "all-exhausted", *ALERT_REASONS}
 )
 
 

@@ -128,6 +128,9 @@ MIN_TICK_S = 15.0
 # falls back to normal unhealthy counting.
 IDLE_HOLD_MAX_S = 30 * 60.0
 
+# The trailing window ``autoswitch.maxSwitchesPerHour`` counts over.
+SWITCH_BUDGET_WINDOW_S = 3600.0
+
 # Anti-flap margin for the every-account-above-threshold escape, measured on
 # the axis that escape ranks by: a target must come back at least this much
 # sooner than the account we are leaving. Five minutes is comfortably longer
@@ -541,8 +544,10 @@ STAY_REASON = "stay"
 # take. Never answered by switching to some other account.
 RELOGIN_REASON = "relogin-needed"
 REPAIR_FAILED_REASON = "repair-failed"
+# The hourly switch budget is spent: automatic switching is paused.
+PAUSED_REASON = "auto-paused"
 # Reasons a UI should surface loudly (header note, prompt line).
-ALERT_REASONS = (RELOGIN_REASON, REPAIR_FAILED_REASON)
+ALERT_REASONS = (RELOGIN_REASON, REPAIR_FAILED_REASON, PAUSED_REASON)
 # NoSwitchEvent reasons whose ``detail`` is already a full "stay: ..." line.
 _SELF_EXPLAINED = (STAY_REASON, "manual-hold", *ALERT_REASONS)
 
@@ -891,6 +896,7 @@ class AutoSwitchEngine:
         self.last_decision: Decision | None = None
         # The last stop logged, so a held stop is logged once, not per tick.
         self._halt_logged: tuple[str, str] | None = None
+        self._paused_logged_until: float | None = None
 
     # -- state file ---------------------------------------------------------
 
@@ -1168,6 +1174,10 @@ class AutoSwitchEngine:
 
         if not self._model_check_done:
             self._check_model_names(quarantined, usage)
+
+        paused_until = self._paused_until(state)
+        if paused_until is not None:
+            return self._emit_paused(state, paused_until)
 
         if (
             self.switcher.account_kind_for(current) == "api_key"
@@ -2561,6 +2571,9 @@ class AutoSwitchEngine:
             if trigger in _COOLDOWN_TRIGGERS and self._in_cooldown(state):
                 self._emit(NoSwitchEvent(reason="cooldown"))
                 return TickOutcome.NO_ACTION
+            paused_until = self._paused_until(state)
+            if paused_until is not None:
+                return self._emit_paused(state, paused_until)
 
             result = self.switcher.switch_to(number, json_output=True)
             if not result or not result.get("switched"):
@@ -2593,6 +2606,7 @@ class AutoSwitchEngine:
             # nulls then runs the wrong legs. Record it directly so the
             # reader never has to guess.
             state["leftTrigger"] = trigger
+            self._count_switch(state, state["lastSwitchAt"])
             atomic_write_json(self.state_path, state)
 
         _logger.log(
@@ -2654,6 +2668,10 @@ class AutoSwitchEngine:
             ))
             return TickOutcome.SWITCHED
         with self._state_lock():
+            state = self._read_state()
+            paused_until = self._paused_until(state)
+            if paused_until is not None:
+                return self._emit_paused(state, paused_until)
             try:
                 result = self.switcher.restore_own_login(current)
             except Exception as e:  # a failed stash or write: stop, never move
@@ -2662,6 +2680,9 @@ class AutoSwitchEngine:
                     f"stop: could not restore account {current}'s own login "
                     f"({e}); not switching to another account",
                 )
+            state["schemaVersion"] = STATE_SCHEMA_VERSION
+            self._count_switch(state, self.clock())  # a repair writes the live login too
+            atomic_write_json(self.state_path, state)
             restored = self.switcher._live_matches_slot_backup(current, email)
         if not restored:
             return self._halt(
@@ -2716,6 +2737,48 @@ class AutoSwitchEngine:
         if entry is not None and entry.token_dead():
             return entry.last_error or "invalid_grant"
         return ""
+
+    def _recent_switches(self, state: dict) -> list[float]:
+        """Times of this data dir's automatic switches in the trailing hour."""
+        raw = state.get("autoSwitchTimes")
+        if not isinstance(raw, list) or not raw:
+            return []
+        now = self.clock()
+        return sorted(
+            float(t) for t in raw
+            if isinstance(t, (int, float)) and not isinstance(t, bool)
+            and now - SWITCH_BUDGET_WINDOW_S < t <= now
+        )
+
+    def _count_switch(self, state: dict, at: float) -> None:
+        state["autoSwitchTimes"] = [*self._recent_switches(state), at]
+
+    def _paused_until(self, state: dict) -> float | None:
+        """When the hourly switch budget frees up again, or None when it has
+        room. Persisted in the state file, so every engine on this data dir
+        (and a restarted one) shares one budget."""
+        recent = self._recent_switches(state)
+        limit = self.settings.max_switches_per_hour
+        if len(recent) < limit:
+            return None
+        return recent[-limit] + SWITCH_BUDGET_WINDOW_S
+
+    def _emit_paused(self, state: dict, until: float) -> TickOutcome:
+        count = len(self._recent_switches(state))
+        detail = (
+            f"auto paused: too many switches ({count} in the last hour); "
+            f"resumes in {expiring_first.fmt_duration(until - self.clock())}"
+        )
+        if self._paused_logged_until != until:
+            self._paused_logged_until = until
+            _logger.warning(
+                "Auto-switch paused: %d automatic switches in the last hour "
+                "(limit %d); no automatic switch or repair until %s.",
+                count, self.settings.max_switches_per_hour,
+                datetime.fromtimestamp(until).strftime("%H:%M:%S"),
+            )
+        self._emit(NoSwitchEvent(reason=PAUSED_REASON, detail=detail))
+        return TickOutcome.BLOCKED
 
     def _halt(self, reason: str, detail: str) -> TickOutcome:
         """Hold every automatic action and say why; logged once per cause."""

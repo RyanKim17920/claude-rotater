@@ -32,7 +32,12 @@ from textual.reactive import reactive
 from textual.worker import WorkerState
 
 from claude_rotater import legacy_import, printer
-from claude_rotater.autoswitch import STATE_FILENAME, AutoSwitchEvent, SwitchEvent
+from claude_rotater.autoswitch import (
+    ALERT_REASONS,
+    STATE_FILENAME,
+    AutoSwitchEvent,
+    SwitchEvent,
+)
 from claude_rotater.estimator import AccountEstimate, estimate_account
 from claude_rotater import statusline_setup
 from claude_rotater.exceptions import ClaudeSwitchError, LoginError
@@ -260,7 +265,12 @@ class RotaApp(App):
             dst = (getattr(event, "to_ref", None) or {}).get("number", "?")
             status = replace(status, last_switch_at=now, last_switch=f"{src} → {dst}", last_reason="")
         elif kind == "no-switch":
-            status = replace(status, last_outcome=event.human(), last_reason=event.reason)
+            reason = getattr(event, "reason", "")
+            if reason in ALERT_REASONS and event.human() != status.last_outcome:
+                # A stop or pause needs a person: say it once on the prompt
+                # line as well as in the header (not again every tick).
+                self.say(event.human(), "error")
+            status = replace(status, last_outcome=event.human(), last_reason=reason)
         elif kind in ("error", "all-exhausted"):
             status = replace(status, last_outcome=event.human(), last_reason=kind)
         decision = header_decision(event)

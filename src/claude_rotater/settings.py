@@ -69,6 +69,10 @@ class AutoSwitchSettings:
     # expiring-first: after a manual switch, no proactive move for this long
     # (threshold and failover moves still happen).
     manual_hold_minutes: float = 60.0
+    # Safety net against any flapping loop: at most this many automatic
+    # switches (repairs included) in a trailing hour per data dir. One more
+    # pauses the engine until the hour clears and says so in the TUI.
+    max_switches_per_hour: int = 4
 
 
 @dataclass(frozen=True)
@@ -244,6 +248,13 @@ SETTING_SPECS: dict[str, SettingSpec] = {
             help="expiring-first: no proactive switch for this long after a "
             "manual switch",
             group="autoswitch", label="Manual switch hold", step=5.0, unit="m",
+        ),
+        SettingSpec(
+            "autoswitch", "maxSwitchesPerHour", "max_switches_per_hour", "int",
+            1, 60,
+            help="Most automatic switches in any hour; one more pauses "
+            "auto-switching until the hour clears",
+            group="autoswitch", label="Switch limit", step=1.0, unit="/h",
         ),
         SettingSpec(
             "autoswitch", "includeApiKeyAccounts", "include_api_key_accounts", "bool",

@@ -2374,6 +2374,31 @@ class TestEngineHosting:
             assert "auto on · switch → #2" in status and len(status) <= cols
             assert app.prompt._timer is not None  # brief: it clears itself
 
+    async def test_auto_pause_shows_in_header_and_on_the_prompt_once(self, tmp_path, fake_engine):
+        line = "auto paused: too many switches (4 in the last hour); resumes in 41m"
+        app = make_app(three_accounts(tmp_path))
+        async with app.run_test(size=(120, 30)) as pilot:
+            await settle(pilot)
+            engine = fake_engine.instances[0]
+            said = []
+            real_say = app.say
+            app.say = lambda text, *a, **k: (said.append(text), real_say(text, *a, **k))
+            for _ in range(3):  # the engine repeats it every tick
+                await emit(engine, NoSwitchEvent(reason="auto-paused", detail=line))
+            await settle(pilot)
+            assert line in painted(app, "#status")
+            assert said == [line]  # said once, not per tick
+
+    async def test_relogin_stop_shows_in_the_header(self, tmp_path, fake_engine):
+        line = ("stop: account 1's live login belongs to another account and its "
+                "own stored login has no refresh token; re-login needed (press l).")
+        app = make_app(three_accounts(tmp_path))
+        async with app.run_test(size=(200, 30)) as pilot:
+            await settle(pilot)
+            await emit(fake_engine.instances[0], NoSwitchEvent(reason="relogin-needed", detail=line))
+            await settle(pilot)
+            assert "re-login needed" in painted(app, "#status")
+
     async def test_header_says_why_a_switch_is_held(self, tmp_path):
         """At its threshold with a cooldown running, the header says the
         switch is held and for how long; under it, it says nothing."""

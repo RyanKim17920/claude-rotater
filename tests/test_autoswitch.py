@@ -6272,7 +6272,9 @@ class TestHorizonAxisDoesNotFlap:
             ),
         ]
         for label, active_row, peer_reset, expected_outcome, expected_active in cases:
-            h = EngineHarness(temp_home)
+            # The cases share one data dir; keep its hourly switch budget out
+            # of the way of what this test measures.
+            h = EngineHarness(temp_home, max_switches_per_hour=60)
             h.seed(1, "a@example.com")
             h.seed(2, "b@example.com")
             h.make_live("a@example.com", 1)
