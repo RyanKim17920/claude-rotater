@@ -199,6 +199,9 @@ class AutoStatus:
     last_outcome: str = ""  # most recent no-switch reason / error summary
     last_reason: str = ""  # its machine reason ("cooldown", "no-candidates", "error", ...)
     decision: Decision | None = None  # the engine's latest verdict, for the header
+    # Set when another rota on this data dir runs the engine (this one only
+    # shows): "another rota is running (pid 4242, older code)".
+    view_only: str = ""
 
 
 FEED_LABELS = {
@@ -286,6 +289,8 @@ def status_text(
     head.append("  auto ", style=palette.muted)
     if status.running:
         head.append("on", style=f"bold {palette.accent}")
+    elif status.view_only:
+        head.append("view-only", style=f"bold {palette.sev_warn}")
     else:
         head.append("off", style=f"bold {palette.sev_crit}")
     tail = Text(no_wrap=True)
@@ -293,7 +298,7 @@ def status_text(
         glyph, role, words = FEED_LABELS[feed]
         tail.append(f"   {glyph} ", style=getattr(palette, role))
         tail.append(words, style=palette.muted)
-    note = switch_note(status, now=now, over_threshold=over_threshold)
+    note = status.view_only or switch_note(status, now=now, over_threshold=over_threshold)
     if note:
         if head.cell_len + tail.cell_len + 3 + len(note) <= width:
             tail.append(f"   {note}", style=palette.sev_warn)

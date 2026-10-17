@@ -519,6 +519,20 @@ class TestAutoCommand:
         assert self._run([], temp_home) == 0
         assert self.FakeEngine.instances  # loop path constructed the engine
 
+    def test_a_second_engine_on_the_data_dir_refuses_to_run(self, temp_home, capsys):
+        from claude_rotater.instance import EngineLock
+        from claude_rotater.paths import get_backup_root
+
+        get_backup_root().mkdir(parents=True, exist_ok=True)
+        owner = EngineLock(get_backup_root())
+        assert owner.acquire() is None
+        try:
+            assert self._run(["--once"], temp_home) == 3
+            assert "another rota is running" in capsys.readouterr().err
+            assert self._run(["--dry-run", "--once"], temp_home) != 3  # read-only may run
+        finally:
+            owner.release()
+
     def test_loop_leaves_tokens_alone_by_default(self, temp_home):
         assert self._run([], temp_home) == 0
         assert self.FakeRefresher.instances == []

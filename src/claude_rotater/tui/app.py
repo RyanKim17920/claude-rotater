@@ -41,6 +41,7 @@ from claude_rotater.autoswitch import (
 from claude_rotater.estimator import AccountEstimate, estimate_account
 from claude_rotater import statusline_setup
 from claude_rotater.exceptions import ClaudeSwitchError, LoginError
+from claude_rotater.instance import EngineLock, warn_if_not_owner
 from claude_rotater.login import StagedLogin
 from claude_rotater.logging_config import redact
 from claude_rotater.token_refresh import RefreshEvent, TokenRefresher
@@ -162,6 +163,8 @@ class RotaApp(App):
         self._login_factory = login_factory or StagedLogin
         self._refresher_factory = refresher_factory or default_refresher_factory
         self.refresher: TokenRefresher | None = None
+        self.engine_lock = EngineLock(switcher.backup_dir)
+        self._engine_claimed_at = 0.0
         self.engine: EngineLike | None = None
         self.source = SnapshotSource(switcher)
         self._normal_refreshing = False
@@ -202,7 +205,7 @@ class RotaApp(App):
         self.theme = f"rota-{resolved}"
         printer.set_theme(resolved)
         self.push_screen(self.main_screen)
-        self._start_engine()
+        self._claim_engine()
         # Opt-in only (accounts.proactiveTokenRefresh): see AccountsSettings.
         if load_accounts_settings(self.switcher.backup_dir).proactive_token_refresh:
             self._start_refresher()
@@ -213,6 +216,7 @@ class RotaApp(App):
 
     def on_unmount(self) -> None:
         self._stop_engine()
+        self.engine_lock.release()
         refresher, self.refresher = self.refresher, None
         if refresher is not None:
             refresher.stop()
@@ -240,6 +244,27 @@ class RotaApp(App):
             exit_on_error=False,
             name="auto-engine",
         )
+
+    # How often a view-only TUI checks whether the engine's owner has gone.
+    ENGINE_CLAIM_RETRY_S = 60.0
+
+    def _claim_engine(self) -> None:
+        """Run the engine if this is the only rota on the data dir; else stay
+        view-only and say who runs it (once per owner, not per retry)."""
+        self._engine_claimed_at = time.time()
+        holder = self.engine_lock.acquire()
+        if holder is None:
+            if self.auto_status.view_only:
+                self.say("auto on: the other rota is gone, this one runs auto now", "ok")
+            self.auto_status = replace(self.auto_status, view_only="")
+            self._start_engine()
+            return
+        if self.auto_status.view_only:
+            return  # already said; keep waiting
+        line = warn_if_not_owner(holder)
+        self.auto_status = replace(self.auto_status, running=False, view_only=line)
+        # At mount the prompt line is not composed yet: say it once it is.
+        self.call_after_refresh(self.say, line, "error")
 
     def _stop_engine(self) -> None:
         engine, self.engine = self.engine, None
@@ -359,6 +384,12 @@ class RotaApp(App):
     def _tick(self) -> None:
         """The scheduled poller only reads the store: the engine fetches."""
         self._start_store_refresh()
+        if (
+            self.engine is None
+            and self.auto_status.view_only
+            and time.time() - self._engine_claimed_at >= self.ENGINE_CLAIM_RETRY_S
+        ):
+            self._claim_engine()
 
     def _start_normal_refresh(self, *, full: bool) -> None:
         if self._normal_refreshing:

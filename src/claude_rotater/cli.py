@@ -265,7 +265,7 @@ Defaults live in settings.json in the backup root; flags override them.
     )
     args = parser.parse_args(argv)
 
-    from claude_rotater.autoswitch import AutoSwitchEngine, AutoSwitchEvent
+    from claude_rotater.autoswitch import AutoSwitchEngine, AutoSwitchEvent, TickOutcome
     from claude_rotater.printer import accent, yellowed
     from claude_rotater.settings import load_settings, merged_with_cli
 
@@ -303,6 +303,22 @@ Defaults live in settings.json in the backup root; flags override them.
             dry_run=args.dry_run,
             feed=FeedIngestor(switcher),
         )
+
+        # One engine per data dir. A dry run writes nothing, so it may run
+        # beside the owner.
+        from claude_rotater.instance import EngineLock, warn_if_not_owner
+
+        engine_lock = EngineLock(switcher.backup_dir)
+        if not args.dry_run:
+            line = warn_if_not_owner(engine_lock.acquire())
+            if line:
+                print(
+                    json.dumps({"event": "engine-busy", "message": line})
+                    if args.json else yellowed(line),
+                    file=sys.stdout if args.json else sys.stderr,
+                    flush=True,
+                )
+                sys.exit(TickOutcome.BLOCKED.value)
 
         if args.once:
             sys.exit(engine.tick().value)

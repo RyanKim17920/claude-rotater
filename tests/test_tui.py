@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import dataclasses
 import json
+import os
 import sys
 import threading
 import time
@@ -2427,6 +2428,26 @@ class TestEngineHosting:
             status = painted(app, "#status")
             assert "auto on · switch → #2" in status and len(status) <= cols
             assert app.prompt._timer is not None  # brief: it clears itself
+
+    async def test_second_rota_on_a_data_dir_is_view_only_then_takes_over(self, tmp_path, fake_engine):
+        from claude_rotater.instance import EngineLock
+
+        other = EngineLock(tmp_path)
+        assert other.acquire() is None  # another rota runs the engine here
+        app = make_app(three_accounts(tmp_path))
+        async with app.run_test(size=(160, 30)) as pilot:
+            await settle(pilot)
+            assert fake_engine.instances == []  # no second engine
+            status = painted(app, "#status")
+            assert "auto view-only" in status
+            assert f"another rota is running (pid {os.getpid()}" in status
+            other.release()
+            app._engine_claimed_at = 0.0  # the retry interval has passed
+            app._tick()
+            await settle(pilot)
+            assert len(fake_engine.instances) == 1
+            assert "auto on" in painted(app, "#status")
+        assert EngineLock(tmp_path).acquire() is None  # released on exit
 
     async def test_auto_pause_shows_in_header_and_on_the_prompt_once(self, tmp_path, fake_engine):
         line = "auto paused: too many switches (4 in the last hour); resumes in 41m"
