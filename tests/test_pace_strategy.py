@@ -1,4 +1,5 @@
-"""Tests for the pace strategy: the pure policy."""
+"""Tests for the pace strategy: the pure policy, a week replay against the
+other strategies, and (further down) its engine wiring."""
 
 from __future__ import annotations
 
@@ -6,6 +7,7 @@ import pytest
 
 from claude_rotater import pace_strategy as ps
 from claude_rotater.expiring_first import AccountView, Choice
+from tests import _week_sim
 
 H = 3600.0
 NOW = 0.0
@@ -352,6 +354,13 @@ class TestFlapping:
         for burn in (0.5, 1.0, 2.0, 3.0, 6.0, 12.0, None, 2.0, 0.8):
             assert choose(b, a, burn=burn).action == "stay"
 
+    def test_a_simulated_walk_moves_rarely(self):
+        """Two accounts through a week of steady work with the policy
+        free to move every ten minutes: moves happen on real events only."""
+        result = _week_sim.simulate("pace", [70.0, 100.0], rate=2.0, weeks=1)
+        per_day = result.switches / 7.0
+        assert per_day <= 4.0
+
 
 class TestRank:
     def test_concentrating_puts_the_leaders_first(self):
@@ -374,3 +383,40 @@ class TestRank:
         ]
         order = ps.rank(pool, threshold=90.0, margin=1.5, burn_pct_per_h=2.0, now=NOW)
         assert order == ["running", "fresh", "busy"]
+
+
+# ---------------------------------------------------------------------------
+# Week replay
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture(scope="module")
+def table():
+    return _week_sim.table(weeks=8)
+
+
+class TestWeekReplay:
+    """Eight simulated weeks per scenario (``tests/_week_sim.py``): pace wastes
+    less weekly quota than expiring-first and best in total, blocks the user
+    less, and is never meaningfully worse in any one scenario."""
+
+    def test_less_waste_and_blocking_in_total(self, table):
+        total = {
+            s: sum(row[s].wasted for row in table.values()) for s in _week_sim.STRATEGIES
+        }
+        blocked = {
+            s: sum(row[s].blocked_h for row in table.values())
+            for s in _week_sim.STRATEGIES
+        }
+        assert total["pace"] < total["expiring-first"] < total["best"], total
+        assert blocked["pace"] < blocked["expiring-first"] < blocked["best"], blocked
+
+    def test_never_much_worse_in_any_scenario(self, table):
+        for name, row in table.items():
+            others = min(row[s].wasted for s in ("expiring-first", "best"))
+            assert row["pace"].wasted <= others * 1.02, (name, row)
+
+    def test_owner_like_staggered_pair(self, table):
+        row = table["2 accounts, resets 50h/20h, demand 95%"]
+        assert row["pace"].wasted < row["expiring-first"].wasted
+        assert row["pace"].wasted < row["best"].wasted
