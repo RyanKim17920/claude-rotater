@@ -18,7 +18,7 @@ Screen {
 #accounts {
     height: auto;
     margin-top: 1;
-    max-height: 60%;
+    max-height: 60%;  /* main.py lifts this to every row the page can spare */
     background: $background;
     padding: 0 1 0 0;
     scrollbar-size-vertical: 1;
@@ -69,7 +69,9 @@ Screen {
     scrollbar-size-vertical: 0;
 }
 
+/* The key strip sits on the bottom row, whatever the page above holds. */
 #actions {
+    dock: bottom;
     height: 1;
     margin-top: 1;
     padding: 0 1;

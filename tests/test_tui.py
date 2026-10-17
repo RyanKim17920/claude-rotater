@@ -1305,10 +1305,10 @@ class TestMainPage:
             await settle(pilot)
             assert fake_calls(app) == []
 
-    @pytest.mark.parametrize("size", [(120, 40), (80, 24), (60, 20)])
+    @pytest.mark.parametrize("size", [(120, 40), (80, 40)])
     async def test_charts_fill_the_spare_height(self, tmp_path, size):
-        """The selected account's charts sit under the table, fill the spare
-        rows up to their cap, and the key strip follows them on screen."""
+        """The selected account's charts sit under the table and fill the
+        spare rows up to their cap; the key strip keeps the bottom row."""
         from claude_rotater.tui.main import CHART_MAX_PLOT
 
         fake = three_accounts(tmp_path)
@@ -1323,20 +1323,42 @@ class TestMainPage:
             side_by_side = size[0] >= 100
             assert len(lines) == min(app.screen.detail_budget(), 1 + (1 if side_by_side else 2) * (1 + CHART_MAX_PLOT))
             actions = app.screen.query_one("#actions")
-            assert actions.region.y == detail.region.bottom + 1
-            assert actions.region.bottom <= size[1]
+            assert actions.region.y >= detail.region.bottom + 1
+            assert actions.region.bottom == size[1]
 
-    @pytest.mark.parametrize("height, shown", [(17, True), (16, False)])
-    async def test_charts_hide_when_too_few_rows_are_spare(self, tmp_path, height, shown):
-        """Three accounts leave height - 8 rows; the charts need 8."""
+    @pytest.mark.parametrize("width, height, shown", [(120, 18, True), (120, 17, False), (80, 27, True), (80, 26, False)])
+    async def test_charts_hide_when_too_few_rows_are_spare(self, tmp_path, width, height, shown):
+        """Three accounts leave height - 8 rows; the charts need 10 side by
+        side and 19 stacked, else they are hidden rather than cramped."""
         fake = three_accounts(tmp_path)
         with_history(fake, burn_history(time.time()))
         app = make_app(fake)
-        async with app.run_test(size=(120, height)) as pilot:
+        async with app.run_test(size=(width, height)) as pilot:
             await settle(pilot)
             assert app.screen.charts_fit() is shown
             assert braille(painted(app, "#detail")) is shown
             assert app.screen.query_one("#actions").region.bottom <= height
+
+    @pytest.mark.parametrize("theme_name", ["dark", "light"])
+    async def test_hidden_charts_give_their_rows_to_the_table(self, tmp_path, theme_name):
+        """80x24 with many accounts: no cramped charts, and every row shows."""
+        from claude_rotater.tui.main import AccountRow
+
+        accounts = [make_account(1, active=True, entry=make_entry(62.0, 31.0))]
+        accounts += [make_account(n, entry=make_entry(10.0 + n, 20.0)) for n in range(2, 16)]
+        fake = FakeSwitcher(accounts, tmp_path)
+        with_history(fake, burn_history(time.time()))
+        from claude_rotater.settings import set_setting
+
+        set_setting(tmp_path, "ui.theme", theme_name)
+        app = make_app(fake)
+        async with app.run_test(size=(80, 24)) as pilot:
+            await settle(pilot)
+            assert not braille(painted(app, "#detail"))
+            listview = app.screen.query_one("#accounts")
+            assert listview.size.height == 15  # not capped at 60% of the screen
+            assert len(app.screen.query(AccountRow)) == 15
+            assert app.screen.query_one("#actions").region.bottom == 24
 
     async def test_charts_resize_with_the_terminal(self, tmp_path):
         fake = three_accounts(tmp_path)
@@ -1452,16 +1474,15 @@ class TestMainPage:
             await settle(pilot)
             first = row_plain(app, "1")
             assert "me@x.com" in first and "62%" in first
-            if size[0] >= 80:  # below the supported widths the countdowns go first
-                assert "1h59m" in first or "2h00m" in first
+            assert "1h59m" in first or "2h00m" in first  # the 5h reset at any width
             assert len(first) <= size[0]
             # every action chip stays on screen
             from textual.widgets import Button
 
             assert all(b.region.right <= size[0] for b in app.screen.query(Button))
-            # the action bar and the plot pane still exist
-            assert app.screen.query_one("#actions") is not None
-            assert painted(app, "#detail")
+            # too few rows for readable charts: hidden, never squeezed
+            assert app.screen.query_one("#actions").region.bottom == size[1]
+            assert not braille(painted(app, "#detail"))
 
     async def test_no_history_says_so_instead_of_guessing(self, tmp_path):
         app = make_app(three_accounts(tmp_path))
@@ -2385,7 +2406,7 @@ class TestChartLines:
         assert all(len(line.plain) <= 120 for line in lines)
 
     def test_stacked_when_narrow(self):
-        lines = [line.plain for line in self._lines(80, 16)]
+        lines = [line.plain for line in self._lines(80, 19)]
         titles = [i for i, line in enumerate(lines) if line.startswith(("5h", "7d"))]
         assert len(titles) == 2 and titles[1] > titles[0] + 3
         assert all(len(line) <= 80 for line in lines)
@@ -2433,12 +2454,15 @@ class TestChartLines:
         assert "5h  unused" in title and "7d  at limit" in title and "~" not in title
 
     def test_hidden_below_the_minimum_and_capped_above(self):
-        from claude_rotater.tui.main import CHART_MAX_PLOT, CHART_MIN_ROWS
+        from claude_rotater.tui.main import CHART_MAX_PLOT, chart_min_rows
 
-        assert self._lines(120, CHART_MIN_ROWS - 1) == []
-        assert len(self._lines(120, CHART_MIN_ROWS)) == CHART_MIN_ROWS
+        side = chart_min_rows(120)
+        assert side == 10 and chart_min_rows(80) == 19
+        assert self._lines(120, side - 1) == []
+        assert len(self._lines(120, side)) == side
         assert len(self._lines(120, 30)) == 2 + CHART_MAX_PLOT
         assert len(self._lines(120, 12)) == 12  # fills what is spare
+        assert self._lines(80, 18) == [] and len(self._lines(80, 19)) == 19  # stacked
 
     def test_dead_login_has_no_charts(self):
         from claude_rotater.json_output import USAGE_RELOGIN_REQUIRED
@@ -2698,7 +2722,7 @@ class TestWidths:
             if size[0] <= 60:
                 assert "Acme" not in work  # the org goes before the name shrinks
 
-    @pytest.mark.parametrize("size", [(80, 24), (120, 40), (160, 50)])
+    @pytest.mark.parametrize("size", [(80, 30), (120, 40), (160, 50)])
     async def test_main_page_fits_with_table_and_charts(self, tmp_path, size):
         from textual.widgets import Button
 

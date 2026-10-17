@@ -18,7 +18,7 @@ Layout, top to bottom, as tall as the terminal allows:
 - a line naming the highlighted account, then its 5h and 7d charts (measured history solid, the
   projection dotted and coloured by outcome, the threshold line, the reset at the right
   edge), filling the spare height and hidden when fewer than
-  :data:`CHART_MIN_ROWS` rows are spare.
+  :func:`chart_min_rows` rows are spare (the rows then get the room).
   ``h`` swaps in the long-term view (past 5h peaks, the 7d curve across
   weeks);
 - a 3-line log of recent non-routine engine events (hidden until the first);
@@ -48,6 +48,7 @@ from rich.text import Text
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal
+from textual.css.scalar import Scalar
 from textual.screen import Screen
 from textual.widgets import Button, ListItem, ListView, RichLog, Static
 
@@ -745,10 +746,27 @@ def account_row_text(
 # Charts: the selected account's 5h and 7d windows
 # ---------------------------------------------------------------------------
 
-# Below this many spare rows the charts are hidden; above it they fill the
-# spare height up to a cap.
-CHART_MIN_ROWS = 9  # the account line, then 2 x (title + a 3-line plot) when stacked
+# Two graphs sit side by side from this pane width; below it they stack.
+SIDE_BY_SIDE_MIN_WIDTH = 100
+# A chart shorter than this many lines (its time axis included) is too
+# cramped to read, so the charts are hidden instead and the rows get the room.
+CHART_MIN_PLOT = 8
 CHART_MAX_PLOT = 14
+
+
+def chart_min_rows(width: int, n_blocks: int = 2) -> int:
+    """Spare rows the charts need at ``width``: the account line, then each
+    chart's title and a :data:`CHART_MIN_PLOT` plot, side by side on a wide
+    pane (10 rows) or stacked on a narrow one (19)."""
+    if n_blocks <= 0:
+        return 0
+    per_block = 1 + CHART_MIN_PLOT
+    if n_blocks == 2 and width >= SIDE_BY_SIDE_MIN_WIDTH:
+        return 1 + per_block
+    return 1 + n_blocks * per_block
+
+
+CHART_MIN_ROWS = chart_min_rows(SIDE_BY_SIDE_MIN_WIDTH)  # the least they ever need
 
 
 def _measured_window(
@@ -865,12 +883,13 @@ def chart_lines(
     height: int,
     palette: Palette = Palette.DARK,
 ) -> list[Text]:
-    """The charts in at most ``height`` lines, or none below :data:`CHART_MIN_ROWS`:
-    a line naming the account they belong to, then the 5h and 7d charts."""
+    """The charts in at most ``height`` lines, or none when fewer than
+    :func:`chart_min_rows` are spare: a line naming the account they belong
+    to, then the 5h and 7d charts."""
     if acc is None or height < CHART_MIN_ROWS:
         return []
     blocks = chart_blocks(acc, est, series, now=now, threshold=threshold, palette=palette)
-    if not blocks:
+    if not blocks or height < chart_min_rows(width, len(blocks)):
         return []
     title = Text(f"{CURSOR_MARK} ", style=f"bold {palette.accent}", no_wrap=True)
     title.append(account_title(acc, palette))
@@ -881,8 +900,6 @@ def chart_lines(
 # History view (h): the long-term view
 # ---------------------------------------------------------------------------
 
-# Two graphs sit side by side from this pane width; below it they stack.
-SIDE_BY_SIDE_MIN_WIDTH = 100
 _SIDE_GAP = 3
 # Graph heights are capped, so the history view is sized to what it shows
 # and never turns into a wall on a tall terminal.
@@ -1206,24 +1223,37 @@ class MainScreen(Screen):
             warn_tag_need=max(warn_tags, default=0),
         )
 
+    def _chrome_rows(self) -> int:
+        """Rows everything but the table and the pane under it takes."""
+        log = self.query_one("#event-log")
+        return (
+            1  # status band
+            + 1  # table margin
+            + 1  # detail margin
+            + 2  # key strip + its margin
+            + (log.outer_size.height or 3 if log.display else 0)
+        )
+
+    def _fit_table(self) -> None:
+        """Let the table take every row the page can spare: with the charts
+        hidden the rows get the room, and a long list scrolls instead of
+        pushing the key strip off screen."""
+        listview = self.query_one("#accounts", ListView)
+        rows = max(1, self.size.height - self._chrome_rows())
+        if listview.styles.max_height != Scalar.parse(str(rows)):
+            listview.styles.max_height = rows
+
     def detail_budget(self) -> int:
         """Lines the pane under the table may take so the page fits the
         terminal: the screen minus the header, table, event log and key strip."""
         listview = self.query_one("#accounts", ListView)
         rows = listview.outer_size.height or len(listview.children)
-        log = self.query_one("#event-log")
-        used = (
-            1  # status band
-            + 1  # table margin
-            + rows
-            + 1  # detail margin
-            + 2  # key strip + its margin
-            + (log.outer_size.height or 3 if log.display else 0)
-        )
-        return max(0, self.size.height - used)
+        return max(0, self.size.height - self._chrome_rows() - rows)
 
     def charts_fit(self) -> bool:
-        return self.detail_budget() >= CHART_MIN_ROWS
+        detail = self.query_one("#detail")
+        width = detail.size.width or max(1, self.size.width - 2)
+        return self.detail_budget() >= chart_min_rows(width)
 
     # -- painters (called from widget render) ---------------------------------
 
@@ -1298,6 +1328,7 @@ class MainScreen(Screen):
     # -- refresh ---------------------------------------------------------------
 
     def repaint(self) -> None:
+        self._fit_table()
         self.query_one("#status").refresh()
         self._repaint_detail()
         for row in self.query(AccountRow):
