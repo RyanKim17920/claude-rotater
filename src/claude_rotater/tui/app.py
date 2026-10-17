@@ -19,6 +19,7 @@ toast.
 from __future__ import annotations
 
 import json
+import logging
 import threading
 import time
 from dataclasses import replace
@@ -36,6 +37,7 @@ from claude_rotater.estimator import AccountEstimate, estimate_account
 from claude_rotater import statusline_setup
 from claude_rotater.exceptions import ClaudeSwitchError, LoginError
 from claude_rotater.login import StagedLogin
+from claude_rotater.logging_config import redact
 from claude_rotater.token_refresh import RefreshEvent, TokenRefresher
 from claude_rotater.models import AccountsSnapshot
 from claude_rotater.settings import (
@@ -65,6 +67,15 @@ from claude_rotater.tui.main import (
 from claude_rotater.tui.prompt import Choice, PromptLine
 from claude_rotater.tui.theme import ROTA_DARK, ROTA_LIGHT
 from claude_rotater.usage_history import Point
+
+
+_logger = logging.getLogger("rota")
+
+
+def _log_login_failure(e: BaseException) -> None:
+    """Record why a login did not land: the exception's class and its
+    message, with emails and tokens masked."""
+    _logger.warning("Login failed: %s: %s", type(e).__name__, redact(e))
 
 
 class EngineLike(Protocol):
@@ -560,7 +571,12 @@ class RotaApp(App):
                 self.say(f"{lane} failed: {msg}", "warn")
         elif event.worker.group == "action":
             self.busy = False
-            self.say(f"action failed: {event.worker.error}", "error")
+            error = event.worker.error
+            _logger.error(
+                "Action failed: %s: %s: %s",
+                event.worker.name, type(error).__name__, redact(error),
+            )
+            self.say(f"action failed: {error}", "error")
         elif event.worker.group == "refresher":
             self.say(f"token refresher stopped: {event.worker.error}", "error")
         elif event.worker.group == "engine":
@@ -593,6 +609,7 @@ class RotaApp(App):
         self.request_refresh()
         if not result.ok:
             detail = result.first_line.removeprefix("Error:").strip() or "no output"
+            _logger.warning("Action failed: %s: %s", label, redact(detail))
             self.say(f"{label.lower()} failed: {detail}", "error")
             return
         payload = result.payload or {}
@@ -690,6 +707,7 @@ class RotaApp(App):
         if self.busy:
             self.say("another action is still running", "warn")
             return
+        _logger.info("Login started: %s", self._login_target(email))
         # Seen at once, and still on screen when the app comes back.
         self.say(f"logging in {email or 'an account'}…")
         stage = self._login_factory(self.switcher.backup_dir)
@@ -697,23 +715,43 @@ class RotaApp(App):
             with self.suspend():
                 print(self.LOGIN_BANNER.format(who=email or "an account"), flush=True)
                 stage.authenticate(email=email)
-        except SuspendNotSupported:
+        except SuspendNotSupported as e:
             stage.cleanup()
+            _log_login_failure(e)
             self.say("logging in needs a real terminal (the app could not suspend)", "error")
             return
         except LoginError as e:
             stage.cleanup()
+            _log_login_failure(e)
             self.say(f"log in: {e}", "warn")
             return
-        except BaseException:
+        except BaseException as e:
             stage.cleanup()
+            _log_login_failure(e)
             raise
         self._start_action("Log in", partial(self._import_login, stage), show_output=True)
+
+    def _login_target(self, email: str | None) -> str:
+        """What a login is for, by slot number only (rota.log never holds
+        an email)."""
+        if email is None:
+            return "any account"
+        snap = self.snapshot
+        number = next(
+            (a.number for a in (snap.accounts if snap else ()) if a.email == email),
+            None,
+        )
+        return f"re-login of slot {number}" if number else "re-login of an account"
 
     def _import_login(self, stage: StagedLogin) -> None:
         """Worker thread: store the staged login, then always drop the stage."""
         try:
             stage.import_into(self.switcher)
+        except BaseException as e:
+            _log_login_failure(e)
+            raise
+        else:
+            _logger.info("Login finished")
         finally:
             stage.cleanup()
 

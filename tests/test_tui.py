@@ -2057,6 +2057,89 @@ class TestLoginAction:
             assert FakeStage.instances[0].events[-1] == ("cleanup",)
             assert prompt_plain(app) == "log in failed: is the active account"
 
+    @staticmethod
+    def _rota_lines(caplog) -> list[str]:
+        lines = [r.getMessage() for r in caplog.records if r.name == "rota"]
+        for line in lines:  # rota.log never holds an email or a token
+            assert "@" not in line and "sk-ant-" not in line, line
+        return lines
+
+    async def test_login_attempt_and_success_are_logged(self, tmp_path, monkeypatch, caplog):
+        caplog.set_level("INFO", logger="rota")
+        app, _ = login_app(three_accounts(tmp_path), monkeypatch)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await settle(pilot)
+            await pilot.press("l")
+            await settle(pilot)
+        lines = self._rota_lines(caplog)
+        assert "Login started: any account" in lines
+        assert "Login finished" in lines
+
+    async def test_relogin_attempt_is_logged_by_slot(self, tmp_path, monkeypatch, caplog):
+        from claude_rotater.json_output import USAGE_RELOGIN_REQUIRED
+
+        caplog.set_level("INFO", logger="rota")
+        fake = FakeSwitcher(
+            [
+                make_account(1, active=True, entry=make_entry(10.0, 10.0), email="me@x.com"),
+                make_account(2, entry=UsageEntry(sentinel=USAGE_RELOGIN_REQUIRED), email="dead@y.com"),
+            ],
+            tmp_path,
+        )
+        app, _ = login_app(fake, monkeypatch)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await settle(pilot)
+            await pilot.press("down", "l")
+            await settle(pilot)
+        assert "Login started: re-login of slot 2" in self._rota_lines(caplog)
+
+    @pytest.mark.parametrize("cancelled", [True, False], ids=["cancel", "failure"])
+    async def test_authenticate_failure_is_logged(self, tmp_path, monkeypatch, caplog, cancelled):
+        from claude_rotater.exceptions import LoginCancelled, LoginError
+
+        caplog.set_level("INFO", logger="rota")
+        exc = (LoginCancelled("Login cancelled") if cancelled
+               else LoginError("no login for who@x.com"))
+        app, _ = login_app(three_accounts(tmp_path), monkeypatch, fail=exc)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await settle(pilot)
+            await pilot.press("l")
+            await settle(pilot)
+        expected = ("Login failed: LoginCancelled: Login cancelled" if cancelled
+                    else "Login failed: LoginError: no login for <email>")
+        assert expected in self._rota_lines(caplog)
+
+    async def test_no_terminal_is_logged(self, tmp_path, monkeypatch, caplog):
+        caplog.set_level("INFO", logger="rota")
+        app, _ = login_app(three_accounts(tmp_path), monkeypatch, suspend_ok=False)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await settle(pilot)
+            await pilot.press("l")
+            await settle(pilot)
+        assert any(
+            m.startswith("Login failed: SuspendNotSupported")
+            for m in self._rota_lines(caplog)
+        )
+
+    async def test_import_failure_is_logged(self, tmp_path, monkeypatch, caplog):
+        from claude_rotater.exceptions import ValidationError
+
+        caplog.set_level("INFO", logger="rota")
+        app, _ = login_app(three_accounts(tmp_path), monkeypatch)
+
+        def boom(self, switcher, **_kw):
+            raise ValidationError("me@x.com token sk-ant-oat01-abc rejected")
+
+        monkeypatch.setattr(FakeStage, "import_into", boom)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await settle(pilot)
+            await pilot.press("l")
+            await settle(pilot)
+        lines = self._rota_lines(caplog)
+        assert "Login failed: ValidationError: <email> token <token> rejected" in lines
+        assert "Action failed: Log in: <email> token <token> rejected" in lines
+        assert "Login finished" not in lines
+
     async def test_busy_app_does_not_start_a_login(self, tmp_path, monkeypatch):
         app, _ = login_app(three_accounts(tmp_path), monkeypatch)
         async with app.run_test(size=(120, 40)) as pilot:
