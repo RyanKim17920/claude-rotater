@@ -174,14 +174,24 @@ class _Fleet:
             f"(needs {self.pace(view)})"
         )
 
+    def using_first(self, view: AccountView) -> str:
+        """``#2's 5h resets in 25m with 80% left — using it first``: why a
+        spreading fleet stays on a 5h window that still has room."""
+        left = f"{view.five_hour_headroom:.0f}% left"
+        if view.five_hour_reset is None:
+            return f"#{view.number}'s 5h has {left} — using it first"
+        when = fmt_duration(view.five_hour_reset - self.now)
+        return f"#{view.number}'s 5h resets in {when} with {left} — using it first"
+
     def why_spread(self) -> str:
+        """Why no account's weekly quota calls for concentrating on it."""
         if self.burn_covers_all:
             vs = f" vs burn {self.burn:.1f}%/h" if self.burn else ""
-            return f"all resets far (pace need ≤{self.top_need:.1f}%/h{vs})"
+            return f"no 7d reset is close (needs ≤{self.top_need:.1f}%/h{vs})"
         low = f"{min(self.need[v.number] for v in self.pool):.1f}"
         high = f"{self.top_need:.1f}"
         span = high if low == high else f"{low}–{high}"
-        return f"no account stands out (pace need {span}%/h)"
+        return f"7d needs similar ({span}%/h)"
 
 
 def choose(
@@ -221,7 +231,7 @@ def choose(
     if active in fleet.group:
         if fleet.roomy(active):
             if fleet.spreading:
-                return stay(f"spreading — {fleet.why_spread()}; 5h {five_used:.0f}% used")
+                return stay(f"{fleet.using_first(active)}; {fleet.why_spread()}")
             rivals = [v for v in fleet.group if v.number != me]
             rest = fleet.by_need([v for v in others if v not in fleet.group])
             vs = f", next #{rest[0].number} {fleet.pace(rest[0])}" if rest else ""

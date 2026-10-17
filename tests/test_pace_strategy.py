@@ -103,7 +103,26 @@ class TestOwnersCase:
         # so A's running 5h window is used instead of opening B's.
         choice = choose(view("a", **self.A), view("b", **self.B), burn=6.0)
         assert choice.action == "stay"
-        assert choice.reason.startswith("stay: spreading — all resets far")
+        assert choice.reason.startswith("stay: #a's 5h resets in 3h with 98% left — using it first; no 7d reset is close")
+
+
+class TestStaysOnARunning5hWindow:
+    """Work profile, 2026-10-17: on #2 (5h 20% resetting in 25m, 7d 28%
+    resetting in 5d8h) beside an idle #3 (5h 0%, 7d 1%, resets in 5d21h),
+    threshold 99.9. Weekly needs are similar (0.6 vs 0.7%/h), so pace
+    spreads: it uses up #2's running 5h window, which resets in 25 minutes
+    anyway, and keeps #3's fresh window in reserve. The line says so."""
+
+    def test_stays_and_says_why_in_plain_words(self):
+        on_2 = view("2", seven=28, reset_h=5 * 24 + 8, five=20, five_reset_h=25 / 60)
+        idle_3 = view("3", seven=1, reset_h=5 * 24 + 21)
+        for burn in (None, 1.0):
+            choice = choose(on_2, idle_3, burn=burn, threshold=99.9)
+            assert choice == Choice(
+                "stay", "2",
+                "stay: #2's 5h resets in 25m with 80% left — using it first; "
+                "7d needs similar (0.6–0.7%/h)",
+            )
 
 
 @pytest.mark.parametrize(
@@ -114,15 +133,15 @@ class TestOwnersCase:
             view("1", seven=10, reset_h=150, five=30),
             [view("2", seven=5, reset_h=160)],
             None, "stay", "1",
-            "stay: spreading — no account stands out (pace need 0.5%/h); 5h 30% used",
+            "stay: #1's 5h resets in 3h with 70% left — using it first; 7d needs similar (0.5%/h)",
             id="start-of-week-no-burn",
         ),
         pytest.param(
             view("1", seven=10, reset_h=150, five=30),
             [view("2", seven=5, reset_h=160)],
             2.0, "stay", "1",
-            "stay: spreading — all resets far (pace need ≤0.5%/h vs burn 2.0%/h); "
-            "5h 30% used",
+            "stay: #1's 5h resets in 3h with 70% left — using it first; "
+            "no 7d reset is close (needs ≤0.5%/h vs burn 2.0%/h)",
             id="start-of-week-with-burn",
         ),
         pytest.param(
@@ -130,7 +149,7 @@ class TestOwnersCase:
             # but the user's 2%/h would empty either in time.
             view("1", seven=50, reset_h=150, five=30),
             [view("2", seven=0, reset_h=110)],
-            2.0, "stay", "1", "stay: spreading — all resets far",
+            2.0, "stay", "1", "no 7d reset is close",
             id="start-of-week-burn-covers-a-dominant-need",
         ),
         pytest.param(
@@ -145,14 +164,14 @@ class TestOwnersCase:
         pytest.param(
             view("1", seven=50, reset_h=80, five=30),
             [view("2", seven=40, reset_h=100)],
-            None, "stay", "1", "no account stands out (pace need 0.5%/h)",
+            None, "stay", "1", "7d needs similar (0.5%/h)",
             id="mid-week-tie",
         ),
         pytest.param(
             # 0.7 vs 0.5: a 1.4x lead is under the 1.5x margin.
             view("1", seven=50, reset_h=80, five=30),
             [view("2", seven=55, reset_h=50)],
-            None, "stay", "1", "pace need 0.5–0.7%/h",
+            None, "stay", "1", "7d needs similar (0.5–0.7%/h)",
             id="mid-week-lead-under-margin",
         ),
         pytest.param(
@@ -190,7 +209,7 @@ class TestOwnersCase:
             # Sooner but implausible: 30 minutes at 2%/h absorbs 1 point.
             view("1", seven=40, reset_h=100),
             [view("2", seven=40, reset_h=0.5)],
-            2.0, "stay", "1", "stay: spreading",
+            2.0, "stay", "1", "stay: #1's 5h has 100% left — using it first",
             id="near-reset-implausible",
         ),
         pytest.param(
@@ -260,14 +279,14 @@ class TestOwnersCase:
             # 5h room is never a reason to open a fresh window while spreading.
             view("1", seven=10, reset_h=150, five=60),
             [view("2", seven=5, reset_h=160)],
-            None, "stay", "1", "spreading",
+            None, "stay", "1", "stay: #1's 5h resets in 3h with 40% left — using it first",
             id="5h-room-left-no-fresh-window",
         ),
         # -- gates --------------------------------------------------------------
         pytest.param(
             view("1", seven=40, reset_h=100),
             [view("2", seven=10, reset_h=None)],
-            None, "stay", "1", "spreading", id="candidate-reset-unknown",
+            None, "stay", "1", "using it first", id="candidate-reset-unknown",
         ),
         pytest.param(
             view("1", seven=40, reset_h=None),
@@ -283,7 +302,7 @@ class TestOwnersCase:
             # 3 points to the threshold: under the 5 a move must be worth.
             view("1", seven=50, reset_h=100, five=10),
             [view("2", seven=87, reset_h=5)],
-            None, "stay", "1", "stay: spreading", id="candidate-nothing-to-absorb",
+            None, "stay", "1", "using it first", id="candidate-nothing-to-absorb",
         ),
     ],
 )
@@ -496,7 +515,7 @@ class TestEngine:
             "3": usage_at(now, seven=0, reset_h=165, five=0, five_reset_h=None),
         }
         assert h.tick_with_usage(u) is TickOutcome.NO_ACTION
-        assert no_switch(h)[-1].detail.startswith("stay: spreading — ")
+        assert no_switch(h)[-1].detail.startswith("stay: #1's 5h resets in ")
         u["1"] = usage_at(now, seven=10, reset_h=150, five=75)
         assert confirmed(h, u) is TickOutcome.SWITCHED
         assert h.active_number() == 2  # #3's fresh window stays in reserve
@@ -604,7 +623,7 @@ class TestEngine:
         h.clock.now = start + 6 * H
         assert h.engine._burn_rate("1", h.clock.now) == pytest.approx(6.0, rel=0.05)
         assert h.tick_with_usage(fleet(h.clock.now)) is TickOutcome.NO_ACTION
-        assert no_switch(h)[-1].detail.startswith("stay: spreading — all resets far")
+        assert "using it first; no 7d reset is close" in no_switch(h)[-1].detail
 
     def test_walk_does_not_flap(self, temp_home):
         """Sixty ticks with jittering 5h readings: one move, then it holds."""
