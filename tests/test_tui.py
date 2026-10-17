@@ -867,7 +867,10 @@ class TestStatusText:
 
         assert SEV_CRIT in pip_style  # the 95% account glows red in the roster
 
-    @pytest.mark.parametrize("state,words", [("live", "● feed live"), ("stale", "◐ feed stale"), ("off", "○ feed off")])
+    @pytest.mark.parametrize(
+        "state,words",
+        [("live", "● feed live"), ("stale", "◐ feed stale"), ("off", "○ feed off"), ("unset", "○ feed: not set up")],
+    )
     def test_feed_indicator(self, state, words):
         from claude_rotater.tui.main import status_text
 

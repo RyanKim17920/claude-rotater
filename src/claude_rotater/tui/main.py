@@ -130,6 +130,7 @@ FEED_LABELS = {
     "live": ("●", "sev_ok", "feed live"),
     "stale": ("◐", "sev_warn", "feed stale"),
     "off": ("○", "muted", "feed off"),
+    "unset": ("○", "sev_warn", "feed: not set up"),
 }
 
 

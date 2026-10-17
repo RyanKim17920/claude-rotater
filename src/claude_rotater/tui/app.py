@@ -108,7 +108,7 @@ class RotaApp(App):
     estimates: reactive[dict[str, AccountEstimate]] = reactive(dict, always_update=True)
     series: dict[str, dict[str, list[Point]]]
     auto_status: reactive[AutoStatus] = reactive(AutoStatus, always_update=True)
-    # "live" / "stale" / "off" for the statusline feed; "" until first read.
+    # "live" / "stale" / "off" / "unset" for the statusline feed; "" until first read.
     feed_state: reactive[str] = reactive("")
     feed_installed = False
     # "not-installed" / "installed" / "foreign" (someone else's statusline).

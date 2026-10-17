@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shlex
 import shutil
 import sys
@@ -62,7 +63,10 @@ class StatuslineSetupError(Exception):
 @dataclass(frozen=True)
 class StatuslineStatus:
     install: str  # NOT_INSTALLED | INSTALLED | FOREIGN (someone else's statusline)
-    state: str  # "live" (feed recent) | "stale" (installed, feed quiet) | "off"
+    # "live" (feed recent) | "stale" (installed, feed quiet) | "off" |
+    # "unset" (installed, but the data dir the command feeds does not exist,
+    # so ``rota feed`` quietly records nothing)
+    state: str
     settings_path: Path
     command: str | None  # the current statusLine command, if any
     last_feed_at: float | None  # mtime of the feed file, if any
@@ -90,14 +94,19 @@ def _backup_root(backup_dir: Path | None) -> Path:
     return paths.get_backup_root()
 
 
-def feed_command() -> str:
-    """The shell words that run ``rota feed`` for this install and data dir."""
+def feed_command(backup_dir: Path | None = None) -> str:
+    """The shell words that run ``rota feed`` for this install and data dir.
+
+    A data dir other than ``~/.rota`` is named with ``ROTA_HOME=``, since
+    Claude Code runs the statusline without rota's environment."""
+    from claude_rotater import paths
+
     exe = shutil.which("rota")
     words = [exe] if exe else [sys.executable, "-m", "claude_rotater"]
     command = " ".join(shlex.quote(w) for w in words) + " feed"
-    rota_home = os.environ.get("ROTA_HOME")
-    if rota_home:
-        command = f"ROTA_HOME={shlex.quote(rota_home)} {command}"
+    root = os.path.normpath(os.path.abspath(_backup_root(backup_dir)))
+    if root != os.path.normpath(os.path.abspath(paths.get_default_backup_root())):
+        command = f"ROTA_HOME={shlex.quote(root)} {command}"
     return command
 
 
@@ -124,6 +133,26 @@ def unwrap(command: str) -> str | None:
 
 def _is_default(command: str) -> bool:
     return command.endswith(_DEFAULT_TAIL)
+
+
+_ROTA_HOME_RE = re.compile(r"""(?:^|[\s;&|({])ROTA_HOME=('[^']*'|"[^"]*"|[^\s;&|)]+)""")
+
+
+def feed_target(command: str) -> Path:
+    """The data dir ``rota feed`` in ``command`` writes to: the ``ROTA_HOME=``
+    the command sets (as :func:`feed_command` writes it), else ``~/.rota``.
+    rota never exports ``ROTA_HOME`` to Claude Code, so nothing else sets it."""
+    from claude_rotater import paths
+
+    match = _ROTA_HOME_RE.search(command)
+    if match is None:
+        return paths.get_default_backup_root()
+    try:
+        words = shlex.split(match.group(1))
+    except ValueError:
+        words = [match.group(1)]
+    value = words[0] if words else ""
+    return Path(os.path.expanduser(value)) if value else paths.get_default_backup_root()
 
 
 def _classify(command: str | None) -> str:
@@ -269,6 +298,8 @@ def status(backup_dir: Path | None = None, *, now: float | None = None) -> Statu
         current = time.time() if now is None else now
         fresh = last_feed_at is not None and current - last_feed_at <= poll_policy.FEED_STALE_S
         state = "live" if fresh else "stale"
+        if not fresh and command and not os.path.isdir(feed_target(command)):
+            state = "unset"  # `rota feed` exits 0 and records nothing
     return StatuslineStatus(install, state, path, command, last_feed_at)
 
 
@@ -281,10 +312,13 @@ def install(backup_dir: Path | None = None) -> StatuslineStatus:
     if _classify(command) != INSTALLED:
         line = settings.get("statusLine")
         if command:
-            settings["statusLine"] = {**line, "command": wrap(command)}
+            settings["statusLine"] = {**line, "command": wrap(command, feed_command(backup_dir))}
         else:
             # A statusLine object without a usable command is replaced whole.
-            settings["statusLine"] = {"type": "command", "command": default_command()}
+            settings["statusLine"] = {
+                "type": "command",
+                "command": default_command(feed_command(backup_dir)),
+            }
         _write(path, settings, raw, backup_dir)
     return status(backup_dir)
 

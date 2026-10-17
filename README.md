@@ -77,6 +77,10 @@ or put `rota feed --tee` in front of an existing command:
 `"command": "rota feed --tee | ~/.claude/statusline.sh"`. With no statusline
 yet, `rota feed --line` is one: it prints the model and 5h/7d usage.
 `rota feed` never fails, so it cannot break your statusline.
+It also exits quietly without recording anything when the data dir it feeds
+(`ROTA_HOME` in the command, else `~/.rota`) does not exist; the TUI header
+then says `feed: not set up`, and `s` sets the statusline up for the TUI's own
+data dir.
 
 ## Data and profiles
 

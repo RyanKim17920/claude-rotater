@@ -264,3 +264,63 @@ class TestCareWithUserFiles:
             ss.install(data)
         assert path.read_text() == before
         assert not list(path.parent.glob(".settings.*.tmp"))
+
+
+class TestFeedNotSetUp:
+    """`rota feed` exits 0 and records nothing when the data dir it feeds is
+    missing; status() reports that as "unset" instead of a quiet "stale"."""
+
+    def test_missing_target_dir_is_unset(self, env, tmp_path):
+        path, data = env
+        gone = tmp_path / "no-such-profile"
+        write_settings(path, {"statusLine": {"type": "command",
+                                             "command": f"ROTA_HOME={gone} rota feed --line # rota-statusline"}})
+        assert ss.status(data).state == "unset"
+        gone.mkdir()
+        assert ss.status(data).state == "stale"
+
+    def test_live_feed_wins_over_the_dir_check(self, env, tmp_path):
+        path, data = env
+        write_settings(path, {"statusLine": {"type": "command",
+                                             "command": f"ROTA_HOME={tmp_path / 'gone'} rota feed --tee | x.sh"}})
+        feed.append_record(feed.feed_path(data), {"t": 1.0, "five_hour": {"pct": 1.0}})
+        mtime = os.stat(feed.feed_path(data)).st_mtime
+        assert ss.status(data, now=mtime + 10).state == "live"
+
+    @pytest.mark.parametrize(
+        "command, expected",
+        [
+            ("ROTA_HOME=/a/b rota feed", "/a/b"),
+            ("ROTA_HOME='/a b/c' rota feed", "/a b/c"),
+            ('x | { ROTA_HOME="/q" /bin/rota feed; }', "/q"),
+            ("ROTA_HOME=~/work rota feed", "~/work"),
+        ],
+    )
+    def test_feed_target_reads_rota_home(self, command, expected):
+        assert ss.feed_target(command) == Path(os.path.expanduser(expected))
+
+    def test_feed_target_defaults_to_home_rota(self):
+        from claude_rotater import paths
+
+        assert ss.feed_target("rota feed --tee | x.sh") == paths.get_default_backup_root()
+        assert ss.feed_target("MY_ROTA_HOME=/x rota feed") == paths.get_default_backup_root()
+
+    def test_installed_command_round_trips(self, env):
+        _path, data = env
+        st = ss.install(data)
+        assert ss.feed_target(st.command) == data
+        assert st.state == "stale"
+
+    def test_install_feeds_the_given_data_dir_without_rota_home(self, env, tmp_path, monkeypatch):
+        """The TUI installs for its own data dir, whatever the environment says."""
+        monkeypatch.delenv("ROTA_HOME")
+        other = tmp_path / "other"
+        other.mkdir()
+        st = ss.install(other)
+        assert f"ROTA_HOME={other}" in st.command and ss.feed_target(st.command) == other
+
+    def test_default_data_dir_needs_no_rota_home(self, env, monkeypatch):
+        from claude_rotater import paths
+
+        monkeypatch.delenv("ROTA_HOME")
+        assert "ROTA_HOME" not in ss.feed_command(paths.get_default_backup_root())
