@@ -22,6 +22,14 @@ whose refresh token is dead gets quarantined instead of activated. When the
 active account's own usage becomes unreadable for ``unhealthy_ticks``
 consecutive ticks, the engine fails over to any healthy candidate.
 
+The ``expiring-first`` strategy (the default) also moves BELOW the threshold:
+it keeps the user on the account whose weekly quota expires soonest, and
+balances 5-hour windows between accounts whose weekly resets are similar —
+see ``expiring_first.py``. Its proactive moves wait out the cooldown and,
+after a manual switch, ``manual_hold_minutes``; at the threshold it only
+re-orders the targets the usual gates admit. Every verdict, any strategy,
+is kept as one line in ``AutoSwitchEngine.last_decision``.
+
 Cooldown and quarantine persist in ``<backup_root>/autoswitch_state.json``
 (so cron-driven ``rota auto --once`` ticks behave across processes), mutated
 read-modify-write under a dedicated file lock.
@@ -41,7 +49,8 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, ClassVar
 
-from claude_rotater import oauth, poll_policy
+from claude_rotater import expiring_first, oauth, poll_policy
+from claude_rotater.estimator import estimate_window
 from claude_rotater.exceptions import ClaudeSwitchError
 from claude_rotater.json_output import (
     SCHEMA_VERSION,
@@ -377,22 +386,29 @@ class PollEvent(AutoSwitchEvent):
 @dataclass(frozen=True)
 class SwitchEvent(AutoSwitchEvent):
     kind: ClassVar[str] = "switch"
-    # "proactive" | "at-limit" | "failover" | "consume-first" | "repair"
-    # ("repair": the active account re-activated from its own backup).
+    # "proactive" | "at-limit" | "failover" | "consume-first" |
+    # "expiring-first" | "repair" ("repair": the active account re-activated
+    # from its own backup).
     trigger: str
     from_ref: dict | None
     to_ref: dict | None
     warnings: list[str] = field(default_factory=list)
     dry_run: bool = False
+    # One line on why, when the strategy explains itself (expiring-first's
+    # "switch → #2: ..."). Additive field, omitted from JSON when empty.
+    reason: str = ""
 
     def _fields(self) -> dict:
-        return {
+        fields = {
             "trigger": self.trigger,
             "from": self.from_ref,
             "to": self.to_ref,
             "warnings": self.warnings,
             "dryRun": self.dry_run,
         }
+        if self.reason:
+            fields["reason"] = self.reason
+        return fields
 
     def human(self) -> str:
         src = (
@@ -404,7 +420,8 @@ class SwitchEvent(AutoSwitchEvent):
             else "?"
         )
         prefix = "[dry-run] would switch" if self.dry_run else "Switched"
-        return f"{prefix} {src} -> {dst} ({self.trigger})"
+        tail = f": {self.reason}" if self.reason else ""
+        return f"{prefix} {src} -> {dst} ({self.trigger}{tail})"
 
 
 @dataclass(frozen=True)
@@ -507,9 +524,65 @@ class ConfigWarningEvent(AutoSwitchEvent):
         return f"warning: {self.message}"
 
 
+# A NoSwitchEvent with this reason carries a strategy's own one-line verdict
+# in ``detail`` ("stay: resets soonest (19h40m), 37% headroom").
+STAY_REASON = "stay"
+# NoSwitchEvent reasons whose ``detail`` is already a full "stay: ..." line.
+_SELF_EXPLAINED = (STAY_REASON, "manual-hold")
+
+
+@dataclass(frozen=True)
+class Decision:
+    """The engine's latest switch/no-switch verdict, in one line.
+
+    ``action`` is ``"switch"`` or ``"stay"``; ``line`` is what a UI shows
+    ("stay: resets soonest (19h40m), 37% headroom", "switch → #2: ...");
+    ``target`` is the account switched to (None for a stay); ``ts`` is the
+    event's ISO time. Read it as ``AutoSwitchEngine.last_decision``, or derive
+    it from any event with :func:`decision_from_event`.
+    """
+
+    action: str
+    line: str
+    ts: str
+    target: str | None = None
+
+    def to_json(self) -> dict:
+        return {
+            "action": self.action,
+            "line": self.line,
+            "ts": self.ts,
+            "target": self.target,
+        }
+
+
+def decision_from_event(event: AutoSwitchEvent) -> Decision | None:
+    """The verdict an event records, or None for events that decide nothing
+    (polls, sleeps, quarantines, errors)."""
+    if isinstance(event, SwitchEvent):
+        target = (event.to_ref or {}).get("number")
+        return Decision(
+            action="switch",
+            line=event.reason or event.human(),
+            ts=event.ts,
+            target=None if target is None else str(target),
+        )
+    if isinstance(event, NoSwitchEvent):
+        line = event.detail if event.reason in _SELF_EXPLAINED else event.human()
+        return Decision(action="stay", line=line, ts=event.ts)
+    if isinstance(event, AllExhaustedEvent):
+        return Decision(action="stay", line=event.human(), ts=event.ts)
+    return None
+
+
 # ---------------------------------------------------------------------------
 # Engine
 # ---------------------------------------------------------------------------
+
+
+# Proactive triggers: the ones the cooldown holds. at-limit and failover are
+# escapes and never wait.
+_COOLDOWN_TRIGGERS = ("proactive", "consume-first", "expiring-first")
 
 
 class TickOutcome(enum.Enum):
@@ -716,6 +789,9 @@ def note_manual_switch(
             state = raw if isinstance(raw, dict) else {}
             state["schemaVersion"] = STATE_SCHEMA_VERSION
             state["lastSwitchAt"] = clock()
+            # Separate from lastSwitchAt (which engine switches also write):
+            # expiring-first holds its proactive moves off this one.
+            state["lastManualSwitchAt"] = state["lastSwitchAt"]
             state["lastSwitchTo"] = str(to_number)
             for key in ("lastSwitchFrom", "leftHeadroom", "leftRecoveryAt", "leftTrigger"):
                 state.pop(key, None)
@@ -789,6 +865,9 @@ class AutoSwitchEngine:
         # warned) on the first tick where every relevant account has readable
         # usage — adaptive polling legitimately leaves gaps before that.
         self._model_check_done = not self._models
+        # The latest switch/no-switch verdict (see Decision); None until the
+        # first tick decides something.
+        self.last_decision: Decision | None = None
 
     # -- state file ---------------------------------------------------------
 
@@ -1085,7 +1164,7 @@ class AutoSwitchEngine:
             self._idle_hold_since = None
             utilization = 100.0 - active_headroom
             if utilization < settings.threshold:
-                if settings.strategy != "consume-first":
+                if settings.strategy not in ("consume-first", "expiring-first"):
                     self._emit(
                         NoSwitchEvent(
                             reason="below-threshold",
@@ -1098,11 +1177,11 @@ class AutoSwitchEngine:
                         )
                     )
                     return TickOutcome.NO_ACTION
-                # consume-first: below the threshold we still proactively move to
-                # whichever account's weekly window resets soonest, to burn the
-                # most-perishable quota first. Candidate selection decides whether
-                # a sooner-resetting account with room actually exists.
-                trigger = "consume-first"
+                # consume-first / expiring-first: below the threshold we still
+                # proactively move to whichever account's weekly window resets
+                # soonest, to burn the most-perishable quota first. Candidate
+                # selection decides whether such a move is worth making.
+                trigger = settings.strategy
             else:
                 trigger = "at-limit" if active_headroom <= 0 else "proactive"
         else:
@@ -1157,9 +1236,22 @@ class AutoSwitchEngine:
                 return TickOutcome.NO_ACTION
             trigger = "failover"
 
-        if trigger in ("proactive", "consume-first") and self._in_cooldown(state):
+        if trigger in _COOLDOWN_TRIGGERS and self._in_cooldown(state):
             self._emit(NoSwitchEvent(reason="cooldown"))
             return TickOutcome.NO_ACTION
+        if trigger == "expiring-first":
+            hold_left = self._manual_hold_left(state)
+            if hold_left > 0:
+                self._emit(
+                    NoSwitchEvent(
+                        reason="manual-hold",
+                        detail=(
+                            "stay: switched by hand; proactive moves resume in "
+                            f"{expiring_first.fmt_duration(hold_left)}"
+                        ),
+                    )
+                )
+                return TickOutcome.NO_ACTION
 
         # -- candidate selection ------------------------------------------
         candidates = [
@@ -1180,7 +1272,7 @@ class AutoSwitchEngine:
             else []
         )
         if (
-            trigger == "consume-first"
+            trigger in ("consume-first", "expiring-first")
             and not oauth_candidates
             and active_headroom is not None
         ):
@@ -1208,6 +1300,11 @@ class AutoSwitchEngine:
             self._blocked_wait_long = True
             self._emit(NoSwitchEvent(reason="no-candidates"))
             return TickOutcome.BLOCKED
+
+        if trigger == "expiring-first":
+            return self._expiring_first_move(
+                current, oauth_candidates, candidates, usage, entries
+            )
 
         consume_first = settings.strategy == "consume-first"
 
@@ -1328,6 +1425,19 @@ class AutoSwitchEngine:
                 now=decided_now,
             )
 
+        if (
+            settings.strategy == "expiring-first"
+            and len(ordered) > 1
+            and not _every_account_above_threshold(
+                oauth_candidates, headroom, active_headroom, settings.threshold
+            )
+        ):
+            # A move the engine has to make anyway (at the threshold, or
+            # failing over): the gates above decided WHO qualifies; the policy
+            # only re-orders them, soonest-expiring quota first. With every
+            # account above the threshold the recovery ranking stays in charge.
+            ordered = self._expiring_first_order(current, ordered, usage)
+
         if not ordered and api_key_candidates and trigger != "consume-first":
             # Last resort when we must move: metered API-key accounts
             # (unmeasurable headroom). Never for a below-threshold consume-first
@@ -1420,11 +1530,22 @@ class AutoSwitchEngine:
             active_headroom,
             _binding_recovery_ts(usage.get(current), self._models, decided_now),
         )
+        return self._freshen_and_switch(ordered, trigger, entries, left_snapshot)
+
+    def _freshen_and_switch(
+        self,
+        ordered: Sequence[str],
+        trigger: str,
+        entries: dict,
+        left_snapshot: tuple[float | None, float],
+        reason: str = "",
+    ) -> TickOutcome:
+        """Freshen the first viable target in ``ordered`` and switch to it."""
         transient_failure = False
         systemic = ""
         for num in ordered:
             email = self.switcher.account_email(num)
-            if trigger == "consume-first":
+            if trigger in ("consume-first", "expiring-first"):
                 # The phase-2 refetch is best-effort: the collector refuses
                 # accounts in failure backoff or claimed by a concurrent
                 # poller, which then serve their stored entries. Consume-first
@@ -1446,7 +1567,7 @@ class AutoSwitchEngine:
             if self.dry_run:
                 # Dry-run stops at the decision: no token refresh, no
                 # quarantine writes — freshening is a mutation.
-                return self._perform(num, email, trigger, left_snapshot)
+                return self._perform(num, email, trigger, left_snapshot, reason)
             status = self._freshen_target(num, email)
             if status == "identity-conflict":
                 # The slot's credential is alive but belongs to a different
@@ -1477,7 +1598,7 @@ class AutoSwitchEngine:
                 continue
             if status == "skip-live-session":
                 continue
-            return self._perform(num, email, trigger, left_snapshot)
+            return self._perform(num, email, trigger, left_snapshot, reason)
 
         if systemic or transient_failure:
             self._emit(
@@ -2061,6 +2182,156 @@ class AutoSwitchEngine:
         qualifying.sort(key=lambda t: t[0])
         return [num for _, num in qualifying], any_known, active_reset_ts
 
+    # -- expiring-first ----------------------------------------------------------
+
+    def _manual_hold_left(self, state: dict) -> float:
+        """Seconds of the post-manual-switch hold still to run (0 = none)."""
+        last = state.get("lastManualSwitchAt")
+        if isinstance(last, bool) or not isinstance(last, (int, float)):
+            return 0.0
+        left = last + self.settings.manual_hold_minutes * 60.0 - self.clock()
+        return max(0.0, left)
+
+    def _account_view(
+        self, number: str, value: dict | str | None, now: float
+    ) -> expiring_first.AccountView | None:
+        """The policy's view of one account, or None when unreadable."""
+        usage = value if isinstance(value, dict) else None
+        headroom = oauth.account_headroom(usage, self._models)
+        if headroom is None:
+            return None
+        windows = {
+            label: (pct, _parse_reset_ts(resets_at))
+            for label, pct, resets_at in oauth.relevant_windows(usage, ())
+        }
+
+        def window(label: str) -> tuple[float | None, float | None]:
+            pct, ts = windows.get(label, (None, None))
+            # A reset already behind us describes a window that has rolled
+            # over: its pct is stale and its reset is no instant to plan on.
+            if ts is None or ts <= now:
+                return (pct, None) if label == "7d" else (None, None)
+            return pct, ts
+
+        seven_pct, seven_reset = window("7d")
+        five_pct, five_reset = window("5h")
+        return expiring_first.AccountView(
+            number=number,
+            headroom=headroom,
+            seven_day_pct=seven_pct,
+            seven_day_reset=seven_reset,
+            five_hour_pct=five_pct,
+            five_hour_reset=five_reset,
+        )
+
+    def _burn_rate(self, current: str, now: float) -> float | None:
+        """How fast the user is spending weekly quota, in 7d points per hour,
+        from the active account's usage history. None when history cannot
+        say (too few samples, unreadable file): the policy then counts every
+        account's whole headroom as usable."""
+        try:
+            identity = self.switcher.account_identity(current)
+            ident = (identity.get("email", ""), identity.get("organizationUuid", ""))
+            series = self.switcher.usage_history.series({current: ident})
+            est = estimate_window(
+                series.get(current, {}).get("7d", []), window="7d", now=now
+            )
+        except Exception as e:  # history is advisory; never break a tick
+            _logger.debug("burn-rate estimate unavailable: %r", e)
+            return None
+        if est is None or est.confidence == "none":
+            return None
+        return est.rate_pct_per_h
+
+    def _expiring_first_choice(
+        self,
+        current: str,
+        oauth_candidates: Sequence[str],
+        usage: dict[str, dict | str | None],
+    ) -> expiring_first.Choice:
+        now = self.clock()
+        settings = self.settings
+        active = self._account_view(current, usage.get(current), now)
+        if active is None:
+            return expiring_first.Choice(
+                "stay", current, "stay: this account's usage is unreadable right now"
+            )
+        healthy = [
+            view
+            for num in oauth_candidates
+            if (view := self._account_view(num, usage.get(num), now)) is not None
+            and view.headroom > 0
+            and 100.0 - view.headroom < settings.threshold
+        ]
+        return expiring_first.choose(
+            active,
+            healthy,
+            threshold=settings.threshold,
+            similar_reset_s=settings.similar_reset_hours * 3600.0,
+            hysteresis_pct=settings.hysteresis_pct,
+            burn_pct_per_h=self._burn_rate(current, now) if healthy else None,
+            now=now,
+        )
+
+    def _expiring_first_move(
+        self,
+        current: str,
+        oauth_candidates: Sequence[str],
+        fetchable: Sequence[str],
+        usage: dict[str, dict | str | None],
+        entries: dict,
+    ) -> TickOutcome:
+        """Below the threshold: stay, or make the policy's proactive move.
+
+        Two-phase like consume-first: the first verdict may ride a stored
+        snapshot (below the threshold the collector does not escalate), so a
+        would-be switch refetches every candidate and decides again before
+        anything moves. The target must then be freshly measured, and a
+        failed freshen never slides to a worse-ranked account.
+        """
+        choice = self._expiring_first_choice(current, oauth_candidates, usage)
+        if choice.action == "switch":
+            entries = self.switcher.usage_entries_by_account(
+                fetch={current, *fetchable}
+            )
+            usage = {num: entry.decision_value() for num, entry in entries.items()}
+            choice = self._expiring_first_choice(current, oauth_candidates, usage)
+        if choice.action == "stay":
+            self._emit(NoSwitchEvent(reason=STAY_REASON, detail=choice.reason))
+            return TickOutcome.NO_ACTION
+        decided_now = self.clock()
+        active_value = usage.get(current)
+        left_snapshot = (
+            oauth.account_headroom(
+                active_value if isinstance(active_value, dict) else None, self._models
+            ),
+            _binding_recovery_ts(active_value, self._models, decided_now),
+        )
+        return self._freshen_and_switch(
+            [choice.target], "expiring-first", entries, left_snapshot, choice.reason
+        )
+
+    def _expiring_first_order(
+        self,
+        current: str,
+        ordered: list[str],
+        usage: dict[str, dict | str | None],
+    ) -> list[str]:
+        """Re-order qualifying targets of a forced move by the policy."""
+        now = self.clock()
+        views = [
+            view
+            for num in ordered
+            if (view := self._account_view(num, usage.get(num), now)) is not None
+        ]
+        ranked = expiring_first.rank(
+            views,
+            similar_reset_s=self.settings.similar_reset_hours * 3600.0,
+            burn_pct_per_h=self._burn_rate(current, now),
+            now=now,
+        )
+        return ranked + [num for num in ordered if num not in ranked]
+
     # -- adaptive usage scheduling ---------------------------------------------
 
     def _collect_scheduled_usage(
@@ -2203,6 +2474,7 @@ class AutoSwitchEngine:
         email: str,
         trigger: str,
         left: tuple[float | None, float],
+        reason: str = "",
     ) -> TickOutcome:
         if self.dry_run:
             current = self.switcher.current_account_number()
@@ -2213,6 +2485,7 @@ class AutoSwitchEngine:
                     from_ref=_ref(current, current_email) if current else None,
                     to_ref=_ref(number, email),
                     dry_run=True,
+                    reason=reason,
                 )
             )
             return TickOutcome.SWITCHED
@@ -2225,7 +2498,7 @@ class AutoSwitchEngine:
         # state lock.
         with self._state_lock():
             state = self._read_state()
-            if trigger in ("proactive", "consume-first") and self._in_cooldown(state):
+            if trigger in _COOLDOWN_TRIGGERS and self._in_cooldown(state):
                 self._emit(NoSwitchEvent(reason="cooldown"))
                 return TickOutcome.NO_ACTION
 
@@ -2268,6 +2541,7 @@ class AutoSwitchEngine:
                 from_ref=result.get("from"),
                 to_ref=result.get("to"),
                 warnings=result.get("warnings", []),
+                reason=reason,
             )
         )
         return TickOutcome.SWITCHED
@@ -2394,6 +2668,11 @@ class AutoSwitchEngine:
         return datetime.fromtimestamp(earliest, tz=timezone.utc)
 
     def _emit(self, event: AutoSwitchEvent) -> None:
+        decision = decision_from_event(event)
+        if decision is not None:
+            # One reference assignment of a frozen object: a UI thread reading
+            # last_decision sees the old verdict or the new one, never half.
+            self.last_decision = decision
         self.on_event(event)
 
     def _ingest_feed(self) -> None:

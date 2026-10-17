@@ -48,7 +48,11 @@ class AutoSwitchSettings:
     threshold: float = 90.0
     cooldown_seconds: float = 300.0
     hysteresis_pct: float = 10.0
-    strategy: str = "best"  # "best" (most headroom) or "consume-first" (soonest weekly reset)
+    # "best" (most headroom, only at the threshold), "consume-first"
+    # (soonest weekly reset, strictly) or "expiring-first" (spend the account
+    # whose weekly window resets soonest, balancing 5h windows when resets
+    # are similar; see expiring_first.py).
+    strategy: str = "best"
     include_api_key_accounts: bool = False
     unhealthy_ticks: int = 3
     # Comma-separated model display name(s) (e.g. "Fable" or "Fable,Opus"),
@@ -58,6 +62,12 @@ class AutoSwitchSettings:
     # 5h/7d windows still have headroom. None = account-wide 5h/7d only
     # (default).
     model: str | None = None
+    # expiring-first: 7-day resets this close together count as tied, and
+    # the tie is broken by 5h headroom instead of reset order.
+    similar_reset_hours: float = 12.0
+    # expiring-first: after a manual switch, no proactive move for this long
+    # (threshold and failover moves still happen).
+    manual_hold_minutes: float = 60.0
 
 
 @dataclass(frozen=True)
@@ -183,6 +193,10 @@ def _cadence_specs() -> tuple[SettingSpec, ...]:
     )
 
 
+# Auto-switch strategies, the default first. cli.py's --strategy reads this
+# too, so the flag and the setting accept the same names.
+STRATEGY_CHOICES: tuple[str, ...] = ("best", "consume-first", "expiring-first")
+
 # settings.json uses camelCase (matching the repo's other JSON artifacts);
 # dataclass fields stay snake_case.
 SETTING_SPECS: dict[str, SettingSpec] = {
@@ -205,9 +219,24 @@ SETTING_SPECS: dict[str, SettingSpec] = {
         ),
         SettingSpec(
             "autoswitch", "strategy", "strategy", "choice",
-            choices=("best", "consume-first"),
-            help="How auto-switch picks the target account",
+            choices=STRATEGY_CHOICES,
+            help="How auto-switch picks the target account: expiring-first "
+            "spends the account whose weekly quota expires soonest",
             group="autoswitch", label="Strategy",
+        ),
+        SettingSpec(
+            "autoswitch", "similarResetHours", "similar_reset_hours", "float",
+            0.0, 168.0,
+            help="expiring-first: weekly resets this close count as tied and "
+            "are balanced by 5h headroom",
+            group="autoswitch", label="Similar resets within", step=1.0, unit="h",
+        ),
+        SettingSpec(
+            "autoswitch", "manualHoldMinutes", "manual_hold_minutes", "float",
+            0.0, 1440.0,
+            help="expiring-first: no proactive switch for this long after a "
+            "manual switch",
+            group="autoswitch", label="Manual switch hold", step=5.0, unit="m",
         ),
         SettingSpec(
             "autoswitch", "includeApiKeyAccounts", "include_api_key_accounts", "bool",

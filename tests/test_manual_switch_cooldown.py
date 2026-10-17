@@ -114,7 +114,12 @@ class TestNoteManualSwitch:
     def test_writes_fresh_state(self, tmp_path):
         assert note_manual_switch(tmp_path, "3", clock=lambda: 123.0)
         state = json.loads((tmp_path / autoswitch.STATE_FILENAME).read_text())
-        assert state == {"schemaVersion": 1, "lastSwitchAt": 123.0, "lastSwitchTo": "3"}
+        assert state == {
+            "schemaVersion": 1,
+            "lastSwitchAt": 123.0,
+            "lastManualSwitchAt": 123.0,
+            "lastSwitchTo": "3",
+        }
 
     @pytest.mark.parametrize("content", ["{bad", "[]"])
     def test_corrupt_state_is_replaced(self, tmp_path, content):

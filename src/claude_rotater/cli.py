@@ -11,7 +11,11 @@ from claude_rotater import __version__, paths, printer
 from claude_rotater.exceptions import ClaudeSwitchError
 from claude_rotater.json_output import error_envelope
 from claude_rotater.printer import dimmed, error, force_utf8_output
-from claude_rotater.settings import load_run_settings, load_ui_settings
+from claude_rotater.settings import (
+    STRATEGY_CHOICES,
+    load_run_settings,
+    load_ui_settings,
+)
 from claude_rotater.switcher import ClaudeAccountSwitcher
 
 
@@ -239,12 +243,14 @@ Defaults live in settings.json in the backup root; flags override them.
     )
     parser.add_argument(
         "--strategy",
-        choices=("best", "consume-first"),
+        choices=STRATEGY_CHOICES,
         default=None,
         help=(
-            "Target selection: 'best' (most quota left; default) or "
-            "'consume-first' (proactively use the account whose weekly window "
-            "resets soonest)"
+            "Target selection: 'best' (most quota left, at the threshold "
+            "only; default), 'consume-first' (strictly the soonest weekly "
+            "reset) or 'expiring-first' (spend the account whose weekly "
+            "quota expires soonest, balancing 5h windows when resets are "
+            "similar)"
         ),
     )
     parser.add_argument(
