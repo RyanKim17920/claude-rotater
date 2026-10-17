@@ -197,3 +197,133 @@ class TestCcRefreshLockProtocol:
         with claude_config_lock(timeout=2.0):
             assert cfg.is_dir()
         assert not cfg.exists()
+
+
+class TestStorageWriteLock:
+    """claude 2.1.302 wraps every credential write in proper-lockfile's
+    ``lock(join(dir, ".storage-write"), {stale: 15000, retries: 10})``: the
+    directory ``<dir>/.storage-write.lock``, stale past 15s, where ``dir`` is
+    the secure-storage config dir (``zx``)."""
+
+    @pytest.fixture(autouse=True)
+    def _plain_env(self, monkeypatch):
+        monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
+        monkeypatch.delenv("CLAUDE_SECURESTORAGE_CONFIG_DIR", raising=False)
+
+    def test_dir_default_profile(self, temp_home):
+        assert (
+            claude_locks.storage_write_lock_dir()
+            == temp_home / ".claude" / ".storage-write.lock"
+        )
+
+    def test_dir_follows_claude_config_dir(self, temp_home, monkeypatch):
+        custom = temp_home / "work-claude"
+        monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(custom))
+        assert claude_locks.storage_write_lock_dir() == custom / ".storage-write.lock"
+
+    def test_dir_prefers_securestorage_override(self, temp_home, monkeypatch):
+        monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(temp_home / "a"))
+        monkeypatch.setenv("CLAUDE_SECURESTORAGE_CONFIG_DIR", str(temp_home / "b"))
+        assert (
+            claude_locks.storage_write_lock_dir()
+            == temp_home / "b" / ".storage-write.lock"
+        )
+
+    def test_empty_securestorage_override_means_default_dir(
+        self, temp_home, monkeypatch
+    ):
+        monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(temp_home / "a"))
+        monkeypatch.setenv("CLAUDE_SECURESTORAGE_CONFIG_DIR", "")
+        assert (
+            claude_locks.storage_write_lock_dir()
+            == temp_home / ".claude" / ".storage-write.lock"
+        )
+
+    def test_held_while_inside_and_removed_after(self, temp_home):
+        lock = claude_locks.storage_write_lock_dir()
+        with claude_locks.claude_storage_write_lock():
+            assert lock.is_dir()
+        assert not lock.exists()
+
+    def test_creates_a_missing_config_dir(self, temp_home, monkeypatch):
+        """claude mkdirs the dir before locking; so must we."""
+        custom = temp_home / "not-yet"
+        monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(custom))
+        with claude_locks.claude_storage_write_lock():
+            assert (custom / ".storage-write.lock").is_dir()
+
+    def test_fresh_holder_times_out_and_is_left_alone(self, temp_home):
+        lock = claude_locks.storage_write_lock_dir()
+        lock.mkdir()  # fresh mtime: a live claude mid-write
+        ran = False
+        with pytest.raises(ClaudeCodeLockTimeout):
+            with claude_locks.claude_storage_write_lock(timeout=0.5):
+                ran = True
+        assert not ran
+        assert lock.is_dir()
+
+    def test_ten_seconds_old_is_still_live(self, temp_home):
+        """Stale is 15s, not the config lock's 10s: a 12s-old lock may belong
+        to a claude whose 7.5s toucher is merely late."""
+        lock = claude_locks.storage_write_lock_dir()
+        lock.mkdir()
+        past = time.time() - 12
+        os.utime(lock, (past, past))
+        with pytest.raises(ClaudeCodeLockTimeout):
+            with claude_locks.claude_storage_write_lock(timeout=0.5):
+                pass
+        assert lock.is_dir()
+
+    def test_past_fifteen_seconds_is_taken_over(self, temp_home):
+        lock = claude_locks.storage_write_lock_dir()
+        lock.mkdir()
+        past = time.time() - 20
+        os.utime(lock, (past, past))
+        with claude_locks.claude_storage_write_lock(timeout=2.0):
+            assert time.time() - lock.stat().st_mtime < 5.0
+        assert not lock.exists()
+
+    def test_waits_for_a_brief_holder(self, temp_home):
+        import threading
+
+        lock = claude_locks.storage_write_lock_dir()
+        lock.mkdir()
+        threading.Timer(0.4, lock.rmdir).start()
+        start = time.monotonic()
+        with claude_locks.claude_storage_write_lock(timeout=3.0):
+            assert lock.is_dir()
+        assert time.monotonic() - start >= 0.3
+
+    def test_reentrant_in_one_thread(self, temp_home):
+        lock = claude_locks.storage_write_lock_dir()
+        with claude_locks.claude_storage_write_lock():
+            with claude_locks.claude_storage_write_lock(timeout=0.2):
+                assert lock.is_dir()
+            assert lock.is_dir(), "inner exit must not release the outer hold"
+        assert not lock.exists()
+
+    def test_another_thread_still_waits(self, temp_home):
+        import threading
+
+        outcome = []
+
+        def other():
+            try:
+                with claude_locks.claude_storage_write_lock(timeout=0.3):
+                    outcome.append("acquired")
+            except ClaudeCodeLockTimeout:
+                outcome.append("timeout")
+
+        with claude_locks.claude_storage_write_lock():
+            t = threading.Thread(target=other)
+            t.start()
+            t.join()
+        assert outcome == ["timeout"]
+
+    def test_per_profile(self, temp_home, monkeypatch):
+        """Two profiles never serialize on each other's lock."""
+        monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(temp_home / "p1"))
+        (temp_home / "p1" / ".storage-write.lock").mkdir(parents=True)
+        monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(temp_home / "p2"))
+        with claude_locks.claude_storage_write_lock(timeout=0.3):
+            assert (temp_home / "p2" / ".storage-write.lock").is_dir()
