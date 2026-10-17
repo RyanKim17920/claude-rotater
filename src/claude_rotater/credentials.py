@@ -28,6 +28,7 @@ from pathlib import Path
 from typing import NamedTuple, Protocol
 
 from claude_rotater import macos_keychain
+from claude_rotater.claude_locks import claude_storage_write_lock
 from claude_rotater.exceptions import (
     CredentialReadError,
     CredentialWriteError,
@@ -822,14 +823,22 @@ class CredentialStore:
           Keychain "Claude Code" when usable, else ``~/.claude.json`` ``primaryApiKey``),
           then clear the OAuth credential (Keychain item + ``.credentials.json``).
 
+        Runs under claude's secure-storage write lock (re-entrant: the switch
+        paths already hold it across their read of the live store), so a
+        claude writing the same item waits for this write instead of
+        interleaving with it.
+
         Raises:
             CredentialWriteError: If writing credentials fails.
+            ClaudeCodeLockTimeout: claude held the write lock throughout;
+                nothing was written.
         """
-        if looks_like_api_key(credentials):
-            self._write_managed_credentials(credentials.strip())
-        else:
-            self._write_oauth_credentials(credentials)
-            self._clear_managed_key()
+        with claude_storage_write_lock():
+            if looks_like_api_key(credentials):
+                self._write_managed_credentials(credentials.strip())
+            else:
+                self._write_oauth_credentials(credentials)
+                self._clear_managed_key()
 
     def _write_managed_credentials(self, api_key: str) -> None:
         """Activate a managed API key, then clear OAuth (mutual exclusion).

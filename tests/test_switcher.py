@@ -1889,6 +1889,51 @@ class TestActiveAccountRefresh:
         write_live.assert_called_once_with(self._REFRESHED)
         write_backup.assert_called_once_with("1", "test@example.com", self._REFRESHED)
 
+    def test_persist_keeps_a_shared_field_claude_wrote_during_the_post(
+        self, temp_home: Path, mock_claude_config: Path, sample_sequence_data: dict
+    ):
+        """claude can write an MCP token into the item while the POST runs
+        (under .storage-write only). The persist re-reads live under that
+        lock and carries it instead of restoring the pre-POST copy; the lock
+        is not held across the POST itself (claude retries it only ~7.5s)."""
+        from claude_rotater.claude_locks import storage_write_lock_dir
+
+        switcher = self._switcher(sample_sequence_data)
+        expired = json.loads(self._EXPIRED)
+        expired["mcpOAuth"] = {"srv": {"accessToken": "mcp-old"}}
+        during = dict(expired, mcpOAuth={"srv": {"accessToken": "mcp-new"}})
+        live = {"value": json.dumps(expired)}
+        seen = {}
+
+        def mock_refresh(credentials, **kw):
+            seen["lock_during_post"] = storage_write_lock_dir().is_dir()
+            live["value"] = json.dumps(during)  # claude's write lands mid-POST
+            return oauth.RefreshOutcome(self._REFRESHED, None)
+
+        def write_live(credentials):
+            seen["lock_at_write"] = storage_write_lock_dir().is_dir()
+            live["value"] = credentials
+
+        with patch.object(switcher, "_read_credentials",
+                          side_effect=lambda: live["value"]), \
+             patch.object(switcher, "_read_account_credentials",
+                          return_value=json.dumps(expired)), \
+             patch.object(switcher, "_write_credentials", side_effect=write_live), \
+             patch.object(switcher, "_write_account_credentials"), \
+             patch("claude_rotater.oauth.try_refresh_oauth_credentials",
+                   side_effect=mock_refresh), \
+             patch("claude_rotater.oauth.try_fetch_usage_for_account",
+                   return_value=oauth.UsageOutcome({"five_hour": {"pct": 5}})):
+            result = switcher._fetch_active_usage(
+                "1", "test@example.com", json.dumps(expired)
+            )
+
+        assert result.sentinel is None
+        assert seen == {"lock_during_post": False, "lock_at_write": True}
+        written = json.loads(live["value"])
+        assert written["claudeAiOauth"] == json.loads(self._REFRESHED)["claudeAiOauth"]
+        assert written["mcpOAuth"] == {"srv": {"accessToken": "mcp-new"}}
+
     def test_a_rota_run_session_does_not_block_the_refresh(
         self, temp_home: Path, mock_claude_config: Path, sample_sequence_data: dict
     ):
@@ -3019,8 +3064,11 @@ class TestActiveAccountRefresh:
             oauth.RefreshOutcome(successor2, None),
         ]
 
+        # Each pass reads live twice: before the POST, and again under
+        # claude's write lock right before persisting.
         with patch.object(switcher, "_read_credentials",
-                          side_effect=[self._EXPIRED, live_s]), \
+                          side_effect=[self._EXPIRED, self._EXPIRED,
+                                       live_s, live_s]), \
              patch.object(
                  switcher, "_read_account_credentials",
                  return_value=self._EXPIRED,   # backup never advances
@@ -5949,6 +5997,137 @@ class TestClaudeCodeLockCooperation:
         assert live_creds_after == live_creds_before
         # The holder's lock was left alone.
         assert (temp_home / ".claude.lock").is_dir()
+
+    # claude 2.1.302's secure-storage write lock (<config dir>/.storage-write.lock).
+
+    def test_switch_holds_storage_write_lock_from_live_read_to_write(
+        self, temp_home: Path
+    ):
+        """claude writes the item as a locked re-read/modify/write; the
+        switch's own read of the live store and its write must sit inside one
+        hold, or a claude write between them is lost."""
+        s = self._setup(temp_home)
+        self._seed(s, 1, "a@example.com")
+        self._seed(s, 2, "b@example.com")
+        self._make_live(temp_home, "a@example.com", 1)
+        lock = temp_home / ".claude" / ".storage-write.lock"
+        calls: list[tuple[str, bool]] = []
+        original_read, original_write = s._read_credentials, s._write_credentials
+
+        def spying_read():
+            calls.append(("read", lock.is_dir()))
+            return original_read()
+
+        def spying_write(credentials: str) -> None:
+            calls.append(("write", lock.is_dir()))
+            original_write(credentials)
+
+        with patch.object(s, "_read_credentials", side_effect=spying_read), \
+             patch.object(s, "_write_credentials", side_effect=spying_write), \
+             patch.object(s, "list_accounts"):
+            s.switch_to("2")
+
+        assert s._get_sequence_data()["activeAccountNumber"] == 2
+        first_write = calls.index(("write", True))
+        assert ("read", True) in calls[:first_write], calls
+        assert all(held for kind, held in calls if kind == "write"), calls
+        assert not lock.exists()
+
+    def test_preheld_storage_write_lock_fails_cleanly_without_mutation(
+        self, temp_home: Path, monkeypatch, block_real_keychain
+    ):
+        """A claude mid-write holds a fresh lock: the switch waits, times out
+        and changes nothing: no live write, no backup, no half-taken locks."""
+        from claude_rotater import claude_locks
+        from claude_rotater.exceptions import ClaudeCodeLockTimeout
+
+        s = self._setup(temp_home)
+        self._seed(s, 1, "a@example.com")
+        self._seed(s, 2, "b@example.com")
+        self._make_live(temp_home, "a@example.com", 1)
+        monkeypatch.setattr(claude_locks, "DEFAULT_TIMEOUT_S", 0.3)
+        lock = temp_home / ".claude" / ".storage-write.lock"
+        lock.mkdir()
+
+        live_file = temp_home / ".claude" / ".credentials.json"
+        live_before = live_file.read_text()
+        keychain_before = dict(block_real_keychain.data)
+
+        def backups():
+            return sorted(
+                (p.name, p.read_bytes()) for p in s.credentials_dir.iterdir()
+                if p.is_file()
+            )
+
+        backups_before = backups()
+        with pytest.raises(ClaudeCodeLockTimeout):
+            s.switch_to("2")
+
+        assert s._get_sequence_data()["activeAccountNumber"] == 1
+        assert live_file.read_text() == live_before
+        assert block_real_keychain.data == keychain_before
+        assert backups() == backups_before
+        assert lock.is_dir()  # the holder's lock is left alone
+        for other in (
+            temp_home / ".claude" / ".oauth_refresh.lock",
+            temp_home / ".claude.lock",
+            temp_home / ".claude.json.lock",
+        ):
+            assert not other.exists(), f"{other.name} left behind"
+
+    def test_stale_storage_write_lock_is_taken_over(self, temp_home: Path):
+        """Past claude's 15s staleness the holder is dead: take it over."""
+        s = self._setup(temp_home)
+        self._seed(s, 1, "a@example.com")
+        self._seed(s, 2, "b@example.com")
+        self._make_live(temp_home, "a@example.com", 1)
+        lock = temp_home / ".claude" / ".storage-write.lock"
+        lock.mkdir()
+        past = time.time() - 20
+        os.utime(lock, (past, past))
+
+        with patch.object(s, "list_accounts"):
+            s.switch_to("2")
+
+        assert s._get_sequence_data()["activeAccountNumber"] == 2
+        assert not lock.exists()
+
+    def test_store_write_takes_the_lock_on_its_own(
+        self, temp_home: Path, block_real_keychain
+    ):
+        """A live write from outside the switch (e.g. a rollback) is still
+        under the lock: the store takes it, re-entrantly."""
+        s = ClaudeAccountSwitcher()
+        s.platform = Platform.MACOS
+        s._setup_directories()
+        lock = temp_home / ".claude" / ".storage-write.lock"
+        held: list[bool] = []
+        original = block_real_keychain.set_password
+
+        def spying_set(service, account, password):
+            held.append(lock.is_dir())
+            original(service, account, password)
+
+        with patch.object(macos_keychain, "set_password", side_effect=spying_set):
+            s._write_credentials('{"claudeAiOauth": {"accessToken": "x"}}')
+        assert held == [True]
+        assert not lock.exists()
+
+    def test_store_write_under_a_held_lock_writes_nothing(
+        self, temp_home: Path, monkeypatch, block_real_keychain
+    ):
+        from claude_rotater import claude_locks
+        from claude_rotater.exceptions import ClaudeCodeLockTimeout
+
+        s = ClaudeAccountSwitcher()
+        s.platform = Platform.MACOS
+        s._setup_directories()
+        monkeypatch.setattr(claude_locks, "DEFAULT_TIMEOUT_S", 0.3)
+        (temp_home / ".claude" / ".storage-write.lock").mkdir()
+        with pytest.raises(ClaudeCodeLockTimeout):
+            s._write_credentials('{"claudeAiOauth": {"accessToken": "x"}}')
+        assert block_real_keychain.data == {}
+        assert not (temp_home / ".claude" / ".credentials.json").exists()
 
 
 class TestMacosKeychainFallback:

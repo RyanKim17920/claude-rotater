@@ -29,7 +29,11 @@ from claude_rotater.exceptions import (
     ValidationError,
 )
 from claude_rotater import oauth, pace
-from claude_rotater.claude_locks import claude_config_lock, claude_credentials_lock
+from claude_rotater.claude_locks import (
+    claude_config_lock,
+    claude_credentials_lock,
+    claude_storage_write_lock,
+)
 from claude_rotater.json_output import (
     SCHEMA_VERSION,
     USAGE_API_KEY,
@@ -294,6 +298,22 @@ def _with_write_retries(write: Callable[[], None]) -> None:
             if attempt == PERSIST_ATTEMPTS - 1:
                 raise
             time.sleep(PERSIST_RETRY_S)
+
+
+def _with_live_shared_fields(credentials: str, live: str | None) -> str:
+    """``credentials`` carrying the live store's machine-shared fields.
+
+    For a write of the SAME account's login back into the live store, read
+    under claude's write lock: what claude wrote there since (an MCP token)
+    survives, the way claude's own locked read-modify-write keeps it. Returns
+    ``credentials`` unchanged, byte for byte, when there is nothing to carry
+    (no live JSON object, or the shared fields already agree).
+    """
+    live_shared = shared_credential_fields(live)
+    if live_shared is None or live_shared == shared_credential_fields(credentials):
+        return credentials
+    return merge_shared_credential_fields(credentials, live_shared)
+
 
 class ClaudeAccountSwitcher:
     """Multi-account switcher for Claude Code."""
@@ -2800,7 +2820,12 @@ class ClaudeAccountSwitcher:
         if not enabled:
             yield credentials
             return
-        with FileLock(self.lock_file), claude_credentials_lock(), claude_config_lock():
+        with (
+            FileLock(self.lock_file),
+            claude_credentials_lock(),
+            claude_config_lock(),
+            claude_storage_write_lock(),
+        ):
             if not self._live_identity_matches(email, org_uuid):
                 raise ValidationError(
                     "The active account changed while logging in. Nothing was "
@@ -2864,6 +2889,7 @@ class ClaudeAccountSwitcher:
                     FileLock(self.lock_file),
                     claude_credentials_lock(),
                     claude_config_lock(),
+                    claude_storage_write_lock(),
                 ):
                     restore()
         except Exception as e:
@@ -4085,9 +4111,19 @@ class ClaudeAccountSwitcher:
                         # _clear_managed_key) — the config lock covers just
                         # this write. A timeout here is a live-write failure
                         # (the grant is already consumed), not a defer.
+                        #
+                        # claude writes this item as a locked re-read/modify/
+                        # write (.storage-write), and an MCP token can land
+                        # there while our POST was in flight. Do the same:
+                        # re-read under that lock and keep the live store's
+                        # machine-shared fields, or this write would put back
+                        # the copies read before the POST.
                         def _write_live() -> None:
-                            with claude_config_lock():
-                                self._write_credentials(working)  # active store — CC reads this
+                            with claude_config_lock(), claude_storage_write_lock():
+                                fresh = self._read_credentials()
+                                self._write_credentials(  # active store — CC reads this
+                                    _with_live_shared_fields(working, fresh)
+                                )
 
                         _with_write_retries(_write_live)
                     except Exception:
@@ -6323,9 +6359,18 @@ class ClaudeAccountSwitcher:
         # means a mid-refresh Claude Code either finishes before our swap
         # (backup captures the rotated token) or re-checks after it and aborts.
         # ~/.claude.json.lock likewise keeps the oauthAccount splice from
-        # interleaving with Claude Code's own config writes. Everything under
-        # here is local I/O — no network while locks are held.
-        with FileLock(self.lock_file), claude_credentials_lock(), claude_config_lock():
+        # interleaving with Claude Code's own config writes. claude 2.1.302's
+        # secure-storage write lock, innermost (claude's own order: it is a
+        # leaf there), spans the live read below through the live write, so
+        # a claude write (an MCP token, a refresh) can neither be lost between
+        # them nor interleave with them. Everything under here is local I/O —
+        # no network while locks are held.
+        with (
+            FileLock(self.lock_file),
+            claude_credentials_lock(),
+            claude_config_lock(),
+            claude_storage_write_lock(),
+        ):
             data = self._get_sequence_data()
             active_account = data.get("activeAccountNumber")
             current_account = str(active_account) if active_account is not None else None
