@@ -172,6 +172,22 @@ def format_duration(seconds: float) -> str:
     return f"{d}d {h}h" if h else f"{d}d"
 
 
+def compact_duration(seconds: float) -> str:
+    """Table-width duration, no spaces: "<1m", "45m", "1h59m", "2d23h".
+
+    At most 6 cells ("23h59m"), so a column of them lines up."""
+    s = max(0, int(seconds))
+    if s < 60:
+        return "<1m"
+    if s < 3600:
+        return f"{s // 60}m"
+    if s < 86400:
+        h, m = divmod(s // 60, 60)
+        return f"{h}h{m:02d}m"
+    d, h = divmod(s // 3600, 24)
+    return f"{d}d{h}h"
+
+
 def format_age(age_s: float | None) -> str | None:
     """Measurement age note ("· 2m ago"); None while comfortably fresh."""
     if age_s is None or age_s < usage_store.SERVE_TTL_S:
@@ -187,6 +203,7 @@ def clock_stamp() -> str:
 __all__ = [
     "ActionResult",
     "SnapshotSource",
+    "compact_duration",
     "format_age",
     "format_duration",
     "iso_epoch",

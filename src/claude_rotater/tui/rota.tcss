@@ -23,7 +23,7 @@ Screen {
 
 #accounts {
     height: auto;
-    max-height: 12;
+    max-height: 60%;
     background: $background;
     padding: 0 1 0 0;
     scrollbar-size-vertical: 1;
@@ -45,9 +45,10 @@ Screen {
     text-style: none;
 }
 
+/* As tall as its content: the strip is 2-4 lines and the history view
+   caps its graphs, so the page never pads itself out with a plot. */
 #detail {
-    height: 1fr;
-    min-height: 3;
+    height: auto;
     padding: 0 1;
     margin-top: 1;
 }
@@ -61,6 +62,7 @@ Screen {
 
 #actions {
     height: 1;
+    margin-top: 1;
     padding: 0 1;
     background: $background;
 }

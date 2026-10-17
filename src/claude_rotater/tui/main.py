@@ -1,17 +1,21 @@
-"""The main page: the roster, two usage graphs per account, the actions.
+"""The main page: a dense account table, a detail strip, the actions.
 
-Layout, top to bottom:
+Layout, top to bottom, as tall as its content (no plot fills the screen):
 
 - header band: the ``rota`` chip, one roster pip per account (who is on
   duty, how much headroom each has), the auto-switch state, the statusline
-  feed state and the last switch;
-- column header + one ``AccountRow`` per account (on-duty bar, 5h/7d meters
-  with the projected pct beside the measured one, burn rate, ETA to the
-  threshold with a confidence glyph, binding window's reset);
-- detail pane for the highlighted account: separate 5h and 7d graphs (side
-  by side when wide, stacked otherwise), each with the threshold, the history
-  of the current window and a dotted projection to the reset; ``h`` swaps in
-  the long-term view (past 5h peaks, the 7d curve across weeks);
+  feed state and rota's own last switch;
+- column header + one ``AccountRow`` per account: on-duty bar, the account
+  (email once; a tag only for a real org, a disabled account or a login about
+  to lapse), then per window (5h, 7d, each per-model window such as Fable) the
+  pct, a small meter and the reset as a countdown and a clock, then the burn
+  rate and ETA to the threshold of the binding window and a 5h sparkline.
+  Columns drop by priority as the width runs short (:data:`LEVELS`);
+- detail strip for the highlighted account, 2-4 lines: login end, token
+  state and measurement age, then one aligned line per window with its burn,
+  ETA, projection at the reset and the reset itself. ``h`` swaps in the
+  history view: the current 5h/7d graphs and the long-term view (past 5h
+  peaks, the 7d curve across weeks), with capped graph heights;
 - a 3-line log of recent non-routine engine events (hidden until the first);
 - the action bar, mirroring the key bindings.
 
@@ -36,7 +40,7 @@ from textual.widgets import Button, ListItem, ListView, RichLog, Static
 
 from claude_rotater import oauth
 from claude_rotater.autoswitch import AutoSwitchEvent, pct_label
-from claude_rotater.estimator import WINDOW_LEN_S, AccountEstimate, WindowEstimate
+from claude_rotater.estimator import WINDOW_LEN_S, AccountEstimate, WindowEstimate, estimate_window
 from claude_rotater.json_output import USAGE_API_KEY, USAGE_RELOGIN_REQUIRED
 from claude_rotater.models import AccountSnapshot, AccountsSnapshot
 from claude_rotater.tui import data
@@ -49,7 +53,7 @@ from claude_rotater.tui.plot import (
     windows_per_bar,
 )
 from claude_rotater.tui.theme import Palette, brand_chip
-from claude_rotater.tui.widgets import account_card_text, bar_cells
+from claude_rotater.tui.widgets import bar_cells
 from claude_rotater.usage_history import Point
 from claude_rotater.usage_store import STALE_OK_S
 
@@ -214,89 +218,177 @@ def status_text(
 
 
 # ---------------------------------------------------------------------------
-# Account rows
+# Account table
 # ---------------------------------------------------------------------------
 
 # Shorter than the headless note: in the TUI the fix is one key away.
 RELOGIN_ROW_LABEL = "re-login needed — press l to log in again"
 _CONFIDENCE_GLYPH = {"high": " ", "medium": "~", "low": "?"}
 ON_DUTY_MARK = "▌"
+PRIMARY_WINDOWS = ("5h", "7d")
 _PREFIX_W = 4  # "▌ 1 "
-_TAG_W = 12  # " personal   "
-_BURN_W = 9  # "+12.5%/h "
-_ETA_W = 10  # "3h 30m ~ "
-_RESET_W = 7  # "2h 13m"
-_MIN_NAME_W = 12
-# The plot takes whatever height the detail pane has, so the page has no
-# dead band above the action bar; this only stops it turning into a wall on
-# a very tall terminal.
-MAX_PLOT_LINES = 40
+_GAP = 2  # between table columns
+_REL_W = 6  # "23h59m" (data.compact_duration)
+_BURN_W = 8  # "+12.0%/h"
+_ETA_W = 7  # "13h05m~"
+_MAX_TAG_W = 16
+_MIN_NAME_W = 16
+_MAX_NAME_W = 32
+RESET_GLYPH_SCOPED = "↻"
+
+
+@dataclass(frozen=True)
+class Level:
+    """How much one table row carries; :data:`LEVELS` goes richest first.
+
+    ``clock`` is the reset clock of the 5h/7d columns: "full" ("20:23",
+    "Mon 17:49"), "short" ("20:23", "Mon") or "" (none). Per-model columns
+    (Fable, ...) get their own smaller bar and a weekday only.
+    """
+
+    bar_w: int
+    rel: bool
+    clock: str
+    scoped_bar_w: int
+    scoped_reset: bool
+    spark_w: int
+    burn: bool
+    eta: bool
+    tag: bool
+
+
+# Dropped in this order as the width runs short: the 5h trend, the meters
+# (to a 4-cell stub), the weekly clock (to a weekday), the clocks, burn, the
+# tag, the reset countdowns, the ETA. The account name
+# keeps at least _MIN_NAME_W cells at every level.
+LEVELS: tuple[Level, ...] = (
+    Level(8, True, "full", 6, True, 10, True, True, True),
+    Level(6, True, "full", 4, True, 8, True, True, True),
+    Level(5, True, "full", 0, True, 6, True, True, True),
+    Level(4, True, "full", 0, True, 0, True, True, True),
+    Level(4, True, "short", 0, True, 0, True, True, True),
+    Level(0, True, "short", 0, True, 0, True, True, True),
+    Level(4, True, "", 0, False, 0, True, True, True),
+    Level(0, True, "", 0, False, 0, True, True, True),
+    Level(0, True, "", 0, False, 0, False, True, True),
+    Level(0, True, "", 0, False, 0, False, True, False),
+    Level(0, False, "", 0, False, 0, False, True, False),
+    Level(0, False, "", 0, False, 0, False, False, False),
+)
+
+
+def _clock_w(label: str, clock: str) -> int:
+    if not clock:
+        return 0
+    if label == "5h":
+        return 5  # "20:23"
+    return 9 if clock == "full" else 3  # "Mon 17:49" / "Mon"
 
 
 @dataclass(frozen=True)
 class RowLayout:
-    """Column widths for one terminal width; header and rows share it.
-
-    Wide terminals get bars; narrower ones keep the pcts and drop the bars,
-    then the reset and burn columns, so the account name never vanishes.
-    """
+    """Column widths for one terminal width; header and rows share it."""
 
     width: int
     windows: tuple[str, ...]
     name_w: int
-    bar_w: int
-    show_burn: bool
-    show_reset: bool
+    tag_w: int
+    level: Level
 
     @property
-    def window_w(self) -> int:
-        # bar + " " + "100%" + " →100%"(projection) + gap
-        return (self.bar_w + 1 if self.bar_w else 0) + 4 + 6 + 1
+    def bar_w(self) -> int:
+        return self.level.bar_w
+
+    def window_bar_w(self, label: str) -> int:
+        return self.level.bar_w if label in PRIMARY_WINDOWS else self.level.scoped_bar_w
+
+    def window_w(self, label: str) -> int:
+        """``62% ▆▆▆▆ 1h59m 20:23`` (5h/7d) or ``34% ▆▆ ↻Mon`` (per model)."""
+        bar = self.window_bar_w(label)
+        w = 4 + (1 + bar if bar else 0)
+        if label in PRIMARY_WINDOWS:
+            if self.level.rel:
+                w += 1 + _REL_W
+            clock = _clock_w(label, self.level.clock)
+            if clock:
+                w += 1 + clock
+        elif self.level.scoped_reset:
+            w += 5  # " ↻Mon"
+        return max(w, len(label))  # the header names the column in full
 
     @classmethod
-    def for_width(cls, width: int, windows: Sequence[str]) -> "RowLayout":
+    def for_width(
+        cls,
+        width: int,
+        windows: Sequence[str],
+        *,
+        name_need: int = _MAX_NAME_W,
+        tag_need: int = 0,
+    ) -> "RowLayout":
         windows = tuple(windows)
-        for bar_w, burn, reset in (
-            (10, True, True),
-            (6, True, True),
-            (0, True, True),
-            (0, True, False),
-            (0, False, False),
-        ):
-            layout = cls(width, windows, 0, bar_w, burn, reset)
+        name_need = max(_MIN_NAME_W, min(name_need, _MAX_NAME_W))
+        tag_need = min(tag_need, _MAX_TAG_W)
+        for level in LEVELS:
+            tag_w = tag_need if level.tag else 0
+            layout = cls(width, windows, 0, tag_w, level)
             fixed = (
                 _PREFIX_W
-                + _TAG_W
-                + len(windows) * layout.window_w
-                + (_BURN_W if burn else 0)
-                + _ETA_W
-                + (_RESET_W if reset else 0)
+                + (tag_w + _GAP if tag_w else 0)
+                + sum(layout.window_w(label) + _GAP for label in windows)
+                + (_BURN_W + _GAP if level.burn else 0)
+                + (_ETA_W + _GAP if level.eta else 0)
+                + (level.spark_w + _GAP if level.spark_w else 0)
             )
             if width - fixed >= _MIN_NAME_W:
-                # Names rarely need more than ~28 cells; the rest is slack.
-                name_w = min(width - fixed, 28)
-                return cls(width, windows, name_w, bar_w, burn, reset)
-        return cls(width, windows, _MIN_NAME_W, 0, False, False)
+                return cls(width, windows, min(name_need, width - fixed), tag_w, level)
+        return cls(width, windows, _MIN_NAME_W, 0, LEVELS[-1])
 
 
 def _fit(text: str, width: int) -> str:
+    if width <= 0:
+        return ""
     if len(text) <= width:
         return text.ljust(width)
     return text[: max(0, width - 1)] + "…"
 
 
+def account_name(acc: AccountSnapshot) -> str:
+    return f"{acc.alias} ({acc.email})" if acc.alias else acc.email
+
+
+def row_tag(acc: AccountSnapshot, now: float, warn_days: int) -> tuple[str, bool]:
+    """(tag, is_warning) for the tag column: a login about to lapse, then
+    "disabled", then a real org name. A personal account has no tag: its
+    org is named after the email (see ``models.org_tag``)."""
+    warning = login_warning(acc, now, warn_days)
+    if warning is not None and not acc.disabled:
+        return warning, True
+    if acc.disabled:
+        return "disabled", False
+    tag = acc.display_tag
+    return ("" if tag == "personal" else tag), False
+
+
 def header_text(layout: RowLayout, *, threshold: float | None, palette: Palette = Palette.DARK) -> Text:
     text = Text(no_wrap=True, overflow="ellipsis", style=palette.muted)
     text.append(" " * _PREFIX_W)
-    text.append(_fit("account", layout.name_w + _TAG_W))
+    text.append(_fit("account", layout.name_w))
+    if layout.tag_w:
+        text.append(" " * (_GAP + layout.tag_w))
     for label in layout.windows:
-        text.append(_fit(label, layout.window_w))
-    if layout.show_burn:
-        text.append(_fit("burn", _BURN_W))
-    eta = f"ETA→{pct_label(threshold)}%" if threshold is not None else "ETA"
-    text.append(_fit(eta, _ETA_W))
-    if layout.show_reset:
-        text.append("reset")
+        text.append(" " * _GAP + _fit(label, layout.window_w(label)))
+    if layout.level.burn:
+        text.append(" " * _GAP + _fit("burn", _BURN_W))
+    if layout.level.eta:
+        eta = "ETA"
+        if threshold is not None:
+            eta = f"ETA→{pct_label(threshold)}%"
+            eta = eta if len(eta) <= _ETA_W else eta[3:]  # "→99.9%"
+        text.append(" " * _GAP + _fit(eta, _ETA_W))
+    if layout.level.spark_w:
+        label = "5h trend" if layout.level.spark_w >= 8 else "trend"
+        text.append(" " * _GAP + _fit(label, layout.level.spark_w))
+    text.rstrip()
     return text
 
 
@@ -318,37 +410,18 @@ def login_warning(acc: AccountSnapshot, now: float, warn_days: int) -> str | Non
     return f"login {data.format_duration(remaining)}"
 
 
-def login_line(
-    acc: AccountSnapshot, now: float, warn_days: int, palette: Palette
-) -> Text | None:
-    """Detail-pane line about the login itself: dead, ending soon, or its end."""
-    if acc.usage.sentinel == USAGE_RELOGIN_REQUIRED:
-        return Text(
-            f"re-login needed: press l and log in as {acc.email} "
-            "(the login page opens pre-filled; the active account is untouched)",
-            style=palette.sev_warn, no_wrap=True, overflow="ellipsis",
-        )
-    if acc.login_expires_at is None:
-        return None
-    remaining = acc.login_expires_at - now
-    clock = time.strftime("%a %d %b %H:%M", time.localtime(acc.login_expires_at))
-    if remaining <= 0:
-        msg, style = f"login ended {clock}: press l to log in again", palette.sev_warn
-    else:
-        msg = f"login ends {clock} (in {data.format_duration(remaining)})"
-        warn = login_warning(acc, now, warn_days) is not None
-        if warn:
-            msg += ": press l to log in again ahead of time"
-        style = palette.sev_warn if warn else palette.muted
-    return Text(msg, style=style, no_wrap=True, overflow="ellipsis")
-
-
 def window_pcts(acc: AccountSnapshot, models: Sequence[str]) -> dict[str, tuple[float, float | None]]:
     """label → (measured pct, resets_at epoch) for every window that gates the account."""
     return {
         label: (pct, data.iso_epoch(resets_at))
         for label, pct, resets_at in oauth.relevant_windows(acc.usage.last_good, models)
     }
+
+
+def shown_windows(acc: AccountSnapshot) -> dict[str, tuple[float, float | None]]:
+    """Every window the usage endpoint reported, per-model ones (Fable, ...)
+    included whether or not the ``models`` setting gates on them."""
+    return window_pcts(acc, ("all",))
 
 
 def live_eta(est: AccountEstimate | None, threshold: float | None, now: float) -> float | None:
@@ -371,7 +444,7 @@ def eta_cell(est: AccountEstimate | None, threshold: float | None, now: float) -
     if eta <= 0:
         return "now", "warn"
     glyph = _CONFIDENCE_GLYPH.get(est.confidence, "?")
-    return f"{data.format_duration(eta)} {glyph}".rstrip(), "fg"
+    return f"{data.compact_duration(eta)}{glyph}".rstrip(), "fg"
 
 
 def burn_cell(est: AccountEstimate | None) -> str:
@@ -383,6 +456,64 @@ def burn_cell(est: AccountEstimate | None) -> str:
     return f"+{binding.rate_pct_per_h:.1f}%/h"
 
 
+def window_len_s(label: str) -> float:
+    return WINDOW_LEN_S.get(label, WINDOW_LEN_S["7d"])  # per-model windows are weekly
+
+
+def current_points(
+    points: Sequence[Point], label: str, resets_at: float | None, now: float
+) -> tuple[list[Point], tuple[float, float]]:
+    """The points of the window running now, and the (start, now) span a
+    sparkline of it covers."""
+    start = (resets_at - window_len_s(label)) if resets_at is not None else now - window_len_s(label)
+    return [p for p in points if start <= p.t <= now], (start, now)
+
+
+def reset_clock_text(label: str, resets_at: float, style: str = "full") -> str:
+    """``20:23`` for the 5h window; ``Mon 17:49`` (or ``Mon``) for weekly ones."""
+    stamp = time.localtime(resets_at)
+    if label == "5h":
+        return time.strftime("%H:%M", stamp)
+    return time.strftime("%a %H:%M" if style == "full" else "%a", stamp)
+
+
+def window_cell(
+    label: str,
+    measured: tuple[float, float | None] | None,
+    layout: RowLayout,
+    *,
+    now: float,
+    threshold: float | None,
+    palette: Palette,
+    stale: bool = False,
+) -> Text:
+    """One window column, exactly ``layout.window_w(label)`` cells."""
+    width = layout.window_w(label)
+    cell = Text(no_wrap=True)
+    if measured is None:
+        cell.append("  ·", style=palette.track)
+    else:
+        pct, resets_at = measured
+        color = palette.severity(pct)
+        cell.append(f"{pct:3.0f}%", style=f"{color} dim" if stale else color)
+        bar = layout.window_bar_w(label)
+        if bar:
+            cell.append(" ")
+            cell.append(bar_cells(pct, bar, stale=stale, threshold=threshold, palette=palette))
+        future = resets_at is not None and resets_at > now
+        if label in PRIMARY_WINDOWS:
+            if layout.level.rel:
+                rel = "" if resets_at is None else (data.compact_duration(resets_at - now) if future else "now")
+                cell.append(" " + _fit(rel, _REL_W), style=palette.muted)
+            if layout.level.clock and future:
+                cell.append(" " + reset_clock_text(label, resets_at, layout.level.clock), style=palette.muted)
+        elif layout.level.scoped_reset and future:
+            cell.append(f" {RESET_GLYPH_SCOPED}{reset_clock_text(label, resets_at, 'short')}", style=palette.muted)
+    cell.truncate(width)
+    cell.pad_right(width - cell.cell_len)
+    return cell
+
+
 def account_row_text(
     acc: AccountSnapshot,
     est: AccountEstimate | None,
@@ -390,114 +521,334 @@ def account_row_text(
     *,
     now: float,
     threshold: float | None,
-    models: Sequence[str] = (),
     palette: Palette = Palette.DARK,
     login_warn_days: int = 3,
+    series: dict[str, list[Point]] | None = None,
 ) -> Text:
     """One account on one line, laid out by ``layout``."""
     text = Text(no_wrap=True, overflow="ellipsis")
     # The on-duty account carries a solid accent bar at the left edge.
     text.append(ON_DUTY_MARK if acc.is_active else " ", style=palette.accent)
     text.append(f"{acc.number:>2} ", style=f"bold {palette.accent}" if acc.is_active else palette.muted)
-    name = f"{acc.alias} ({acc.email})" if acc.alias else acc.email
     name_style = palette.muted if acc.disabled else palette.foreground
-    text.append(_fit(name, layout.name_w), style=f"bold {name_style}" if acc.is_active else name_style)
-    warning = login_warning(acc, now, login_warn_days)
-    if warning is not None and not acc.disabled:
-        text.append(" " + _fit(warning, _TAG_W - 1), style=palette.sev_warn)
-    else:
-        tag = "disabled" if acc.disabled else acc.display_tag
-        text.append(" " + _fit(tag, _TAG_W - 1), style=palette.muted)
+    text.append(_fit(account_name(acc), layout.name_w), style=f"bold {name_style}" if acc.is_active else name_style)
+    if layout.tag_w:
+        tag, warn = row_tag(acc, now, login_warn_days)
+        text.append(" " * _GAP + _fit(tag, layout.tag_w), style=palette.sev_warn if warn else palette.muted)
 
     sentinel = acc.usage.sentinel
     if sentinel is not None:
         style = palette.muted if sentinel == USAGE_API_KEY else palette.sev_warn
         label = RELOGIN_ROW_LABEL if sentinel == USAGE_RELOGIN_REQUIRED else data.sentinel_label(sentinel)
-        text.append(label, style=style)
+        text.append(" " * _GAP + label, style=style)
         return text
-    pcts = window_pcts(acc, models)
+    pcts = shown_windows(acc)
     if not pcts:
-        text.append("usage unknown", style=palette.muted)
+        text.append(" " * _GAP + "usage unknown", style=palette.muted)
         return text
 
     stale = acc.usage.age_s is not None and acc.usage.age_s > STALE_OK_S
     for label in layout.windows:
-        cell = Text(no_wrap=True)
-        if label not in pcts:
-            cell.append("·", style=palette.track)
-        else:
-            pct, _reset = pcts[label]
-            if layout.bar_w:
-                cell.append(bar_cells(pct, layout.bar_w, stale=stale, threshold=threshold, palette=palette))
-                cell.append(" ")
-            color = palette.severity(pct)
-            cell.append(f"{pct:3.0f}%", style=f"{color} dim" if stale else color)
-            west = est.windows.get(label) if est is not None else None
-            projected = west.projected_pct(now) if west is not None else None
-            if projected is not None and projected - pct >= 1.0:
-                cell.append(f" →{projected:.0f}%", style=f"{palette.severity(projected)} dim")
-        pad = layout.window_w - cell.cell_len
-        text.append(cell)
-        text.append(" " * max(1, pad))
-
-    if layout.show_burn:
-        text.append(_fit(burn_cell(est), _BURN_W), style=palette.muted)
-    eta, role = eta_cell(est, threshold, now)
-    eta_style = {"muted": palette.muted, "warn": palette.sev_warn}.get(role, palette.foreground)
-    text.append(_fit(eta, _ETA_W), style=eta_style)
-    if layout.show_reset:
-        binding_label = max(pcts, key=lambda k: pcts[k][0])
-        reset_at = pcts[binding_label][1]
-        if reset_at is not None:
-            remaining = reset_at - now
-            reset = data.format_duration(remaining) if remaining > 0 else "now"
-            text.append(reset, style=palette.muted)
+        text.append(" " * _GAP)
+        text.append(
+            window_cell(
+                label, pcts.get(label), layout, now=now, threshold=threshold, palette=palette, stale=stale
+            )
+        )
+    if layout.level.burn:
+        text.append(" " * _GAP + _fit(burn_cell(est), _BURN_W), style=palette.muted)
+    if layout.level.eta:
+        eta, role = eta_cell(est, threshold, now)
+        eta_style = {"muted": palette.muted, "warn": palette.sev_warn}.get(role, palette.foreground)
+        text.append(" " * _GAP + _fit(eta, _ETA_W), style=eta_style)
+    if layout.level.spark_w and "5h" in pcts:
+        points, span = current_points((series or {}).get("5h", ()), "5h", pcts["5h"][1], now)
+        text.append(" " * _GAP)
+        text.append(sparkline(points, layout.level.spark_w, palette=palette, span=span))
+    text.rstrip()
     return text
 
 
 # ---------------------------------------------------------------------------
-# Detail pane
+# Detail strip: the selected account's facts, 2-4 lines
 # ---------------------------------------------------------------------------
 
+STRIP_MAX_LINES = 4
 
-def _window_summary(
+
+def _measured_window(
     label: str,
-    est: WindowEstimate | None,
-    points: Sequence[Point],
-    measured: tuple[float, float | None] | None,
+    est: AccountEstimate | None,
+    measured: tuple[float, float | None],
+    measured_at: float | None,
+    now: float,
+    points: Sequence[Point] = (),
+) -> WindowEstimate:
+    """The window's estimate; for a window the ``models`` setting does not
+    gate (so the account estimate skipped it), one from its own history; else
+    a rate-less stand-in from the measurement (a window with no history still
+    gets its line and its graph)."""
+    west = est.windows.get(label) if est is not None else None
+    if west is None and points:
+        west = estimate_window(points, window=label, now=now)
+    if west is not None:
+        return west
+    pct, resets_at = measured
+    t = measured_at if measured_at is not None else now
+    return WindowEstimate(label, pct, t, resets_at, None, "none", (Point(t, pct, resets_at),))
+
+
+def _facts_line(head: Text, facts: Sequence[tuple[str, str]], width: int) -> Text:
+    """``head`` then `` · ``-joined (text, style) facts, dropping trailing
+    facts that do not fit (the first facts matter most)."""
+    line = head.copy()
+    for i, (fact, style) in enumerate(facts):
+        sep = "  " if i == 0 else " · "
+        if line.cell_len + len(sep) + len(fact) > width:
+            break
+        line.append(sep, style="")
+        line.append(fact, style=style)
+    line.truncate(width, overflow="ellipsis")
+    return line
+
+
+def strip_title(
+    acc: AccountSnapshot,
     *,
     now: float,
     width: int,
     palette: Palette,
+    login_warn_days: int = 3,
+    feed: str | None = None,
 ) -> Text:
-    """`` 7d ▁▁▂▂▃▃▄▅  31%  +0.4%/h  resets Thu 09:00`` for a non-plotted window."""
-    text = Text(no_wrap=True, overflow="ellipsis")
-    text.append(f"{label:>3} ", style=palette.muted)
-    spark_w = max(8, min(40, width - 40))
-    reset_at = (est.resets_at if est is not None else None) or (measured[1] if measured else None)
-    span = None
-    if points:
-        start = points[0].t
-        span = (start, max(now, points[-1].t))
-    text.append(sparkline(points, spark_w, palette=palette, span=span))
-    pct = est.last_pct if est is not None else (measured[0] if measured else None)
-    if pct is not None:
-        text.append(f"  {pct:3.0f}%", style=palette.severity(pct))
-    if est is not None and est.rate_pct_per_h is not None:
-        text.append(f"  +{est.rate_pct_per_h:.1f}%/h", style=palette.muted)
-    if reset_at is not None and reset_at > now:
-        text.append(
-            f"  resets {time.strftime('%a %H:%M', time.localtime(reset_at))}",
-            style=palette.muted,
+    """``me@x.com  Acme  on duty  login ends Sun 01 Nov (15d 9h) · token ok ·
+    measured 2m ago · feed live``."""
+    head = Text(no_wrap=True)
+    head.append(account_name(acc), style=f"bold {palette.foreground}")
+    tag, _warn = row_tag(acc, now, 0)
+    if tag:
+        head.append(f"  {tag}", style=palette.muted)
+    if acc.is_active:
+        head.append("  on duty", style=palette.accent)
+    facts: list[tuple[str, str]] = []
+    sentinel = acc.usage.sentinel
+    if acc.login_expires_at is not None and sentinel != USAGE_RELOGIN_REQUIRED:
+        remaining = acc.login_expires_at - now
+        when = time.strftime("%a %d %b", time.localtime(acc.login_expires_at))
+        if remaining <= 0:
+            facts.append(("login ended: press l", palette.sev_warn))
+        elif login_warning(acc, now, login_warn_days) is not None:
+            facts.append((f"login ends {when} ({data.compact_duration(remaining)}): press l", palette.sev_warn))
+        else:
+            facts.append((f"login ends {when} ({data.format_duration(remaining)})", palette.muted))
+    if sentinel is None:
+        if acc.usage.last_error:
+            facts.append((f"last poll failed ({acc.usage.last_error})", palette.sev_warn))
+        else:
+            facts.append(("api key" if acc.kind == "api_key" else "token ok", palette.muted))
+    if acc.usage.fetched_at is not None:
+        age = max(0.0, now - acc.usage.fetched_at)
+        stale = age > STALE_OK_S
+        facts.append((f"measured {data.format_duration(age)} ago", palette.sev_warn if stale else palette.muted))
+    if acc.is_active and feed in FEED_LABELS:
+        _glyph, role, words = FEED_LABELS[feed]
+        facts.append((words, getattr(palette, role) if role != "muted" else palette.muted))
+    return _facts_line(head, facts, width)
+
+
+def _sentinel_line(acc: AccountSnapshot, palette: Palette) -> Text | None:
+    sentinel = acc.usage.sentinel
+    if sentinel is None:
+        return None
+    if sentinel == USAGE_RELOGIN_REQUIRED:
+        msg = (
+            f"re-login needed: press l and log in as {acc.email} "
+            "(the login page opens pre-filled; the active account is untouched)"
         )
+        return Text(msg, style=palette.sev_warn, no_wrap=True, overflow="ellipsis")
+    style = palette.muted if sentinel == USAGE_API_KEY else palette.sev_warn
+    return Text(data.sentinel_label(sentinel), style=style, no_wrap=True, overflow="ellipsis")
+
+
+# Window-line segments: (name, width, drop rank). The highest rank goes first
+# when the line is too wide; "reset" shrinks to its countdown before it goes.
+_SEG_PROJ_W = 5  # " →64%"
+_SEG_SPARK_W = 12
+_SEG_BURN_W = 12  # "no trend yet"
+_SEG_ETA_W = 16  # "stays under 90%"
+_SEG_AT_RESET_W = 14  # "→100% at reset"
+_SEG_RESET_FULL_W = 25  # "resets 2d23h · Mon 17:49"
+_SEG_RESET_SHORT_W = 13  # "resets 2d23h"
+_DROP_ORDER = ("spark", "proj", "at_reset", "eta", "reset_clock", "burn")
+
+
+def _window_segments(width: int, label_w: int) -> set[str]:
+    """Which optional segments a window line keeps at ``width``."""
+    keep = {"spark", "proj", "at_reset", "eta", "reset_clock", "burn"}
+
+    def used() -> int:
+        w = label_w + 2 + 4
+        w += _SEG_PROJ_W if "proj" in keep else 0
+        w += (2 + _SEG_SPARK_W) if "spark" in keep else 0
+        w += (2 + _SEG_BURN_W) if "burn" in keep else 0
+        w += (2 + _SEG_ETA_W) if "eta" in keep else 0
+        w += (2 + _SEG_AT_RESET_W) if "at_reset" in keep else 0
+        w += 2 + (_SEG_RESET_FULL_W if "reset_clock" in keep else _SEG_RESET_SHORT_W)
+        return w
+
+    for name in _DROP_ORDER:
+        if used() <= width:
+            break
+        keep.discard(name)
+    return keep
+
+
+def window_line(
+    west: WindowEstimate,
+    measured_pct: float,
+    points: Sequence[Point],
+    resets_at: float | None = None,
+    *,
+    now: float,
+    threshold: float | None,
+    palette: Palette,
+    label_w: int,
+    keep: set[str],
+) -> Text:
+    """``5h     62% →64%  ▂▃▄▅▆▇  +12.0%/h  90% in 2h19m  →98% at reset  resets 1h59m · 20:49``.
+
+    ``resets_at`` is the measured reset (the same one the table shows); the
+    estimate's own is the fallback."""
+    label = west.window
+    if resets_at is None:
+        resets_at = west.resets_at
+    text = Text(no_wrap=True, overflow="ellipsis")
+    text.append(label.ljust(label_w), style=f"bold {palette.accent}")
+    text.append(f"  {measured_pct:3.0f}%", style=palette.severity(measured_pct))
+    rate = west.rate_pct_per_h
+    if "proj" in keep:
+        projected = west.projected_pct(now)
+        if projected is not None and projected - measured_pct >= 1.0:
+            text.append(_fit(f" →{projected:.0f}%", _SEG_PROJ_W), style=f"{palette.severity(projected)} dim")
+        else:
+            text.append(" " * _SEG_PROJ_W)
+    if "spark" in keep:
+        pts, span = current_points(points, label, resets_at, now)
+        text.append("  ")
+        text.append(sparkline(pts, _SEG_SPARK_W, palette=palette, span=span))
+    if "burn" in keep:
+        if rate is None:
+            burn = "no trend yet"
+        elif rate < 0.05:
+            burn = "flat"
+        else:
+            burn = f"+{rate:.1f}%/h"
+        text.append("  " + _fit(burn, _SEG_BURN_W), style=palette.muted)
+    if "eta" in keep:
+        eta_text, eta_style = "", palette.muted
+        if rate is not None and threshold is not None:
+            eta = west.eta_s(threshold, now)
+            thr = pct_label(threshold)
+            if eta is None:
+                eta_text = f"stays under {thr}%"
+            elif eta <= 0:
+                eta_text, eta_style = f"past {thr}%", palette.sev_warn
+            else:
+                eta_text, eta_style = f"{thr}% in {data.compact_duration(eta)}", palette.foreground
+        text.append("  " + _fit(eta_text, _SEG_ETA_W), style=eta_style)
+    future = resets_at is not None and resets_at > now
+    if "at_reset" in keep:
+        at_reset = west.projected_pct(resets_at - 1) if future and rate is not None else None
+        if at_reset is not None:
+            text.append("  " + _fit(f"→{at_reset:.0f}% at reset", _SEG_AT_RESET_W),
+                        style=f"{palette.severity(at_reset)} dim")
+        else:
+            text.append("  " + " " * _SEG_AT_RESET_W)
+    if resets_at is not None:
+        if future:
+            reset = f"resets {data.compact_duration(resets_at - now)}"
+            if "reset_clock" in keep:
+                reset += f" · {reset_clock_text(label, resets_at)}"
+        else:
+            reset = "reset, awaiting poll"
+        text.append(f"  {reset}", style=palette.muted)
+    text.rstrip()
     return text
 
 
-PLOTTED_WINDOWS = ("5h", "7d")
-TITLE_MIN_HEIGHT = 16
+def _compact_window(label: str, pct: float, resets_at: float | None, now: float, palette: Palette) -> Text:
+    """``Opus 12% ↻Mon`` for windows past the strip's line budget."""
+    text = Text(no_wrap=True)
+    text.append(label, style=f"bold {palette.accent}")
+    text.append(f" {pct:.0f}%", style=palette.severity(pct))
+    if resets_at is not None and resets_at > now:
+        text.append(f" {RESET_GLYPH_SCOPED}{reset_clock_text(label, resets_at, 'short')}", style=palette.muted)
+    return text
+
+
+def strip_lines(
+    acc: AccountSnapshot | None,
+    est: AccountEstimate | None,
+    series: dict[str, list[Point]],
+    *,
+    now: float,
+    threshold: float | None,
+    width: int,
+    palette: Palette = Palette.DARK,
+    login_warn_days: int = 3,
+    feed: str | None = None,
+    max_lines: int = STRIP_MAX_LINES,
+) -> list[Text]:
+    """The selected account in at most ``max_lines`` lines: its facts, then
+    one aligned line per usage window (5h, 7d, then each per-model window)."""
+    if acc is None or max_lines <= 0:
+        return []
+    lines = [strip_title(acc, now=now, width=width, palette=palette,
+                         login_warn_days=login_warn_days, feed=feed)]
+    note = _sentinel_line(acc, palette)
+    if note is not None:
+        lines.append(note)
+    pcts = shown_windows(acc)
+    if not pcts and note is None:
+        lines.append(Text("usage unknown: no measurement yet (f refreshes now)", style=palette.muted))
+    room = max_lines - len(lines)
+    labels = list(pcts)
+    if room <= 0 or not labels:
+        return lines[:max_lines]
+    label_w = max(len(label) for label in labels)
+    keep = _window_segments(width, label_w)
+    full = labels if len(labels) <= room else labels[: room - 1]
+    for label in full:
+        pct, resets_at = pcts[label]
+        west = _measured_window(label, est, (pct, resets_at), acc.usage.fetched_at, now, series.get(label, ()))
+        lines.append(window_line(
+            west, pct, series.get(label, ()), resets_at, now=now, threshold=threshold,
+            palette=palette, label_w=label_w, keep=keep,
+        ))
+    rest = labels[len(full):]
+    if rest:
+        line = Text(no_wrap=True, overflow="ellipsis")
+        for i, label in enumerate(rest):
+            if i:
+                line.append(" · ", style=palette.muted)
+            line.append(_compact_window(label, *pcts[label], now, palette))
+        line.truncate(width, overflow="ellipsis")
+        lines.append(line)
+    return lines[:max_lines]
+
+
+# ---------------------------------------------------------------------------
+# History view (h): the current windows' graphs and the long-term view
+# ---------------------------------------------------------------------------
+
 # Two graphs sit side by side from this pane width; below it they stack.
 SIDE_BY_SIDE_MIN_WIDTH = 100
 _SIDE_GAP = 3
+# Graph heights are capped, so the history view is sized to what it shows
+# and never turns into a wall on a tall terminal.
+CURRENT_PLOT_MAX = 8
+LONG_PLOT_MAX = 10
+_MIN_PLOT = 4
 LONG_5H_SPAN_S = 7 * 86400.0
 LONG_7D_SPAN_S = 30 * 86400.0
 _MIN_LONG_7D_SPAN_S = 7 * 86400.0
@@ -512,34 +863,17 @@ class LongTerm:
 
 
 def account_title(acc: AccountSnapshot, palette: Palette, suffix: str = "") -> Text:
-    """``me@x.com  personal  on duty`` above the graphs."""
-    name = f"{acc.alias} ({acc.email})" if acc.alias else acc.email
+    """``me@x.com  Acme  on duty`` above the graphs."""
     text = Text(no_wrap=True, overflow="ellipsis")
-    text.append(name, style=f"bold {palette.foreground}")
-    text.append(f"  {'disabled' if acc.disabled else acc.display_tag}", style=palette.muted)
+    text.append(account_name(acc), style=f"bold {palette.foreground}")
+    tag = "disabled" if acc.disabled else acc.display_tag
+    if tag != "personal":
+        text.append(f"  {tag}", style=palette.muted)
     if acc.is_active:
         text.append("  on duty", style=palette.accent)
     if suffix:
         text.append(f"  {suffix}", style=palette.muted)
     return text
-
-
-def _window_estimate(
-    label: str,
-    est: AccountEstimate | None,
-    measured: tuple[float, float | None] | None,
-    measured_at: float | None,
-) -> WindowEstimate | None:
-    """The estimate to plot for one window, or a rate-less stand-in built from
-    the measured pct (so a window with no history still gets its graph)."""
-    west = est.windows.get(label) if est is not None else None
-    if west is not None:
-        return west
-    if measured is None:
-        return None
-    pct, resets_at = measured
-    t = measured_at if measured_at is not None else time.time()
-    return WindowEstimate(label, pct, t, resets_at, None, "none", (Point(t, pct, resets_at),))
 
 
 def plot_title(
@@ -550,7 +884,7 @@ def plot_title(
     palette: Palette,
     measured_pct: float | None = None,
 ) -> Text:
-    """``5h  62% →64%  +12.0%/h  90% in 2h 19m  resets 16:40``.
+    """``5h  62% →64%  +12.0%/h  90% in 2h19m  resets 16:40``.
 
     The pct is the snapshot's measurement (the same number as the row), with
     the projection beside it once they differ by a point or more."""
@@ -573,15 +907,11 @@ def plot_title(
                 text.append(f"  past {pct_label(threshold)}%", style=palette.sev_warn)
             else:
                 text.append(
-                    f"  {pct_label(threshold)}% in {data.format_duration(eta)}",
+                    f"  {pct_label(threshold)}% in {data.compact_duration(eta)}",
                     style=palette.foreground,
                 )
     if west.resets_at is not None and west.resets_at > now:
-        fmt = "%H:%M" if west.window == "5h" else "%a %H:%M"
-        text.append(
-            f"  resets {time.strftime(fmt, time.localtime(west.resets_at))}",
-            style=palette.muted,
-        )
+        text.append(f"  resets {reset_clock_text(west.window, west.resets_at)}", style=palette.muted)
     return text
 
 
@@ -606,10 +936,18 @@ def _block_width(width: int, n_blocks: int) -> int:
     return width
 
 
+def _arrange_height(n_blocks: int, width: int, plot_h: int) -> int:
+    """Lines ``n_blocks`` (title + plot) blocks take at ``plot_h``."""
+    if n_blocks == 2 and width >= SIDE_BY_SIDE_MIN_WIDTH:
+        return 1 + plot_h
+    return n_blocks * (1 + plot_h)
+
+
 def _arrange(
-    blocks: list[tuple[Text, object]], *, width: int, height: int
+    blocks: list[tuple[Text, object]], *, width: int, height: int, max_plot: int
 ) -> list[Text]:
-    """Lay out (title, render(width, plot_h) -> lines) blocks in ``height``.
+    """Lay out (title, render(width, plot_h) -> lines) blocks in at most
+    ``height`` lines, each plot at most ``max_plot`` rows.
 
     Two blocks go side by side on a wide pane, else they stack and share the
     height. Each block is its title line plus its plot.
@@ -618,95 +956,47 @@ def _arrange(
         return []
     if len(blocks) == 2 and width >= SIDE_BY_SIDE_MIN_WIDTH:
         col_w = _block_width(width, 2)
-        plot_h = min(MAX_PLOT_LINES, height - 1)
-        columns = [[title, *render(col_w, plot_h)] for title, render in blocks]
+        plot_h = min(max_plot, height - 1)
+        columns = [[title, *render(col_w, plot_h)] if plot_h > 0 else [title] for title, render in blocks]
         return _side_by_side(columns[0], columns[1], col_w)[:height]
     each = height // len(blocks)
     lines: list[Text] = []
     for i, (title, render) in enumerate(blocks):
         share = height - each * (len(blocks) - 1) if i == len(blocks) - 1 else each
-        plot_h = min(MAX_PLOT_LINES, share - 1)
+        plot_h = min(max_plot, share - 1)
         lines.append(title)
         if plot_h > 0:
             lines.extend(render(width, plot_h))
     return lines[:height]
 
 
-def detail_lines(
-    acc: AccountSnapshot | None,
+def current_blocks(
+    acc: AccountSnapshot,
     est: AccountEstimate | None,
     series: dict[str, list[Point]],
     *,
     now: float,
     threshold: float | None,
-    width: int,
-    height: int,
-    models: Sequence[str] = (),
-    palette: Palette = Palette.DARK,
-    login_warn_days: int = 3,
-) -> list[Text]:
-    """The detail pane for one account, at most ``height`` lines: its 5h and
-    7d graphs, then a sparkline per extra (per-model) window."""
-    if acc is None or height <= 0:
-        return []
-    # On a short pane the highlighted row already names the account; the
-    # graphs need the line more than a repeated title does.
-    lines = [account_title(acc, palette)] if height >= TITLE_MIN_HEIGHT else []
-    login = login_line(acc, now, login_warn_days, palette)
-    if login is not None:
-        lines.append(login)
+    palette: Palette,
+) -> list[tuple[Text, object]]:
+    """(title, renderer) for the 5h and 7d graphs of the current windows."""
+    pcts = window_pcts(acc, ())
+    blocks = []
+    for label in PRIMARY_WINDOWS:
+        if label not in pcts:
+            continue
+        west = _measured_window(label, est, pcts[label], acc.usage.fetched_at, now)
+        history = [p for p in series.get(label, ()) if p.t <= now]
 
-    pcts = window_pcts(acc, models)
-    plotted = {
-        label: west
-        for label in PLOTTED_WINDOWS
-        if (west := _window_estimate(label, est, pcts.get(label), acc.usage.fetched_at))
-        is not None
-    }
-    if not plotted:
-        # No measurement at all (sentinel, api key, never fetched): the full
-        # card carries the facts, so the pane is never empty.
-        card = account_card_text(acc, width, threshold=threshold, now=now, palette=palette)
-        lines.extend(card.split()[1:])
-        lines.append(Text("no usage history yet: the graphs fill in as polls land", style=palette.muted))
-        return lines[:height]
-
-    extras = [label for label in pcts if label not in PLOTTED_WINDOWS]
-    extras += [
-        label for label in (est.windows if est else {}) if label not in PLOTTED_WINDOWS and label not in extras
-    ]
-
-    def renderer(west: WindowEstimate):
-        history = [p for p in series.get(west.window, ()) if p.t <= now]
-
-        def render(w: int, h: int) -> list[Text]:
+        def render(w: int, h: int, west=west, history=history) -> list[Text]:
             return line_plot(
                 west, now=now, threshold=threshold, width=w, height=h,
                 palette=palette, points=history or None,
             )
 
-        return render
-
-    blocks = [
-        (
-            plot_title(
-                west, now=now, threshold=threshold, palette=palette,
-                measured_pct=pcts[label][0] if label in pcts else None,
-            ),
-            renderer(west),
-        )
-        for label, west in plotted.items()
-    ]
-    body_h = height - len(lines) - len(extras)
-    lines.extend(_arrange(blocks, width=width, height=body_h))
-    for label in extras:
-        lines.append(
-            _window_summary(
-                label, est.windows.get(label) if est else None, series.get(label, []),
-                pcts.get(label), now=now, width=width, palette=palette,
-            )
-        )
-    return lines[:height]
+        title = plot_title(west, now=now, threshold=threshold, palette=palette, measured_pct=pcts[label][0])
+        blocks.append((title, render))
+    return blocks
 
 
 def long_term_lines(
@@ -718,12 +1008,14 @@ def long_term_lines(
     width: int,
     height: int,
     palette: Palette = Palette.DARK,
+    title: bool = True,
+    max_plot: int = LONG_PLOT_MAX,
 ) -> list[Text]:
     """The long-term view: one column per past 5h window over the last week,
     and the 7d usage curve over up to 30 days (as far back as history goes)."""
     if acc is None or height <= 0:
         return []
-    lines = [account_title(acc, palette, "history · h for current windows")]
+    lines = [account_title(acc, palette, "history · h for the table")] if title else []
     if long_term is None:
         lines.append(Text("loading history…", style=palette.muted))
         return lines[:height]
@@ -774,7 +1066,44 @@ def long_term_lines(
             ),
         ),
     ]
-    lines.extend(_arrange(blocks, width=width, height=height - len(lines)))
+    lines.extend(_arrange(blocks, width=width, height=height - len(lines), max_plot=max_plot))
+    return lines[:height]
+
+
+def history_lines(
+    acc: AccountSnapshot | None,
+    est: AccountEstimate | None,
+    series: dict[str, list[Point]],
+    long_term: LongTerm | None,
+    *,
+    now: float,
+    threshold: float | None,
+    width: int,
+    height: int,
+    palette: Palette = Palette.DARK,
+) -> list[Text]:
+    """The ``h`` view, at most ``height`` lines: the current 5h/7d graphs
+    when there is room for them beside the long-term view, then the
+    long-term view (past 5h peaks, the 7d curve across weeks)."""
+    if acc is None or height <= 0:
+        return []
+    lines = [account_title(acc, palette, "history · h for the table")]
+    room = height - 1
+    blocks = current_blocks(acc, est, series, now=now, threshold=threshold, palette=palette)
+    long_need = _arrange_height(2, width, _MIN_PLOT)
+    if blocks and room - long_need >= _arrange_height(len(blocks), width, _MIN_PLOT):
+        # Room for both: the current graphs take up to CURRENT_PLOT_MAX rows
+        # and leave the long-term view at least its minimum.
+        plot_h = CURRENT_PLOT_MAX
+        while plot_h > _MIN_PLOT and room - _arrange_height(len(blocks), width, plot_h) < long_need:
+            plot_h -= 1
+        cur_h = _arrange_height(len(blocks), width, plot_h)
+        lines.extend(_arrange(blocks, width=width, height=cur_h, max_plot=plot_h))
+        room -= cur_h
+    lines.extend(long_term_lines(
+        acc, long_term, now=now, threshold=threshold, width=width, height=room,
+        palette=palette, title=False,
+    ))
     return lines[:height]
 
 
@@ -827,7 +1156,8 @@ class _Painted(Static):
         screen = self.screen
         if not isinstance(screen, MainScreen):
             return Text()
-        return getattr(screen, self._painter)(self.size.width or 80, self.size.height or 1)
+        width = self.size.width or max(1, screen.size.width - 2)
+        return getattr(screen, self._painter)(width, self.size.height or 1)
 
 
 class ActionButton(Button):
@@ -924,7 +1254,7 @@ class MainScreen(Screen):
         self.watch(self.app, "snapshot", self._on_snapshot)
         self.watch(self.app, "estimates", lambda _e: self.repaint())
         self.watch(self.app, "long_view", lambda _v: self.repaint())
-        self.watch(self.app, "long_term", lambda _l: self.query_one("#detail").refresh())
+        self.watch(self.app, "long_term", lambda _l: self._repaint_detail())
         self.watch(self.app, "auto_status", lambda _s: self._repaint_status())
         self.watch(self.app, "feed_state", lambda _f: self._repaint_status())
         self.watch(self.app, "theme", lambda _t: self.repaint())
@@ -948,16 +1278,43 @@ class MainScreen(Screen):
         return child.number if isinstance(child, AccountRow) else None
 
     def window_labels(self) -> tuple[str, ...]:
-        labels = ["5h", "7d"]
+        """5h, 7d, then every per-model window any account reports."""
+        labels = list(PRIMARY_WINDOWS)
         snap = self.app.snapshot
         for acc in snap.accounts if snap else ():
-            for label in window_pcts(acc, self.app.models):
+            for label in shown_windows(acc):
                 if label not in labels:
                     labels.append(label)
         return tuple(labels)
 
     def layout_for(self, width: int) -> RowLayout:
-        return RowLayout.for_width(width, self.window_labels())
+        snap = self.app.snapshot
+        accounts = snap.accounts if snap else ()
+        now = time.time()
+        names = [len(account_name(acc)) for acc in accounts]
+        tags = [len(row_tag(acc, now, self.app.login_warn_days)[0]) for acc in accounts]
+        return RowLayout.for_width(
+            width,
+            self.window_labels(),
+            name_need=max(names, default=_MIN_NAME_W),
+            tag_need=max(tags, default=0),
+        )
+
+    def detail_budget(self) -> int:
+        """Lines the detail pane may take so the page fits the terminal:
+        the screen minus the header, table, event log and key strip."""
+        listview = self.query_one("#accounts", ListView)
+        rows = listview.outer_size.height or len(listview.children)
+        log = self.query_one("#event-log")
+        used = (
+            1  # status band
+            + 2  # column header + its margin
+            + rows
+            + 1  # detail margin
+            + 2  # key strip + its margin
+            + (log.outer_size.height or 3 if log.display else 0)
+        )
+        return max(0, self.size.height - used)
 
     # -- painters (called from widget render) ---------------------------------
 
@@ -995,46 +1352,56 @@ class MainScreen(Screen):
             self.layout_for(width),
             now=time.time(),
             threshold=self.app.threshold_pct,
-            models=self.app.models,
             palette=self.palette,
             login_warn_days=self.app.login_warn_days,
+            series=self.app.series.get(number, {}),
         )
 
-    def detail_text(self, width: int, height: int) -> Text:
+    def detail_text(self, width: int, _height: int) -> Text:
         number = self.selected_number
         acc = self.account(number)
+        budget = self.detail_budget()
+        est = self.app.estimates.get(number) if number else None
+        series = self.app.series.get(number, {}) if number else {}
         if self.app.long_view:
-            lines = long_term_lines(
+            lines = history_lines(
                 acc,
+                est,
+                series,
                 self.app.long_term.get(number) if number else None,
                 now=time.time(),
                 threshold=self.app.threshold_pct,
                 width=width,
-                height=height,
+                height=budget,
                 palette=self.palette,
             )
-            return Text("\n").join(lines)
-        lines = detail_lines(
-            acc,
-            self.app.estimates.get(number) if number else None,
-            self.app.series.get(number, {}) if number else {},
-            now=time.time(),
-            threshold=self.app.threshold_pct,
-            width=width,
-            height=height,
-            models=self.app.models,
-            palette=self.palette,
-            login_warn_days=self.app.login_warn_days,
-        )
+        else:
+            lines = strip_lines(
+                acc,
+                est,
+                series,
+                now=time.time(),
+                threshold=self.app.threshold_pct,
+                width=width,
+                palette=self.palette,
+                login_warn_days=self.app.login_warn_days,
+                feed=self.app.feed_state or None,
+                max_lines=min(STRIP_MAX_LINES, budget),
+            )
         return Text("\n").join(lines)
 
     # -- refresh ---------------------------------------------------------------
 
     def repaint(self) -> None:
-        for widget_id in ("#status", "#columns", "#detail"):
+        for widget_id in ("#status", "#columns"):
             self.query_one(widget_id).refresh()
+        self._repaint_detail()
         for row in self.query(AccountRow):
             row.repaint()
+
+    def _repaint_detail(self) -> None:
+        # The pane is as tall as its content, so a repaint may resize it.
+        self.query_one("#detail").refresh(layout=True)
 
     def _repaint_status(self) -> None:
         self.query_one("#status").refresh()
@@ -1065,7 +1432,7 @@ class MainScreen(Screen):
             self.query_one(f"#{button_id}").display = button_id not in hidden
 
     def on_list_view_highlighted(self, _event: ListView.Highlighted) -> None:
-        self.query_one("#detail").refresh()
+        self._repaint_detail()
 
     def on_list_view_selected(self, event: ListView.Selected) -> None:
         if isinstance(event.item, AccountRow):
@@ -1129,7 +1496,8 @@ __all__ = [
     "QUIET_KINDS",
     "RowLayout",
     "account_row_text",
-    "detail_lines",
+    "history_lines",
+    "strip_lines",
     "event_text",
     "header_text",
     "status_text",

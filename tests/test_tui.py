@@ -709,21 +709,21 @@ class TestUsageRows:
 class TestAccountRowText:
     """The one-line account row and the column math it shares with the header."""
 
-    def _layout(self, width: int = 120, windows=("5h", "7d")):
+    def _layout(self, width: int = 120, windows=("5h", "7d"), **kw):
         from claude_rotater.tui.main import RowLayout
 
-        return RowLayout.for_width(width, windows)
+        return RowLayout.for_width(width, windows, **kw)
 
-    def _row(self, acc, est=None, *, width=120, threshold=90.0, now=None, models=()):
+    def _row(self, acc, est=None, *, width=120, threshold=90.0, now=None, windows=("5h", "7d"), series=None, **kw):
         from claude_rotater.tui.main import account_row_text
 
         return account_row_text(
             acc,
             est,
-            self._layout(width),
+            self._layout(width, windows, **kw),
             now=now if now is not None else time.time(),
             threshold=threshold,
-            models=models,
+            series=series,
         ).plain
 
     def test_active_marker_and_pcts(self):
@@ -736,9 +736,22 @@ class TestAccountRowText:
         row = self._row(make_account(2, entry=make_entry(12.0, 44.0)))
         assert row.startswith("  2 ")
 
-    def test_disabled_tag_replaces_org_tag(self):
-        row = self._row(make_account(3, disabled=True))
-        assert "disabled" in row and "[personal]" not in row
+    def test_disabled_tag_shown_personal_tag_hidden(self):
+        row = self._row(make_account(3, disabled=True), tag_need=8)
+        assert "disabled" in row
+        plain = self._row(make_account(3), tag_need=8)
+        assert "personal" not in plain and "disabled" not in plain
+
+    def test_email_shown_once_for_a_personal_org(self):
+        acc = dataclasses.replace(
+            make_account(1, email="me@x.com"), org_name="me@x.com's Organization", org_uuid="o"
+        )
+        row = self._row(acc, tag_need=24)
+        assert row.count("me@x.com") == 1
+
+    def test_real_org_is_tagged(self):
+        acc = dataclasses.replace(make_account(1, email="me@x.com"), org_name="Acme Corp", org_uuid="o")
+        assert "Acme Corp" in self._row(acc, tag_need=9)
 
     def test_absent_window_is_a_dot_not_invented(self):
         row = self._row(make_account(1, entry=make_entry(pct5=92.0, pct7=None)))
@@ -759,79 +772,127 @@ class TestAccountRowText:
         assert "—" in row
         assert "%/h" not in row
 
-    def test_eta_burn_and_projection_from_estimate(self):
+    def test_eta_and_burn_from_estimate(self):
         from claude_rotater.estimator import WindowEstimate, AccountEstimate
 
         now = time.time()
-        # measured 60% 30 min ago at 10%/h: 65% projected now, 90% in 2.5h
+        # measured 60% 30 min ago at 10%/h: 90% in 2.5h
         win = WindowEstimate("5h", 60.0, now - 1800, now + 4 * 3600, 10.0, "medium", ())
         est = AccountEstimate({"5h": win}, win, None, None, "medium")
         acc = make_account(1, active=True, entry=make_entry(60.0, 10.0))
         row = self._row(acc, est, now=now)
-        assert "→65%" in row
         assert "+10.0%/h" in row
-        assert "2h 30m ~" in row
+        assert "2h30m~" in row
+        assert "→" not in row  # the projection lives in the strip
 
-    def test_projection_hidden_below_one_point(self):
-        from claude_rotater.estimator import WindowEstimate, AccountEstimate
-
+    def test_reset_countdown_and_clock_per_window(self):
         now = time.time()
-        win = WindowEstimate("5h", 60.0, now - 60, now + 3600, 10.0, "high", ())
-        est = AccountEstimate({"5h": win}, win, None, None, "high")
-        row = self._row(make_account(1, entry=make_entry(60.0, 10.0)), est, now=now)
-        assert "→" not in row
+        acc = make_account(1, entry=make_entry(80.0, 10.0))
+        row = self._row(acc, now=now, width=160)
+        five = tui_data.iso_epoch(acc.usage.last_good["five_hour"]["resets_at"])
+        seven = tui_data.iso_epoch(acc.usage.last_good["seven_day"]["resets_at"])
+        assert tui_data.compact_duration(five - now) in row
+        assert time.strftime("%H:%M", time.localtime(five)) in row
+        assert tui_data.compact_duration(seven - now) in row
+        assert time.strftime("%a %H:%M", time.localtime(seven)) in row
 
-    def test_narrow_layout_drops_bars_keeps_name(self):
+    def test_narrow_layout_drops_bars_keeps_name_and_resets(self):
         acc = make_account(1, active=True, entry=make_entry(62.0, 31.0), email="me@x.com")
         row = self._row(acc, width=70)
         assert "me@x.com" in row and "62%" in row
         assert not has_bar(row)
+        assert "1h59m" in row or "2h00m" in row
         assert len(row) <= 70
 
-    def test_scoped_window_column(self):
+    def test_model_window_column(self):
         entry = make_entry(10.0, 20.0, scoped=[("Fable", 55.0)])
-        from claude_rotater.tui.main import RowLayout, account_row_text
-
-        layout = RowLayout.for_width(140, ("5h", "7d", "Fable"))
-        row = account_row_text(
-            make_account(1, entry=entry), None, layout,
-            now=time.time(), threshold=90.0, models=("Fable",),
-        ).plain
+        acc = make_account(1, entry=entry)
+        row = self._row(acc, width=160, windows=("5h", "7d", "Fable"))
+        reset = tui_data.iso_epoch(entry.last_good["scoped"][0]["resets_at"])
         assert "55%" in row
+        assert "↻" + time.strftime("%a", time.localtime(reset)) in row
 
-    def test_reset_column_uses_binding_window(self):
-        row = self._row(make_account(1, entry=make_entry(80.0, 10.0)))
-        assert row.rstrip().endswith(("1h 59m", "2h"))
+    def test_model_column_without_that_window_is_a_dot(self):
+        row = self._row(make_account(1, entry=make_entry(10.0, 20.0)), width=160, windows=("5h", "7d", "Fable"))
+        assert "·" in row
+
+    def test_sparkline_of_the_current_5h_window(self):
+        now = time.time()
+        acc = make_account(1, entry=make_entry(62.0, 31.0))
+        series = burn_history(now)["1"]
+        row = self._row(acc, now=now, width=200, series=series)
+        assert any(ch in row for ch in "▁▂▃▄▅▆▇█"[3:])
 
 
 class TestRowLayout:
-    def test_wide_gets_full_bars(self):
+    def test_wide_gets_full_bars_clocks_and_trend(self):
         from claude_rotater.tui.main import RowLayout
 
-        layout = RowLayout.for_width(120, ("5h", "7d"))
-        assert layout.bar_w == 10 and layout.show_burn and layout.show_reset
+        layout = RowLayout.for_width(160, ("5h", "7d"))
+        level = layout.level
+        assert layout.bar_w == 8 and level.clock == "full" and level.spark_w and level.burn and level.eta
 
     def test_degrades_in_order(self):
+        from claude_rotater.tui.main import LEVELS, RowLayout
+
+        widths = [RowLayout.for_width(w, ("5h", "7d", "Fable"), tag_need=9) for w in (200, 160, 120, 95, 80, 66, 50)]
+        ranks = [LEVELS.index(lay.level) for lay in widths]
+        assert ranks == sorted(ranks)
+        assert not widths[-1].level.burn
+        assert all(lay.name_w >= 16 for lay in widths)
+
+    def test_names_never_squeezed_below_minimum(self):
         from claude_rotater.tui.main import RowLayout
 
-        widths = [RowLayout.for_width(w, ("5h", "7d")) for w in (120, 95, 80, 66, 50)]
-        bars = [lay.bar_w for lay in widths]
-        assert bars == sorted(bars, reverse=True)
-        assert not widths[-1].show_burn and not widths[-1].show_reset
+        layout = RowLayout.for_width(78, ("5h", "7d", "Fable"), name_need=40, tag_need=9)
+        assert 16 <= layout.name_w <= 32
 
     def test_header_matches_row_columns(self):
         from claude_rotater.tui.main import RowLayout, account_row_text, header_text
 
-        layout = RowLayout.for_width(120, ("5h", "7d"))
+        layout = RowLayout.for_width(160, ("5h", "7d"))
         header = header_text(layout, threshold=90.0).plain
         row = account_row_text(
             make_account(1, entry=make_entry(62.0, 31.0)), None, layout,
             now=time.time(), threshold=90.0,
         ).plain
         col = header.index("7d")
-        # the 7d meter (31%: three full cells) starts exactly under its label
-        assert row[col : col + 3] == "███"
-        assert "ETA→90%" in header
+        # the 7d pct starts exactly under its label, its meter right after
+        assert row[col : col + 4] == " 31%"
+        assert row[col + 5 : col + 7] == "██"
+        assert "ETA→90%" in header and "burn" in header
+
+    def test_header_names_model_columns_in_full(self):
+        from claude_rotater.tui.main import RowLayout, header_text
+
+        for width in (80, 120, 160):
+            layout = RowLayout.for_width(width, ("5h", "7d", "Sonnet"))
+            assert "Sonnet" in header_text(layout, threshold=90.0).plain, width
+
+    def test_long_threshold_label_drops_eta_prefix(self):
+        from claude_rotater.tui.main import RowLayout, header_text
+
+        header = header_text(RowLayout.for_width(120, ("5h", "7d")), threshold=99.9).plain
+        assert "→99.9%" in header and "ETA→99.9%" not in header
+
+
+class TestCompactDuration:
+    @pytest.mark.parametrize(
+        "seconds, expected",
+        [(-5, "<1m"), (30, "<1m"), (60, "1m"), (59 * 60, "59m"), (3600, "1h00m"),
+         (7140, "1h59m"), (86399, "23h59m"), (86400, "1d0h"), (6 * 86400 + 23 * 3600, "6d23h")],
+    )
+    def test_format(self, seconds, expected):
+        assert tui_data.compact_duration(seconds) == expected
+        assert len(tui_data.compact_duration(seconds)) <= 6
+
+    def test_reset_clock_text(self):
+        from claude_rotater.tui.main import reset_clock_text
+
+        t = time.mktime((2026, 10, 19, 17, 49, 0, 0, 0, -1))  # a Monday
+        assert reset_clock_text("5h", t) == "17:49"
+        assert reset_clock_text("7d", t) == "Mon 17:49"
+        assert reset_clock_text("Fable", t, "short") == "Mon"
 
 
 class TestStatusText:
@@ -1070,6 +1131,7 @@ class TestMainPage:
             first = row_plain(app, "1")
             assert first.startswith("▌") and "me@x.com" in first and "62%" in first
             assert "\n" not in first
+            assert "personal" not in first  # a personal account needs no tag
             assert "work@y.com" in row_plain(app, "2")
             assert "disabled" in row_plain(app, "3")
 
@@ -1109,8 +1171,9 @@ class TestMainPage:
             assert fake_calls(app) == []
 
     @pytest.mark.parametrize("size", [(120, 40), (80, 24)])
-    async def test_no_blank_band_above_action_bar(self, tmp_path, size):
-        """The plot takes the free height and an empty event log takes none."""
+    async def test_page_is_as_tall_as_its_content(self, tmp_path, size):
+        """No plot pads the page: the key strip follows the detail strip, and
+        an empty event log takes no room."""
         fake = three_accounts(tmp_path)
         with_history(fake, burn_history(time.time()))
         app = make_app(fake)
@@ -1120,10 +1183,30 @@ class TestMainPage:
             assert not log.display  # only a quiet no-switch event so far
             detail = app.screen.query_one("#detail")
             actions = app.screen.query_one("#actions")
-            assert detail.region.bottom == actions.region.y
-            painted_lines = painted(app, "#detail").splitlines()
-            assert len(painted_lines) >= detail.size.height - 1
-            assert actions.region.bottom == size[1]
+            lines = painted(app, "#detail").splitlines()
+            assert 2 <= len(lines) <= 4 and detail.size.height == len(lines)
+            assert actions.region.y == detail.region.bottom + 1
+            assert actions.region.bottom < size[1]
+
+    @pytest.mark.parametrize("size", [(80, 24), (120, 40)])
+    async def test_four_accounts_fit_without_scrolling(self, tmp_path, size):
+        fake = FakeSwitcher(
+            [
+                make_account(1, active=True, entry=make_entry(62.0, 31.0, scoped=[("Fable", 34.0)])),
+                make_account(2, entry=make_entry(12.0, 44.0)),
+                make_account(3, entry=make_entry(91.0, 85.0, scoped=[("Fable", 0.0)])),
+                make_account(4, disabled=True, entry=UsageEntry()),
+            ],
+            tmp_path,
+        )
+        app = make_app(fake)
+        async with app.run_test(size=size) as pilot:
+            await settle(pilot)
+            listview = app.screen.query_one("#accounts")
+            assert listview.max_scroll_y == 0 and len(listview.children) == 4
+            assert app.screen.max_scroll_y == 0
+            assert app.screen.query_one("#actions").region.bottom <= size[1]
+            assert "Fable" in painted(app, "#columns")
 
     async def test_event_log_appears_with_first_event(self, tmp_path, fake_engine):
         from claude_rotater.autoswitch import ErrorEvent
@@ -1147,6 +1230,7 @@ class TestMainPage:
             first = row_plain(app, "1")
             assert "me@x" in first and "62%" in first
             assert not has_bar(first)  # meters dropped before names
+            assert "1h59m" in first or "2h00m" in first  # resets kept
             # every action chip stays on screen
             from textual.widgets import Button
 
@@ -1155,18 +1239,19 @@ class TestMainPage:
             assert app.screen.query_one("#actions") is not None
             assert painted(app, "#detail")
 
-    async def test_no_history_account_shows_card_and_dash_eta(self, tmp_path):
+    async def test_no_history_account_shows_strip_and_dash_eta(self, tmp_path):
         app = make_app(three_accounts(tmp_path))
         async with app.run_test(size=(120, 40)) as pilot:
             await settle(pilot)
             assert "—" in row_plain(app, "1")
             detail = painted(app, "#detail")
-            # measured pcts still get both graphs, flagged as having no trend
+            # measured pcts still get a line each, flagged as having no trend
             assert detail.count("no trend yet") == 2
-            assert "5h  62%" in detail and "7d  31%" in detail
-            assert "resets" in detail
+            assert "62%" in detail and "31%" in detail
+            assert "resets" in detail and "token ok" in detail
+            assert not any(0x2800 <= ord(ch) <= 0x28FF for ch in detail)  # no plots
 
-    async def test_synthetic_history_gives_eta_and_plot(self, tmp_path):
+    async def test_synthetic_history_gives_eta_and_strip(self, tmp_path):
         import re
 
         fake = three_accounts(tmp_path)
@@ -1176,13 +1261,13 @@ class TestMainPage:
             await settle(pilot)
             first = row_plain(app, "1")
             # 62% at 12%/h → 90% in ~2h20m, before the 3h reset
-            assert re.search(r"2h 1\dm|2h 20m", first), first
+            assert re.search(r"2h1\dm|2h20m", first), first
             assert "+12.0%/h" in first
             detail = painted(app, "#detail")
             assert "me@x.com" in detail and "on duty" in detail
-            assert "5h  62%  +12.0%/h  90% in 2h" in detail
-            assert "7d  31%  +0.4%/h" in detail
-            assert any(0x2800 <= ord(ch) <= 0x28FF for ch in detail)  # braille plots
+            assert re.search(r"5h +62%.*\+12\.0%/h +90% in 2h", detail), detail
+            assert re.search(r"7d +31%.*\+0\.4%/h", detail), detail
+            assert "at reset" in detail
             # account 2 has no history: its ETA is a dash
             assert "—" in row_plain(app, "2")
 
@@ -1516,22 +1601,23 @@ class TestLoginWarning:
         from claude_rotater.tui.main import RowLayout, account_row_text
 
         acc = self._acc(86400 + 60)
-        text = account_row_text(acc, None, RowLayout.for_width(120, ("5h", "7d")), now=time.time(), threshold=90)
+        layout = RowLayout.for_width(120, ("5h", "7d"), tag_need=8)
+        text = account_row_text(acc, None, layout, now=time.time(), threshold=90)
         assert "login 1d" in text.plain and "personal" not in text.plain
 
-    def test_row_without_warning_keeps_org_tag(self):
+    def test_row_without_warning_has_no_personal_tag(self):
         from claude_rotater.tui.main import RowLayout, account_row_text
 
-        text = account_row_text(self._acc(30 * 86400), None, RowLayout.for_width(120, ("5h", "7d")),
-                                now=time.time(), threshold=90)
-        assert "personal" in text.plain
+        layout = RowLayout.for_width(120, ("5h", "7d"), tag_need=8)
+        text = account_row_text(self._acc(30 * 86400), None, layout, now=time.time(), threshold=90)
+        assert "personal" not in text.plain and "login" not in text.plain
 
-    def test_detail_shows_login_end_and_dead_hint(self):
+    def test_strip_shows_login_end_and_dead_hint(self):
         from claude_rotater.json_output import USAGE_RELOGIN_REQUIRED
-        from claude_rotater.tui.main import detail_lines
+        from claude_rotater.tui.main import strip_lines
 
         def login_text(acc, width):
-            lines = detail_lines(acc, None, {}, now=time.time(), threshold=90, width=width, height=20)
+            lines = strip_lines(acc, None, {}, now=time.time(), threshold=90, width=width)
             return next(line.plain for line in lines if "login" in line.plain)
 
         far = login_text(self._acc(30 * 86400), 100)
@@ -2051,45 +2137,149 @@ class TestLongTermLines:
         assert long_term_lines(None, None, now=now, threshold=90, width=80, height=10) == []
 
 
-class TestDetailGraphs:
-    def _lines(self, width, height=24):
+class TestStripLines:
+    """The detail strip: facts, then one aligned line per usage window."""
+
+    def _lines(self, width=120, *, entry=None, series=None, max_lines=4, feed=None, acc=None):
         from claude_rotater.estimator import estimate_account
-        from claude_rotater.tui.main import detail_lines
+        from claude_rotater.tui.main import strip_lines
+
+        now = time.time()
+        series = burn_history(now)["1"] if series is None else series
+        est = estimate_account(series, models=(), threshold=90, now=now)
+        acc = acc or make_account(1, active=True, entry=entry or make_entry(62.0, 31.0), email="me@x.com")
+        return [
+            line.plain
+            for line in strip_lines(acc, est, series, now=now, threshold=90, width=width,
+                                    max_lines=max_lines, feed=feed)
+        ]
+
+    @pytest.mark.parametrize("width", [80, 120, 160])
+    def test_fits_and_keeps_the_essentials(self, width):
+        lines = self._lines(width)
+        assert 3 <= len(lines) <= 4
+        assert all(len(line) <= width for line in lines)
+        assert lines[0].startswith("me@x.com") and "on duty" in lines[0]
+        five = next(line for line in lines if line.startswith("5h"))
+        assert "62%" in five and "+12.0%/h" in five and "resets " in five
+
+    def test_wide_line_carries_projection_at_reset_and_clock(self):
+        five = next(line for line in self._lines(160) if line.startswith("5h"))
+        assert "at reset" in five and "·" in five  # "resets 1h59m · 20:23"
+        narrow = next(line for line in self._lines(80) if line.startswith("5h"))
+        assert "at reset" not in narrow and "resets " in narrow
+
+    def test_model_windows_get_their_own_lines(self):
+        entry = make_entry(62.0, 31.0, scoped=[("Fable", 34.0)])
+        lines = self._lines(120, entry=entry)
+        fable = next(line for line in lines if line.startswith("Fable"))
+        assert "34%" in fable and "resets" in fable
+        # labels share one column width, so the pcts line up
+        five = next(line for line in lines if line.startswith("5h"))
+        assert five.index("62%") == fable.index("34%")
+
+    def test_model_window_burn_from_its_own_history(self):
+        now = time.time()
+        series = burn_history(now)["1"]
+        series["Fable"] = linear_points(
+            now=now, start_pct=10.0, rate_pct_per_h=1.0, span_s=86400, step_s=3600,
+            resets_at=now + 2 * 86400,
+        )
+        entry = make_entry(62.0, 31.0, scoped=[("Fable", 34.0)])
+        fable = next(line for line in self._lines(120, entry=entry, series=series) if line.startswith("Fable"))
+        assert "+1.0%/h" in fable
+
+    def test_no_model_windows_no_model_lines(self):
+        lines = self._lines(120)
+        assert [line.split()[0] for line in lines[1:]] == ["5h", "7d"]
+
+    def test_extra_windows_fold_into_the_last_line(self):
+        entry = make_entry(62.0, 31.0, scoped=[("Fable", 34.0), ("Opus", 12.0)])
+        lines = self._lines(120, entry=entry)
+        assert len(lines) == 4
+        assert lines[-1].startswith("Fable 34%") and "Opus 12%" in lines[-1] and "↻" in lines[-1]
+
+    def test_facts_drop_from_the_end_when_narrow(self):
+        acc = dataclasses.replace(
+            make_account(1, active=True, entry=make_entry(62.0, 31.0), email="me@x.com"),
+            login_expires_at=time.time() + 20 * 86400,
+        )
+        wide = self._lines(160, acc=acc, feed="live")[0]
+        assert "login ends" in wide and "token ok" in wide and "measured" in wide and "feed live" in wide
+        narrow = self._lines(60, acc=acc, feed="live")[0]
+        assert "login ends" in narrow and "feed live" not in narrow and len(narrow) <= 60
+
+    def test_feed_not_set_up_shows_on_the_active_account(self):
+        assert "feed: not set up" in self._lines(160, feed="unset")[0]
+
+    def test_poll_error_replaces_token_ok(self):
+        entry = dataclasses.replace(make_entry(62.0, 31.0), last_error="http-429")
+        title = self._lines(160, entry=entry)[0]
+        assert "last poll failed (http-429)" in title and "token ok" not in title
+
+    def test_line_budget_is_respected(self):
+        assert len(self._lines(120, max_lines=2)) == 2
+        assert self._lines(120, max_lines=0) == []
+
+    def test_unknown_usage_says_so(self):
+        lines = self._lines(120, entry=UsageEntry(), series={})
+        assert "usage unknown" in lines[1]
+
+    def test_rolled_over_window_awaits_a_poll(self):
+        from claude_rotater.tui.main import strip_lines
+
+        acc = make_account(1, entry=make_entry(62.0, 31.0))
+        acc.usage.last_good["five_hour"]["resets_at"] = _iso_in(-60)
+        lines = [line.plain for line in strip_lines(acc, None, {}, now=time.time(), threshold=90, width=120)]
+        assert any("reset, awaiting poll" in line for line in lines)
+
+
+class TestHistoryLines:
+    def _lines(self, width, height):
+        from claude_rotater.estimator import estimate_account
+        from claude_rotater.tui.main import LongTerm, history_lines
 
         now = time.time()
         series = burn_history(now)["1"]
         est = estimate_account(series, models=(), threshold=90, now=now)
         acc = make_account(1, active=True, entry=make_entry(62.0, 31.0), email="me@x.com")
+        lt = LongTerm(
+            peaks_5h=((now - 86400, 95.0), (now - 2 * 86400, 40.0)),
+            series_7d=tuple(Point(now - 9 * 86400 + h * 3600, h / 3, None) for h in range(200)),
+        )
         return [
             line.plain
-            for line in detail_lines(acc, est, series, now=now, threshold=90, width=width, height=height)
+            for line in history_lines(acc, est, series, lt, now=now, threshold=90, width=width, height=height)
         ]
 
-    def test_wide_pane_puts_5h_and_7d_side_by_side(self):
-        lines = self._lines(120)
-        assert any(line.startswith("5h  ") and "7d  " in line for line in lines)
+    def test_tall_pane_shows_current_graphs_and_long_term(self):
+        lines = self._lines(120, 31)
+        text = "\n".join(lines)
+        assert any(line.startswith("5h  62%") and "7d  31%" in line for line in lines)
+        assert "5h peaks" in text and "7d usage" in text
+        assert len(lines) < 31  # sized to what it shows, not to the pane
         assert all(len(line) <= 120 for line in lines)
 
-    def test_narrow_pane_stacks_them(self):
-        lines = self._lines(80)
-        starts = [i for i, line in enumerate(lines) if line.startswith(("5h  ", "7d  "))]
-        assert len(starts) == 2 and starts[1] > starts[0] + 3
-        assert all(len(line) <= 80 for line in lines)
+    def test_short_pane_keeps_the_long_term_view(self):
+        lines = self._lines(80, 15)
+        text = "\n".join(lines)
+        assert "5h peaks" in text and "7d usage" in text
+        assert not any(line.startswith("5h  62%") for line in lines)
+        assert len(lines) <= 15
 
-    def test_each_graph_has_threshold_and_projection(self):
-        lines = self._lines(80, height=30)
+    def test_graph_heights_are_capped(self):
+        from claude_rotater.tui.main import CURRENT_PLOT_MAX, LONG_PLOT_MAX
+
+        assert len(self._lines(160, 200)) <= 1 + 2 * 1 + CURRENT_PLOT_MAX + 2 + LONG_PLOT_MAX + 2
+
+    def test_current_graphs_have_threshold_and_projection(self):
         from claude_rotater.tui.plot import RESET_GLYPH, THRESHOLD_GLYPH
 
-        five = lines[: next(i for i, l in enumerate(lines) if l.startswith("7d  "))]
-        seven = lines[len(five):]
-        for block in (five, seven):
-            body = "\n".join(block)
-            assert THRESHOLD_GLYPH in body and RESET_GLYPH in body
-            assert "now" in block[-1]
-
-    def test_short_pane_drops_the_account_title(self):
-        assert self._lines(80, height=12)[0].startswith("5h  ")
-        assert self._lines(80, height=24)[0].startswith("me@x.com")
+        lines = self._lines(120, 31)
+        start = next(i for i, line in enumerate(lines) if line.startswith("5h  62%"))
+        end = next(i for i, line in enumerate(lines) if line.startswith("5h peaks"))
+        body = "\n".join(lines[start:end])
+        assert THRESHOLD_GLYPH in body and RESET_GLYPH in body and "now" in body
 
 
 class TestSnapshotKey:
@@ -2127,12 +2317,16 @@ class TestLongTermView:
             assert history.reads == reads + 1  # history read once on the way in
             detail = painted(app, "#detail")
             assert "5h peaks" in detail and "7d usage" in detail
+            assert "5h  62%" in detail  # the current-window graphs moved here
             assert "4 windows · 1 past 90%" in detail  # 3 past + the running one
             assert app.long_term["1"].peaks_5h
+            # the page still fits: the key strip stays on screen
+            assert app.screen.query_one("#actions").region.bottom <= 40
             await pilot.press("h")
             await settle(pilot)
             assert not app.long_view
-            assert "5h  62%" in painted(app, "#detail")
+            detail = painted(app, "#detail")
+            assert "5h peaks" not in detail and "token ok" in detail
 
     async def test_history_button(self, tmp_path):
         fake = three_accounts(tmp_path)
@@ -2305,7 +2499,7 @@ class TestStatuslineKey:
 @pytest.mark.asyncio
 class TestWidths:
     @pytest.mark.parametrize("size", [(80, 24), (120, 40), (160, 50)])
-    async def test_main_page_fits_and_shows_both_graphs(self, tmp_path, size):
+    async def test_main_page_fits_with_table_and_strip(self, tmp_path, size):
         from textual.widgets import Button
 
         fake = three_accounts(tmp_path)
@@ -2318,14 +2512,39 @@ class TestWidths:
             assert len(status) <= width and "rota" in status and "switch at 90%" in status
             for number in ("1", "2", "3"):
                 assert len(row_plain(app, number)) <= width - 1
+            first = row_plain(app, "1")
+            assert "62%" in first and "31%" in first and ("1h59m" in first or "2h00m" in first)
+            assert has_bar(first) == (width >= 120)
             detail = painted(app, "#detail").splitlines()
-            assert any(line.startswith("5h  62%") for line in detail)
-            assert any("7d  31%" in line for line in detail)
-            side_by_side = any(line.startswith("5h  ") and "7d  " in line for line in detail)
-            assert side_by_side == (width >= 120)
+            assert 3 <= len(detail) <= 4
+            assert detail[0].startswith("me@x.com")
+            assert any(line.startswith("5h") and "62%" in line for line in detail)
+            assert any(line.startswith("7d") and "31%" in line for line in detail)
+            assert not any(0x2800 <= ord(ch) <= 0x28FF for ch in "".join(detail))
             assert all(len(line) <= width for line in detail)
             assert all(b.region.right <= width for b in app.screen.query(Button) if b.display)
-            assert app.screen.query_one("#actions").region.bottom == size[1]
+            assert app.screen.query_one("#actions").region.bottom <= size[1]
+
+    @pytest.mark.parametrize("size", [(80, 24), (120, 40), (160, 50)])
+    async def test_model_columns_follow_the_data(self, tmp_path, size):
+        fake = FakeSwitcher(
+            [
+                make_account(1, active=True, entry=make_entry(62.0, 31.0, scoped=[("Fable", 34.0)])),
+                make_account(2, entry=make_entry(12.0, 44.0)),
+            ],
+            tmp_path,
+        )
+        app = make_app(fake)
+        async with app.run_test(size=size) as pilot:
+            await settle(pilot)
+            assert "Fable" in painted(app, "#columns")
+            assert "34%" in row_plain(app, "1")
+            assert "·" in row_plain(app, "2")  # no Fable window: a dot, not 0%
+            assert any(line.startswith("Fable") for line in painted(app, "#detail").splitlines())
+        plain = make_app(three_accounts(tmp_path))
+        async with plain.run_test(size=size) as pilot:
+            await settle(pilot)
+            assert "Fable" not in painted(plain, "#columns")
 
     @pytest.mark.parametrize("size", [(80, 24), (120, 40), (160, 50)])
     async def test_long_term_view_fits(self, tmp_path, size):
