@@ -2,8 +2,9 @@
 
 Every test drives the page only with the keys a user presses: ↑/↓ to move,
 ←/→ (or -/+) to change, digits / enter / esc for exact values, ctrl+r to reset.
-No test focuses a widget or sets a value directly. ConfigScreen runs inside a
-minimal host App over a tmp backup dir, so nothing touches the real store.
+No test focuses a widget or sets a value directly. ConfigView runs inside a
+minimal host App over a tmp backup dir (with a prompt line showing the
+settings hint, as on the main page), so nothing touches the real store.
 """
 
 from __future__ import annotations
@@ -15,9 +16,13 @@ import pytest
 from textual.app import App, ComposeResult
 from textual.widgets import Static
 
+from claude_rotater.tui.prompt import PromptLine, hint_text
+from claude_rotater.tui.theme import Palette
+
 from claude_rotater.settings import SETTING_GROUPS, SETTING_SPECS, settings_path
 from claude_rotater.tui.config import (
-    ConfigScreen,
+    HINT_KEYS,
+    ConfigView,
     SettingsList,
     check_typed,
     spec_detail,
@@ -26,25 +31,31 @@ from claude_rotater.tui.config import (
 
 
 class Host(App):
-    """A base screen with ConfigScreen pushed on top, recording every
-    SettingChanged that reaches the app."""
+    """ConfigView over a prompt line, recording every SettingChanged that
+    reaches the app and whether the view asked to be closed."""
 
     def __init__(self, backup_dir: Path, *, delay: float = 0.0) -> None:
         super().__init__()
         self.backup_dir = backup_dir
         self.delay = delay
         self.changes: list[str] = []
+        self.closed = False
 
     def compose(self) -> ComposeResult:
-        yield Static("base", id="base")
+        view = ConfigView(self.backup_dir)
+        view.NOTIFY_DELAY_S = self.delay
+        yield view
+        yield PromptLine()
 
     def on_mount(self) -> None:
-        screen = ConfigScreen(self.backup_dir)
-        screen.NOTIFY_DELAY_S = self.delay
-        self.push_screen(screen)
+        self.query_one(PromptLine).set_hint(hint_text(HINT_KEYS, Palette.DARK))
+        self.query_one(ConfigView).open()
 
-    def on_config_screen_setting_changed(self, message: ConfigScreen.SettingChanged) -> None:
+    def on_config_view_setting_changed(self, message: ConfigView.SettingChanged) -> None:
         self.changes.append(message.key)
+
+    def on_config_view_closed(self, _message: ConfigView.Closed) -> None:
+        self.closed = True
 
 
 def read_file(backup_dir: Path) -> dict | None:
@@ -59,8 +70,8 @@ def section(backup_dir: Path, name: str) -> dict:
 
 
 def lst(app: Host) -> SettingsList:
-    assert isinstance(app.screen, ConfigScreen)
-    return app.screen.settings_list
+    assert not app.closed
+    return app.query_one(SettingsList)
 
 
 def footer(app: Host) -> str:
@@ -266,14 +277,14 @@ class TestNavigation:
             await pilot.press(*["down"] * (last_auto + 1))
             assert lst(app).spec.group == specs[last_auto + 1].group != "autoswitch"
 
-    @pytest.mark.parametrize("key", ["escape", "c", "q"])
-    async def test_close_keys_pop_back(self, tmp_path, key):
+    @pytest.mark.parametrize("key", ["escape", "c"])
+    async def test_close_keys_ask_to_go_back(self, tmp_path, key):
         app = Host(tmp_path)
         async with app.run_test(size=(120, 40)) as pilot:
             await pilot.pause()
             await pilot.press(key)
             await pilot.pause()
-            assert not isinstance(app.screen, ConfigScreen)
+            assert app.closed
 
     async def test_click_selects_row(self, tmp_path):
         app = Host(tmp_path)
@@ -478,7 +489,7 @@ class TestExactEntry:
             assert read_file(tmp_path) is None
             await pilot.press("escape")
             assert lst(app).editing is None
-            assert isinstance(app.screen, ConfigScreen)  # esc cancelled, did not close
+            assert not app.closed  # esc cancelled, did not close
             assert "‹ 90% ›" in plain(app)
             assert footer(app) == spec_detail(lst(app).spec)
 
@@ -519,7 +530,7 @@ class TestExactEntry:
             await pilot.pause()
             await go_to(pilot, app, "autoswitch.model")
             await pilot.press("enter", "q", "c")
-            assert isinstance(app.screen, ConfigScreen)
+            assert not app.closed
             assert lst(app).editing == "qc"
 
     async def test_letters_on_a_number_do_not_start_editing(self, tmp_path):
@@ -574,7 +585,7 @@ class TestResetAndNotify:
             await go_to(pilot, app, "autoswitch.threshold")
             await pilot.press("right", "down", "right", "escape")
             await pilot.pause()
-            assert not isinstance(app.screen, ConfigScreen)
+            assert app.closed
             assert sorted(app.changes) == sorted(
                 ["autoswitch.threshold", ordered_specs()[1].dotted]
             )

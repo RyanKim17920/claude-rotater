@@ -24,7 +24,7 @@ FOREGROUND = "#dde3ea"  # cool off-white
 MUTED = "#8a96a6"  # slate grey for labels and secondary text
 BACKGROUND = "#11151c"  # blue-black slate
 SURFACE = "#19202a"  # header band, highlighted row
-PANEL = "#232c38"  # most elevated: chips, modals
+PANEL = "#232c38"  # most elevated: chips
 
 # Usage severity ramp.
 SEV_OK = "#6fc4aa"  # sea glass: plenty of headroom
@@ -86,9 +86,8 @@ class Palette:
         )
 
 
-def _variables(accent: str, panel: str, foreground: str, track: str) -> dict[str, str]:
+def _variables(panel: str, foreground: str, track: str) -> dict[str, str]:
     return {
-        "footer-key-foreground": accent,
         "block-cursor-background": panel,
         "block-cursor-foreground": foreground,
         "block-cursor-text-style": "none",
@@ -109,7 +108,7 @@ ROTA_DARK = Theme(
     warning=SEV_WARN,
     error=SEV_CRIT,
     dark=True,
-    variables=_variables(ACCENT, PANEL, FOREGROUND, TRACK),
+    variables=_variables(PANEL, FOREGROUND, TRACK),
 )
 
 # Light companion: the same roles on a cool near-white, deepened for AA.
@@ -137,7 +136,7 @@ ROTA_LIGHT = Theme(
     warning=SEV_WARN_LIGHT,
     error=SEV_CRIT_LIGHT,
     dark=False,
-    variables=_variables(ACCENT_LIGHT, PANEL_LIGHT, FOREGROUND_LIGHT, TRACK_LIGHT),
+    variables=_variables(PANEL_LIGHT, FOREGROUND_LIGHT, TRACK_LIGHT),
 )
 
 Palette.DARK = Palette(

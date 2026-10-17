@@ -24,7 +24,13 @@ Layout, top to bottom, as tall as the terminal allows:
   ``h`` swaps in the long-term view (past 5h peaks, the 7d curve across
   weeks);
 - a 3-line log of recent non-routine engine events (hidden until the first);
-- the action bar: the five everyday keys and ``? more`` for the full list.
+- the prompt line (:mod:`claude_rotater.tui.prompt`): a short dim hint when
+  idle; every question, text entry and result happens there, never in a
+  popup.
+
+``?`` swaps the charts for the list of keys, and ``c`` swaps the whole body
+(table, charts, log) for the settings list; the header and the prompt line
+stay put. Every key works straight from the page.
 
 One convention for estimates everywhere: measured values are plain, anything
 extrapolated is told apart by its look (``~`` prefix, a lighter tint in a
@@ -50,10 +56,10 @@ from typing import TYPE_CHECKING, Sequence
 from rich.text import Text
 from textual.app import ComposeResult
 from textual.binding import Binding
-from textual.containers import Horizontal
+from textual.containers import Vertical
 from textual.css.scalar import Scalar
 from textual.screen import Screen
-from textual.widgets import Button, ListItem, ListView, RichLog, Static
+from textual.widgets import ListItem, ListView, RichLog, Static
 
 from claude_rotater import oauth, profiles
 from claude_rotater.autoswitch import AutoSwitchEvent, pct_label
@@ -75,7 +81,9 @@ from claude_rotater.tui.plot import (
     peak_columns,
     windows_per_bar,
 )
-from claude_rotater.tui.modals import KeysModal
+from claude_rotater.tui.config import HINT_KEYS as CONFIG_HINT_KEYS
+from claude_rotater.tui.config import ConfigView
+from claude_rotater.tui.prompt import PromptLine, hint_text
 from claude_rotater.tui.theme import Palette, blend, brand_chip
 from claude_rotater.tui.widgets import BAR_EIGHTHS, BAR_FULL, BAR_TICK
 from claude_rotater.usage_history import Point
@@ -1105,25 +1113,19 @@ class _Painted(Static):
         return getattr(screen, self._painter)(width, self.size.height or 1)
 
 
-class ActionButton(Button):
-    """Mouse-clickable action chip that never takes focus: the account list
-    keeps the keyboard, so arrows/enter always mean the list."""
-
-    can_focus = False
-
-
-ACTIONS: tuple[tuple[str, str, str, str], ...] = (
-    # (button id, key glyph, word, screen action): the five everyday keys
-    ("act-switch", "⏎", "switch", "switch_selected"),
-    ("act-add", "a", "add", "app.add"),
-    ("act-history", "h", "history", "toggle_long"),
-    ("act-config", "c", "config", "app.open_config"),
-    ("act-quit", "q", "quit", "app.quit"),
-    ("act-help", "?", "more", "help"),
+# The prompt line's idle hint: the everyday key and the way to the rest.
+MAIN_HINT_KEYS: tuple[tuple[str, str], ...] = (
+    ("⏎", "switch"),
+    ("a", "add"),
+    ("?", "keys"),
 )
 
-# Every key, listed by ``?`` in two columns; each works from the main page.
-KEY_COLUMNS: tuple[tuple[tuple[str, tuple[tuple[str, str], ...]], ...], ...] = (
+KeyGroup = tuple[str, tuple[tuple[str, str], ...]]  # (heading, ((key, words), ...))
+
+# Every key, listed by ``?`` in two columns in place of the charts; each
+# works from the main page. Two columns of at most 12 lines fit a 60x20
+# terminal beside three accounts.
+KEY_COLUMNS: tuple[tuple[KeyGroup, ...], ...] = (
     (
         ("accounts", (
             ("↑↓ jk", "move"),
@@ -1133,6 +1135,10 @@ KEY_COLUMNS: tuple[tuple[tuple[str, tuple[tuple[str, str], ...]], ...], ...] = (
             ("t", "paste a token"),
             ("d", "turn off / on"),
             ("x", "remove"),
+        )),
+        ("app", (
+            ("?", "this list (esc back)"),
+            ("q", "quit"),
         )),
     ),
     (
@@ -1145,35 +1151,72 @@ KEY_COLUMNS: tuple[tuple[tuple[str, tuple[tuple[str, str], ...]], ...], ...] = (
             ("c", "config"),
             ("s", "statusline feed"),
         )),
-        ("app", (
-            ("?", "this list"),
-            ("q", "quit"),
-        )),
     ),
 )
+_KEY_W = 7  # "ctrl+t "
+_COL_GAP = 3
 
 
-def action_label(key: str, word: str) -> str:
-    """Chip markup: the key in the accent, the word in the muted text color."""
-    return f"[b $primary]{key}[/] [$secondary]{word}[/]"
+def keys_text(
+    columns: tuple[tuple[KeyGroup, ...], ...] = KEY_COLUMNS, *, palette: Palette = Palette.DARK
+) -> Text:
+    """Key groups laid out in side-by-side columns: a dim heading per group,
+    then one ``key  words`` line per key."""
+    rendered: list[list[Text]] = []
+    for groups in columns:
+        lines: list[Text] = []
+        for heading, keys in groups:
+            if lines:
+                lines.append(Text())
+            lines.append(Text(heading, style=palette.muted))
+            for key, words in keys:
+                line = Text()
+                line.append(f"{key:<{_KEY_W}}", style=f"bold {palette.accent}")
+                line.append(words, style=palette.foreground)
+                lines.append(line)
+        rendered.append(lines)
+    widths = [max((line.cell_len for line in col), default=0) for col in rendered]
+    body = Text(no_wrap=True)
+    for i in range(max((len(col) for col in rendered), default=0)):
+        if i:
+            body.append("\n")
+        for c, col in enumerate(rendered):
+            cell = col[i].copy() if i < len(col) else Text()
+            if c < len(rendered) - 1:
+                cell.pad_right(widths[c] - cell.cell_len + _COL_GAP)
+            body.append(cell)
+    body.rstrip()
+    return body
+
+
+KEYS_ROWS = len(keys_text().plain.splitlines())
+
+# Screen actions that only make sense with the account table in view; the
+# settings list gets the keyboard to itself while it is shown.
+MAIN_ONLY_ACTIONS = frozenset({
+    "login_selected", "add", "add_token", "toggle_selected", "remove_selected",
+    "toggle_long", "statusline", "refresh_full", "help", "leave_panel",
+    "cursor_down", "cursor_up", "open_config",
+})
 
 
 class MainScreen(Screen):
-    """The only page besides Config: header, account table, charts, actions."""
+    """The one screen: header, then the account body or the settings in its
+    place, then the prompt line."""
 
     BINDINGS = [
-        Binding("l", "login_selected", "Log in", show=False),
-        Binding("a", "app.add", "Add", show=False),
-        Binding("t", "app.add_token", "Add token", show=False),
-        Binding("d", "toggle_selected", "Disable/enable", show=False),
-        Binding("x,delete", "remove_selected", "Remove", show=False),
-        Binding("c", "app.open_config", "Config", show=False),
-        Binding("h", "toggle_long", "History", show=False),
-        Binding("s", "app.statusline", "Statusline", show=False),
-        Binding("f", "app.refresh_full", "Refresh", show=False),
-        Binding("question_mark", "help", "More keys", show=False),
-        Binding("q", "app.quit", "Quit", show=False),
-        Binding("escape", "leave_history", "Back", show=False),
+        Binding("l", "login_selected", show=False),
+        Binding("a", "add", show=False),
+        Binding("t", "add_token", show=False),
+        Binding("d", "toggle_selected", show=False),
+        Binding("x,delete", "remove_selected", show=False),
+        Binding("c", "open_config", show=False),
+        Binding("h", "toggle_long", show=False),
+        Binding("s", "statusline", show=False),
+        Binding("f", "refresh_full", show=False),
+        Binding("question_mark", "help", show=False),
+        Binding("q", "app.quit", show=False),
+        Binding("escape", "leave_panel", show=False),
         Binding("j", "cursor_down", show=False),
         Binding("k", "cursor_up", show=False),
     ]
@@ -1186,26 +1229,30 @@ class MainScreen(Screen):
 
     def compose(self) -> ComposeResult:
         yield _Painted("status_line", id="status")
-        yield ListView(id="accounts")
-        yield _Painted("detail_text", id="detail")
-        # Hidden until the first event: an empty log would only be a blank band.
-        log = RichLog(id="event-log", highlight=False, markup=False, wrap=False, max_lines=50)
-        log.display = False
-        yield log
-        with Horizontal(id="actions"):
-            for button_id, key, word, _action in ACTIONS:
-                yield ActionButton(action_label(key, word), id=button_id)
+        with Vertical(id="body"):
+            yield ListView(id="accounts")
+            yield _Painted("detail_text", id="detail")
+            # Hidden until the first event: an empty log would only be a blank band.
+            log = RichLog(id="event-log", highlight=False, markup=False, wrap=False, max_lines=50)
+            log.display = False
+            yield log
+        config = ConfigView(self.app.switcher.backup_dir, id="config")
+        config.display = False
+        yield config
+        yield PromptLine(id="prompt")
 
     def on_mount(self) -> None:
         self.query_one("#accounts", ListView).focus()
         self._content_key: tuple | None = None
+        self.keys_shown = False  # ``?``: the key list in place of the charts
+        self._set_hint()
         self.watch(self.app, "snapshot", self._on_snapshot)
         self.watch(self.app, "estimates", lambda _e: self.repaint())
         self.watch(self.app, "long_view", lambda _v: self.repaint())
         self.watch(self.app, "long_term", lambda _l: self._repaint_detail())
         self.watch(self.app, "auto_status", lambda _s: self._repaint_status())
         self.watch(self.app, "feed_state", lambda _f: self._repaint_status())
-        self.watch(self.app, "theme", lambda _t: self.repaint())
+        self.watch(self.app, "theme", lambda _t: self._on_theme())
         self.set_interval(self.CLOCK_TICK_S, self.repaint)
 
     # -- state accessors ------------------------------------------------------
@@ -1213,6 +1260,24 @@ class MainScreen(Screen):
     @property
     def palette(self) -> Palette:
         return Palette.from_theme(self.app.current_theme)
+
+    @property
+    def prompt(self) -> PromptLine:
+        return self.query_one(PromptLine)
+
+    @property
+    def config(self) -> ConfigView:
+        return self.query_one(ConfigView)
+
+    @property
+    def config_shown(self) -> bool:
+        return self.config.display
+
+    def check_action(self, action: str, parameters: tuple) -> bool | None:
+        """With the settings shown, the account keys stand down."""
+        if action in MAIN_ONLY_ACTIONS and self.config_shown:
+            return False
+        return True
 
     def account(self, number: str | None) -> AccountSnapshot | None:
         snap = self.app.snapshot
@@ -1249,22 +1314,24 @@ class MainScreen(Screen):
             1  # status band
             + 1  # table margin
             + 1  # detail margin
-            + 2  # key strip + its margin
+            + 2  # prompt line + its margin
             + (log.outer_size.height or 3 if log.display else 0)
         )
 
     def _fit_table(self) -> None:
         """Let the table take every row the page can spare: with the charts
         hidden the rows get the room, and a long list scrolls instead of
-        pushing the key strip off screen."""
+        pushing the prompt line off screen."""
         listview = self.query_one("#accounts", ListView)
         rows = max(1, self.size.height - self._chrome_rows())
+        if self.keys_shown:  # the key list needs its rows whole; the table scrolls
+            rows = max(1, rows - KEYS_ROWS)
         if listview.styles.max_height != Scalar.parse(str(rows)):
             listview.styles.max_height = rows
 
     def detail_budget(self) -> int:
         """Lines the pane under the table may take so the page fits the
-        terminal: the screen minus the header, table, event log and key strip."""
+        terminal: the screen minus the header, table, event log and prompt line."""
         listview = self.query_one("#accounts", ListView)
         rows = listview.outer_size.height or len(listview.children)
         return max(0, self.size.height - self._chrome_rows() - rows)
@@ -1314,6 +1381,8 @@ class MainScreen(Screen):
             return Text("loading…", style=self.palette.muted)
         if not snap.accounts:
             return Text("No managed accounts yet. Press a to add one.", style=self.palette.muted)
+        if self.keys_shown:
+            return keys_text(palette=self.palette)
         number = self.selected_number
         acc = self.account(number)
         budget = self.detail_budget()
@@ -1356,6 +1425,16 @@ class MainScreen(Screen):
     def _repaint_status(self) -> None:
         self.query_one("#status").refresh()
 
+    def _set_hint(self) -> None:
+        keys = CONFIG_HINT_KEYS if self.config_shown else MAIN_HINT_KEYS
+        self.prompt.set_hint(hint_text(keys, self.palette))
+
+    def _on_theme(self) -> None:
+        self._set_hint()
+        self.repaint()
+        if self.config_shown:
+            self.config.settings_list.refresh()
+
     async def _on_snapshot(self, snap: AccountsSnapshot | None) -> None:
         if snap is None:
             return
@@ -1391,11 +1470,6 @@ class MainScreen(Screen):
         if isinstance(event.item, AccountRow):
             self.app.do_switch(event.item.number)
 
-    async def on_button_pressed(self, event: Button.Pressed) -> None:
-        action = next((a for bid, _k, _w, a in ACTIONS if bid == event.button.id), None)
-        if action is not None:
-            await self.run_action(action)
-
     def write_event(self, event: AutoSwitchEvent) -> None:
         if event.kind in QUIET_KINDS:
             return
@@ -1413,14 +1487,55 @@ class MainScreen(Screen):
         self.query_one("#accounts", ListView).action_cursor_up()
 
     def action_toggle_long(self) -> None:
+        self._show_keys(False)
         self.app.toggle_long_view()
 
-    def action_leave_history(self) -> None:
-        if self.app.long_view:
+    def action_leave_panel(self) -> None:
+        """esc: close the key list, else leave the history view."""
+        if self.keys_shown:
+            self._show_keys(False)
+        elif self.app.long_view:
             self.app.toggle_long_view()
 
     def action_help(self) -> None:
-        self.app.push_screen(KeysModal(KEY_COLUMNS))
+        """``?``: the key list in place of the charts, or back."""
+        self._show_keys(not self.keys_shown)
+
+    def _show_keys(self, shown: bool) -> None:
+        if shown != self.keys_shown:
+            self.keys_shown = shown
+            self.repaint()
+
+    # -- the settings, in place of the body -------------------------------------
+
+    def action_open_config(self) -> None:
+        self.prompt.cancel()
+        self.query_one("#body").display = False
+        self.config.display = True
+        self.config.open()
+        self._set_hint()
+
+    def on_config_view_closed(self, event: ConfigView.Closed) -> None:
+        event.stop()
+        self.config.display = False
+        self.query_one("#body").display = True
+        self.query_one("#accounts", ListView).focus()
+        self._set_hint()
+        self.repaint()
+
+    # -- app actions, gated by check_action -------------------------------------
+
+    def action_add(self) -> None:
+        self.app.action_add()
+
+    def action_add_token(self) -> None:
+        self.app.action_add_token()
+
+    def action_statusline(self) -> None:
+        self.app.action_statusline()
+
+    def action_refresh_full(self) -> None:
+        self.app.action_refresh_full()
 
     def action_switch_selected(self) -> None:
         number = self.selected_number

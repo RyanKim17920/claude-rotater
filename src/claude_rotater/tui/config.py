@@ -14,18 +14,18 @@ grouped under the ``SETTING_GROUPS`` headings, and the keys are:
   of range is refused with the range shown and the edit stays open: nothing
   is ever clamped silently;
 - ctrl+r: back to the default (the key is removed from settings.json);
-- esc (or c / q while not editing): back to the main page.
+- esc (or c while not editing): back to the main page.
 
 Every change is written at once through ``set_setting`` / ``unset_setting``
 (the shared validated writers in settings.py); a value equal to the default is
-stored by removing the key, so the file only holds what differs. The screen
-then posts ``ConfigScreen.SettingChanged`` so the host app can react
+stored by removing the key, so the file only holds what differs. The view
+then posts ``ConfigView.SettingChanged`` so the host app can react
 (restart the engine, apply the theme). Those notifications are debounced per
 key by ``NOTIFY_DELAY_S``: holding → for a few seconds writes every step but
 restarts the engine once. Leaving the page flushes anything pending.
 
 Rows show a label, the value and, only where it differs from the default,
-"custom". The footer shows the focused setting's full help, range, step and
+"custom". The line under the list shows the focused setting's full help, range, step and
 default, wrapped over as many lines as it needs, so nothing is cut off.
 """
 
@@ -38,10 +38,9 @@ from rich.text import Text
 from textual import events
 from textual.app import ComposeResult
 from textual.binding import Binding
-from textual.containers import VerticalScroll
+from textual.containers import Vertical, VerticalScroll
 from textual.geometry import Region
 from textual.message import Message
-from textual.screen import Screen
 from textual.widget import Widget
 from textual.widgets import Static
 
@@ -56,9 +55,10 @@ from claude_rotater.settings import (
     set_setting,
     unset_setting,
 )
-from claude_rotater.tui.theme import Palette, brand_chip
+from claude_rotater.tui.theme import Palette
 
-# Short enough to fit whole at 60 columns: a cut-off hint loses "esc back".
+# The prompt line's hint while the settings are shown. Short enough to fit
+# whole at 60 columns: a cut-off hint loses "esc back".
 HINT_KEYS: tuple[tuple[str, str], ...] = (
     ("↑↓", "move"),
     ("←→", "change"),
@@ -69,7 +69,7 @@ HINT_KEYS: tuple[tuple[str, str], ...] = (
 _LABEL_W = 26
 _VALUE_W = 16
 # Rows carry no help text: cut to fit it only ever read as a fragment. The
-# footer shows the focused setting's whole description.
+# detail line shows the focused setting's whole description.
 CUSTOM_MARK = "custom"  # only on rows that differ from the default
 
 
@@ -84,7 +84,7 @@ def with_unit(spec: SettingSpec, value) -> str:
 
 
 def spec_detail(spec: SettingSpec) -> str:
-    """Footer text for the selected setting: help, allowed values, default."""
+    """Detail-line text for the selected setting: help, allowed values, default."""
     if spec.kind in ("float", "int"):
         allowed = f"{range_text(spec)}{spec.unit}, step {with_unit(spec, spec.step_size)}"
         return f"{spec.dotted}: {spec.help}  [{allowed}, default {with_unit(spec, spec.default)}]"
@@ -168,7 +168,7 @@ class SettingsList(Widget, can_focus=True):
             self.key = key
 
     class Selected(Message):
-        """The selection, edit buffer or note changed: repaint the footer."""
+        """The selection, edit buffer or note changed: repaint the detail line."""
 
     def __init__(self, backup_dir: Path, *, id: str | None = None) -> None:
         super().__init__(id=id)
@@ -184,7 +184,7 @@ class SettingsList(Widget, can_focus=True):
         # The buffer is the old value, shown selected: the next key typed
         # replaces it instead of appending (so "85" over "90" is 85, not 9085).
         self.selected_all = False
-        self.error: str | None = None  # rejection or clamp note for the footer
+        self.error: str | None = None  # rejection or clamp note for the detail line
         self.values: dict[str, tuple[object, bool]] = {}
         self.reload()
 
@@ -468,29 +468,26 @@ class SettingsList(Widget, can_focus=True):
         self.refresh()
 
 
-def hint_markup() -> str:
-    """Footer key legend, styled like the main page's key strip."""
-    return "  ".join(f"[b $primary]{key}[/] [$secondary]{word}[/]" for key, word in HINT_KEYS)
-
-
 class _ConfigTitle(Static):
-    """The header band: the rota chip and the page name, as on the main page."""
+    """``settings  saved as you change them``: the page's name, in the body."""
 
     def render(self) -> Text:
         palette = Palette.from_theme(self.app.current_theme)
-        text = brand_chip(palette)
-        text.append("  settings", style=f"bold {palette.foreground}")
+        text = Text(no_wrap=True, overflow="ellipsis")
+        text.append("settings", style=f"bold {palette.accent}")
         text.append("  saved as you change them", style=palette.muted)
         return text
 
 
-class ConfigScreen(Screen):
-    """Settings editor generated from ``SETTING_SPECS``.
+class ConfigView(Vertical):
+    """Settings editor generated from ``SETTING_SPECS``, shown in place of
+    the main page's body (same header, same prompt line), never as a screen
+    of its own.
 
-    Push it with ``app.push_screen(ConfigScreen(backup_dir))``. After each
-    persisted change (debounced per key) it posts
-    ``ConfigScreen.SettingChanged(key)``; the app handles it with
-    ``on_config_screen_setting_changed``.
+    After each persisted change (debounced per key) it posts
+    ``ConfigView.SettingChanged(key)``, which bubbles to the app's
+    ``on_config_view_setting_changed``. esc (or ``c``) posts
+    ``ConfigView.Closed`` for the host to show its body again.
     """
 
     NOTIFY_DELAY_S = 0.4
@@ -502,45 +499,42 @@ class ConfigScreen(Screen):
             super().__init__()
             self.key = key  # dotted key, e.g. "autoswitch.threshold"
 
+    class Closed(Message):
+        """The user left the settings: the host shows its body again."""
+
     BINDINGS = [
-        Binding("escape", "back", "Back"),
-        Binding("c,q", "close", "Back", show=False),
+        Binding("escape", "back", show=False),
+        Binding("c", "close", show=False),
     ]
 
     DEFAULT_CSS = """
-    ConfigScreen {
-        layout: vertical;
+    ConfigView {
+        height: 1fr;
     }
-    ConfigScreen #config-title {
+    ConfigView #config-title {
         height: 1;
         padding: 0 1;
-        background: $surface;
-        margin-bottom: 1;
+        margin: 1 0;
     }
-    ConfigScreen #config-body {
+    ConfigView #config-body {
         height: 1fr;
         scrollbar-size-vertical: 1;
     }
-    ConfigScreen #config-detail {
+    ConfigView #config-detail {
         height: auto;
         max-height: 4;
         padding: 0 1;
+        margin-bottom: 1;
         color: $text-muted;
     }
-    ConfigScreen #config-detail.-error {
+    ConfigView #config-detail.-error {
         color: $error;
         text-style: bold;
     }
-    ConfigScreen #config-hint {
-        height: 1;
-        padding: 0 1;
-        text-wrap: nowrap;
-        text-overflow: ellipsis;
-    }
     """
 
-    def __init__(self, backup_dir: Path) -> None:
-        super().__init__()
+    def __init__(self, backup_dir: Path, *, id: str | None = None) -> None:
+        super().__init__(id=id)
         self.backup_dir = Path(backup_dir)
         self._pending: dict[str, object] = {}  # dotted key -> debounce timer
 
@@ -551,14 +545,22 @@ class ConfigScreen(Screen):
         with body:
             yield SettingsList(self.backup_dir, id="settings")
         yield Static(id="config-detail", markup=False)
-        yield Static(hint_markup(), id="config-hint")
 
     @property
     def settings_list(self) -> SettingsList:
         return self.query_one(SettingsList)
 
     def on_mount(self) -> None:
-        self.settings_list.focus()
+        self._show_detail()
+
+    def open(self) -> None:
+        """Show the current values (the file may have changed meanwhile) and
+        take the keyboard."""
+        lst = self.settings_list
+        lst.reload()
+        lst.error = None
+        lst.refresh(layout=True)
+        lst.focus()
         self._show_detail()
 
     def _show_detail(self) -> None:
@@ -587,12 +589,12 @@ class ConfigScreen(Screen):
             self.post_message(self.SettingChanged(key))
 
     def flush(self) -> None:
-        """Deliver every pending change now: the page is closing, and a
-        message posted to a screen leaving the stack would never arrive."""
+        """Deliver every pending change now: leaving the settings applies
+        them at once rather than after the debounce."""
         for key, timer in list(self._pending.items()):
             timer.stop()
             self._pending.pop(key, None)
-            self.app.post_message(self.SettingChanged(key))
+            self.post_message(self.SettingChanged(key))
 
     def action_back(self) -> None:
         if self.settings_list.cancel_edit():
@@ -601,6 +603,6 @@ class ConfigScreen(Screen):
 
     def action_close(self) -> None:
         if self.settings_list.editing is not None:
-            return  # c / q are being typed into the edit
+            return  # c is being typed into the edit
         self.flush()
-        self.app.pop_screen()
+        self.post_message(self.Closed())

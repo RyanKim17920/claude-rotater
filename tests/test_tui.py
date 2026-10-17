@@ -1287,6 +1287,11 @@ async def emit(engine, event) -> None:
     await asyncio.to_thread(engine.emit, event)
 
 
+def prompt_plain(app) -> str:
+    """What the prompt line shows right now."""
+    return app.screen.query_one("#prompt").render().plain
+
+
 def log_plain(app) -> str:
     from textual.widgets import RichLog
 
@@ -1317,8 +1322,8 @@ class TestMainPage:
             await settle(pilot)
             assert app.screen.selected_number == "2"
 
-    async def test_status_line_and_action_bar(self, tmp_path):
-        from textual.widgets import Button
+    async def test_status_line_and_idle_prompt_line(self, tmp_path):
+        from textual.widgets import Button, Footer, Header
 
         app = make_app(three_accounts(tmp_path))
         async with app.run_test(size=(120, 40)) as pilot:
@@ -1327,12 +1332,11 @@ class TestMainPage:
             assert "rota" in status and "auto on" in status
             assert "estimate" not in status and "~" not in status  # no legend: titles say it
             assert "90%" not in status
-            labels = [str(b.label) for b in app.screen.query(Button)]
-            assert len(labels) == 6  # the five everyday keys and "? more"
-            for word in ("switch", "add", "history", "config", "quit", "more"):
-                assert any(word in label for label in labels)
-            # chips never steal the keyboard from the list
-            assert all(not b.can_focus for b in app.screen.query(Button))
+            # no button bar, no quit button, no stock header/footer: one dim hint
+            assert prompt_plain(app) == "⏎ switch · a add · ? keys"
+            for stock in (Button, Footer, Header):
+                assert not app.screen.query(stock)
+            assert app.focused is app.screen.query_one("#accounts")  # the list keeps the keys
 
     async def test_empty_account_list(self, tmp_path):
         app = make_app(FakeSwitcher([], tmp_path))
@@ -1357,7 +1361,7 @@ class TestMainPage:
             assert braille("\n".join(lines))
             assert detail.size.height == len(lines) <= app.screen.detail_budget()
             assert len(lines) == app.screen.detail_budget()
-            actions = app.screen.query_one("#actions")
+            actions = app.screen.query_one("#prompt")
             assert actions.region.y >= detail.region.bottom + 1
             assert actions.region.bottom == size[1]
 
@@ -1372,7 +1376,7 @@ class TestMainPage:
             await settle(pilot)
             assert app.screen.charts_fit() is shown
             assert braille(painted(app, "#detail")) is shown
-            assert app.screen.query_one("#actions").region.bottom <= height
+            assert app.screen.query_one("#prompt").region.bottom <= height
 
     @pytest.mark.parametrize("theme_name", ["dark", "light"])
     async def test_hidden_charts_give_their_rows_to_the_table(self, tmp_path, theme_name):
@@ -1393,7 +1397,7 @@ class TestMainPage:
             listview = app.screen.query_one("#accounts")
             assert listview.size.height == 15  # not capped at 60% of the screen
             assert len(app.screen.query(AccountRow)) == 15
-            assert app.screen.query_one("#actions").region.bottom == 24
+            assert app.screen.query_one("#prompt").region.bottom == 24
 
     async def test_charts_resize_with_the_terminal(self, tmp_path):
         fake = three_accounts(tmp_path)
@@ -1436,37 +1440,45 @@ class TestMainPage:
             await pilot.pause()
             assert rows["3"].styles.background.a > 0  # hover tints too
 
-    @pytest.mark.parametrize("size", [(60, 20), (120, 40)])
-    async def test_question_mark_lists_every_key_grouped(self, tmp_path, size):
+    @pytest.mark.parametrize("theme_name", ["dark", "light"])
+    @pytest.mark.parametrize("size", [(60, 20), (80, 24), (120, 40), (160, 50)])
+    async def test_question_mark_toggles_the_keys_in_place_of_the_charts(self, tmp_path, size, theme_name):
         import re
 
+        from claude_rotater.settings import set_setting
         from claude_rotater.tui.main import MainScreen
-        from claude_rotater.tui.modals import KeysModal
 
-        app = make_app(three_accounts(tmp_path))
+        set_setting(tmp_path, "ui.theme", theme_name)
+        fake = three_accounts(tmp_path)
+        with_history(fake, burn_history(time.time()))
+        app = make_app(fake)
         async with app.run_test(size=size) as pilot:
             await settle(pilot)
             await pilot.press("question_mark")
             await pilot.pause()
-            assert isinstance(app.screen, KeysModal)
-            body = app.screen.query_one("#keys-body").render().plain
+            assert isinstance(app.screen, MainScreen)  # no popup: the same page
+            assert app.screen.keys_shown
+            body = painted(app, "#detail")
             for key, word in (("enter", "switch"), ("a", "add"), ("l", "log in"), ("t", "paste a token"),
                               ("d", "turn off"), ("x", "remove"), ("c", "config"), ("h", "history"),
                               ("s", "statusline"), ("f", "refresh"), ("q", "quit"), ("ctrl+t", "theme"),
                               ("?", "this list")):
                 assert re.search(rf"(^|   ){re.escape(key)} +{word}", body, re.M), key
-            for heading in ("accounts", "view", "setup"):
+            for heading in ("accounts", "view", "setup", "app"):
                 assert heading in body
-            # the whole list fits the terminal, box and all
-            box = app.screen.query_one("#keys-box")
-            assert box.region.right <= size[0] and box.region.bottom <= size[1]
-            assert app.screen.query_one("#keys-body").region.height == len(body.splitlines())
-            await pilot.press("escape")
+            assert not braille(body)  # the keys replace the charts
+            # the whole list shows, inside the terminal, the table still on screen
+            detail = app.screen.query_one("#detail")
+            assert detail.size.height == len(body.splitlines())
+            assert all(len(line) <= size[0] - 2 for line in body.splitlines())
+            assert detail.region.bottom <= app.screen.query_one("#prompt").region.y
+            assert app.screen.query_one("#accounts").size.height >= 1
+            await pilot.press("question_mark")
             await pilot.pause()
-            assert isinstance(app.screen, MainScreen)
-            await pilot.click("#act-help")
+            assert not app.screen.keys_shown
+            await pilot.press("question_mark", "escape")  # esc closes it too
             await pilot.pause()
-            assert isinstance(app.screen, KeysModal)
+            assert not app.screen.keys_shown
 
     async def test_reset_clock_appears_once_on_the_page(self, tmp_path):
         """Countdowns in the table, reset clocks on the charts: never both."""
@@ -1500,7 +1512,7 @@ class TestMainPage:
             listview = app.screen.query_one("#accounts")
             assert listview.max_scroll_y == 0 and len(listview.children) == 4
             assert app.screen.max_scroll_y == 0
-            assert app.screen.query_one("#actions").region.bottom <= size[1]
+            assert app.screen.query_one("#prompt").region.bottom <= size[1]
             assert "Fable  34%" in row_plain(app, "1")
 
     async def test_event_log_appears_with_first_event(self, tmp_path, fake_engine):
@@ -1526,12 +1538,9 @@ class TestMainPage:
             assert "me@x.com" in first and "62%" in first
             assert "1h59m" in first or "2h00m" in first  # the 5h reset at any width
             assert len(first) <= size[0]
-            # every action chip stays on screen
-            from textual.widgets import Button
-
-            assert all(b.region.right <= size[0] for b in app.screen.query(Button))
+            assert prompt_plain(app) == "⏎ switch · a add · ? keys"  # whole at any width
             # too few rows for readable charts: hidden, never squeezed
-            assert app.screen.query_one("#actions").region.bottom == size[1]
+            assert app.screen.query_one("#prompt").region.bottom == size[1]
             assert not braille(painted(app, "#detail"))
 
     async def test_no_history_says_so_instead_of_guessing(self, tmp_path):
@@ -1631,14 +1640,6 @@ class TestMainPage:
             await settle(pilot)
             assert row_plain(app, "2").startswith("›●")
 
-    async def test_switch_button(self, tmp_path):
-        app = make_app(three_accounts(tmp_path))
-        async with app.run_test(size=(120, 40)) as pilot:
-            await settle(pilot)
-            await pilot.click("#act-switch")
-            await settle(pilot)
-            assert ("switch_to", "1") in fake_calls(app)
-
     async def test_d_toggles_disabled(self, tmp_path):
         app = make_app(three_accounts(tmp_path))
         async with app.run_test(size=(120, 40)) as pilot:
@@ -1651,92 +1652,185 @@ class TestMainPage:
             await settle(pilot)
             assert ("set_disabled", "1", False) in fake_calls(app)
 
-    async def test_x_confirms_then_removes(self, tmp_path):
-        from claude_rotater.tui.modals import ConfirmModal
+    async def test_x_asks_on_the_prompt_line_then_removes(self, tmp_path):
+        from claude_rotater.tui.main import AccountRow, MainScreen
 
         app = make_app(three_accounts(tmp_path))
         async with app.run_test(size=(120, 40)) as pilot:
             await settle(pilot)
             await pilot.press("down", "x")
             await pilot.pause()
-            assert isinstance(app.screen, ConfirmModal)
+            assert isinstance(app.screen, MainScreen)  # asked in place, no popup
+            assert prompt_plain(app).startswith("remove work@y.com")
+            assert "y remove  n no  esc" in prompt_plain(app)
             await pilot.press("n")
             await settle(pilot)
             assert not any(c[0] == "remove" for c in fake_calls(app))
+            assert prompt_plain(app) == "⏎ switch · a add · ? keys"
             await pilot.press("delete")
             await pilot.pause()
+            await pilot.press("escape")  # esc cancels as well
+            await settle(pilot)
+            assert not any(c[0] == "remove" for c in fake_calls(app))
+            await pilot.press("x")
+            await pilot.pause()
+            await pilot.press("d", "a", "q")  # other keys are swallowed while it asks
+            await pilot.pause()
+            assert app.is_running and not any(c[0] == "set_disabled" for c in fake_calls(app))
             await pilot.press("y")
             await settle(pilot)
             assert ("remove", "2", True) in fake_calls(app)
             await settle(pilot)
-            from claude_rotater.tui.main import AccountRow
-
             assert [r.number for r in app.screen.query(AccountRow)] == ["1", "3"]
+            assert app.focused is app.screen.query_one("#accounts")  # the keys go back
 
-    async def test_a_opens_the_add_chooser_and_adds_the_current_login(self, tmp_path):
-        from claude_rotater.tui.modals import AddModal, OutputModal
-
+    async def test_a_offers_the_three_ways_and_adds_the_current_login(self, tmp_path):
         app = make_app(three_accounts(tmp_path))
         async with app.run_test(size=(120, 40)) as pilot:
             await settle(pilot)
             await pilot.press("a")
             await pilot.pause()
-            assert isinstance(app.screen, AddModal)
-            text = app.screen.query_one("#add-choices").render().plain
-            for words in ("log in with the browser", "current Claude Code login", "token"):
-                assert words in text
+            assert prompt_plain(app) == "add:  b browser login  c current login  t paste token  esc"
             await pilot.press("escape")
             await pilot.pause()
-            assert not isinstance(app.screen, AddModal) and fake_calls(app) == []
-            await pilot.press("a", "a")  # picked by name: no second question
+            assert fake_calls(app) == [] and not app.prompt.is_open
+            await pilot.press("a", "c")  # picked by key: no second question
             await settle(pilot)
             assert ("add", None, False) in fake_calls(app)
-            assert isinstance(app.screen, OutputModal)
+            assert not app.prompt.is_open
 
-    async def test_add_chooser_by_arrows_and_the_footer_chip(self, tmp_path):
-        from claude_rotater.tui.modals import AddModal, AddTokenModal
-
+    async def test_add_chooser_leads_to_the_token_entry(self, tmp_path):
         app = make_app(three_accounts(tmp_path))
         async with app.run_test(size=(120, 40)) as pilot:
             await settle(pilot)
-            await pilot.click("#act-add")
+            await pilot.press("a", "t")
             await pilot.pause()
-            assert isinstance(app.screen, AddModal)
-            await pilot.press("down", "down", "enter")  # the third choice: paste a token
+            assert prompt_plain(app).startswith("token: ▌")
+
+    async def test_t_reads_token_label_and_slot_inline(self, tmp_path):
+        app = make_app(three_accounts(tmp_path))
+        async with app.run_test(size=(120, 40)) as pilot:
+            await settle(pilot)
+            await pilot.press("t")
             await pilot.pause()
-            assert isinstance(app.screen, AddTokenModal)
+            assert prompt_plain(app).startswith("token: ▌")
+            await pilot.press(*"sk-ant-oat-x")
+            assert "sk-ant" not in prompt_plain(app)  # a secret is drawn as dots
+            assert prompt_plain(app).startswith("token: ••••••••••••")
+            await pilot.press("enter")
+            await pilot.pause()
+            assert prompt_plain(app).startswith("email label: ▌")
+            await pilot.press("enter")  # skipped
+            await pilot.pause()
+            assert prompt_plain(app).startswith("slot: ▌")
+            await pilot.press("x", "enter")  # not a number: asked again, with why
+            await pilot.pause()
+            assert prompt_plain(app).startswith("slot: ▌") and "not a slot" in prompt_plain(app)
+            assert not any(c[0] == "add_token" for c in fake_calls(app))
+            await pilot.press("7", "enter")
+            await settle(pilot)
+            assert ("add_token", "sk-ant-oat-x", None, 7, True) in fake_calls(app)
 
-    async def test_t_adds_token(self, tmp_path):
-        from textual.widgets import Input
-
-        from claude_rotater.tui.modals import AddTokenModal
+    async def test_token_paste_and_overwrite_question(self, tmp_path):
+        from textual import events
 
         app = make_app(three_accounts(tmp_path))
         async with app.run_test(size=(120, 40)) as pilot:
             await settle(pilot)
             await pilot.press("t")
             await pilot.pause()
-            assert isinstance(app.screen, AddTokenModal)
-            app.screen.query_one("#token", Input).value = "sk-ant-oat-x"
-            app.screen.query_one("#slot", Input).value = "7"
-            await pilot.click("#add")
+            app.prompt.post_message(events.Paste("sk-ant-api-" + "z" * 40 + "\n"))
+            await pilot.pause()
+            assert "51 chars" in prompt_plain(app)  # a long secret gives its length
+            await pilot.press("enter", *"w@x.com", "enter", "2", "enter")
+            await pilot.pause()
+            assert prompt_plain(app).startswith("slot 2 holds work@y.com: overwrite?")
+            await pilot.press("n")
             await settle(pilot)
-            assert ("add_token", "sk-ant-oat-x", None, 7, True) in fake_calls(app)
+            assert not any(c[0] == "add_token" for c in fake_calls(app))
 
-    async def test_c_opens_config_and_back(self, tmp_path):
-        from claude_rotater.tui.config import ConfigScreen
+    async def test_esc_drops_the_token_entry(self, tmp_path):
+        app = make_app(three_accounts(tmp_path))
+        async with app.run_test(size=(120, 40)) as pilot:
+            await settle(pilot)
+            await pilot.press("t", *"abc", "enter", "escape")
+            await settle(pilot)
+            assert not app.prompt.is_open and fake_calls(app) == []
+            await pilot.press("t", "enter")  # nothing typed: said so, nothing added
+            await pilot.pause()
+            assert "no token" in prompt_plain(app) and fake_calls(app) == []
+
+    async def test_action_failure_is_said_inline(self, tmp_path):
+        from claude_rotater.exceptions import ClaudeSwitchError
+
+        fake = three_accounts(tmp_path)
+
+        def refuse(number, **_kw):
+            raise ClaudeSwitchError("account 2 is busy")
+
+        fake.switch_to = refuse
+        app = make_app(fake)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await settle(pilot)
+            await pilot.press("down", "enter")
+            await settle(pilot)
+            assert prompt_plain(app) == "switch to account 2 failed: account 2 is busy"
+            assert app.prompt.message is not None and not app.busy
+
+    async def test_ctrl_c_and_q_quit_without_asking(self, tmp_path):
+        for keys in (("q",), ("t", "ctrl+c")):  # ctrl+c even mid-entry
+            app = make_app(three_accounts(tmp_path))
+            async with app.run_test(size=(120, 40)) as pilot:
+                await settle(pilot)
+                await pilot.press(*keys)
+                await pilot.pause()
+                assert not app.is_running, keys
+
+    async def test_c_shows_config_in_place_and_back(self, tmp_path):
         from claude_rotater.tui.main import MainScreen
 
         app = make_app(three_accounts(tmp_path))
         async with app.run_test(size=(120, 40)) as pilot:
             await settle(pilot)
+            screen = app.screen
             await pilot.press("c")
             await pilot.pause()
-            assert isinstance(app.screen, ConfigScreen)
-            assert app.screen.backup_dir == tmp_path
+            assert app.screen is screen and isinstance(screen, MainScreen)  # no pushed screen
+            assert screen.config_shown and not screen.query_one("#body").display
+            assert screen.config.backup_dir == tmp_path
+            assert app.focused is screen.config.settings_list
+            assert "esc back" in prompt_plain(app)
+            await pilot.press("a", "x", "d")  # account keys stand down on the settings
+            await pilot.pause()
+            assert not app.prompt.is_open and fake_calls(app) == []
             await pilot.press("escape")
             await pilot.pause()
-            assert isinstance(app.screen, MainScreen)
+            assert not screen.config_shown and screen.query_one("#body").display
+            assert app.focused is screen.query_one("#accounts")
+            assert prompt_plain(app) == "⏎ switch · a add · ? keys"
+            await pilot.press("c", "c")  # c toggles back as well
+            await pilot.pause()
+            assert not screen.config_shown
+
+
+def test_no_modal_screens_remain():
+    """Every question and result lives on the prompt line: no ModalScreen
+    anywhere in the TUI package, and no stock Header/Footer/Button use."""
+    import importlib
+    import inspect
+    import pkgutil
+
+    from textual.screen import ModalScreen
+
+    import claude_rotater.tui as tui
+
+    for info in pkgutil.iter_modules(tui.__path__):
+        module = importlib.import_module(f"claude_rotater.tui.{info.name}")
+        for _name, obj in inspect.getmembers(module, inspect.isclass):
+            assert not issubclass(obj, ModalScreen), obj
+        for stock in ("ModalScreen", "Footer", "Header", "Button"):
+            assert not hasattr(module, stock), (info.name, stock)  # never imported
+        assert ".notify(" not in inspect.getsource(module), info.name  # no toasts
 
 
 class FakeStage:
@@ -1789,8 +1883,6 @@ def login_app(fake, monkeypatch, *, fail=None, suspend_ok=True):
 @pytest.mark.asyncio
 class TestLoginAction:
     async def test_l_logs_in_suspended_then_imports_and_cleans(self, tmp_path, monkeypatch):
-        from claude_rotater.tui.modals import OutputModal
-
         app, suspended = login_app(three_accounts(tmp_path), monkeypatch)
         async with app.run_test(size=(120, 40)) as pilot:
             await settle(pilot)
@@ -1802,7 +1894,7 @@ class TestLoginAction:
             # a healthy row: no address pre-filled
             assert stage.events == [("authenticate", None), ("import",), ("cleanup",)]
             assert ("login_import",) in fake_calls(app)
-            assert isinstance(app.screen, OutputModal)
+            assert not app.prompt.is_open
 
     async def test_l_on_dead_row_prefills_its_email(self, tmp_path, monkeypatch):
         from claude_rotater.json_output import USAGE_RELOGIN_REQUIRED
@@ -1826,9 +1918,9 @@ class TestLoginAction:
         app, _ = login_app(three_accounts(tmp_path), monkeypatch)
         async with app.run_test(size=(120, 40)) as pilot:
             await settle(pilot)
-            await pilot.click("#act-add")
+            await pilot.press("a")
             await pilot.pause()
-            await pilot.press("l")
+            await pilot.press("b")
             await settle(pilot)
             assert FakeStage.instances and ("login_import",) in fake_calls(app)
 
@@ -1836,10 +1928,13 @@ class TestLoginAction:
         app, _ = login_app(three_accounts(tmp_path), monkeypatch, suspend_ok=False)
         async with app.run_test(size=(120, 40)) as pilot:
             await settle(pilot)
+            said: list[str] = []
+            say = app.say
+            app.say = lambda text, role="info": (said.append(text), say(text, role))
             await pilot.press("l")
             await settle(pilot)
-            messages = [n.message for n in app._notifications]
-            assert any("Logging in" in m for m in messages), messages
+            assert said and said[0] == "logging in an account…", said
+            assert "real terminal" in prompt_plain(app)  # then why it could not
 
     @pytest.mark.parametrize("cancelled", [True, False], ids=["cancel", "failure"])
     async def test_cancel_or_failure_cleans_up_and_imports_nothing(self, tmp_path, monkeypatch, cancelled):
@@ -1867,7 +1962,6 @@ class TestLoginAction:
 
     async def test_import_failure_still_cleans_up(self, tmp_path, monkeypatch):
         from claude_rotater.exceptions import ValidationError
-        from claude_rotater.tui.modals import OutputModal
 
         app, _ = login_app(three_accounts(tmp_path), monkeypatch)
 
@@ -1881,8 +1975,7 @@ class TestLoginAction:
             await pilot.press("l")
             await settle(pilot)
             assert FakeStage.instances[0].events[-1] == ("cleanup",)
-            assert isinstance(app.screen, OutputModal)
-            assert "failed" in str(app.screen.query_one(".modal-title").render())
+            assert prompt_plain(app) == "log in failed: is the active account"
 
     async def test_busy_app_does_not_start_a_login(self, tmp_path, monkeypatch):
         app, _ = login_app(three_accounts(tmp_path), monkeypatch)
@@ -2123,20 +2216,19 @@ class TestEngineHosting:
     async def test_threshold_edited_on_config_page_restarts_engine(
         self, tmp_path, fake_engine
     ):
-        """End to end: `c`, type a threshold, enter; the real ConfigScreen's
+        """End to end: `c`, type a threshold, enter; the real ConfigView's
         SettingChanged message reaches the app and the engine restarts."""
-        from claude_rotater.tui.config import ConfigScreen
+        from claude_rotater.tui.config import ConfigView
 
         app = make_app(three_accounts(tmp_path))
         async with app.run_test(size=(120, 40)) as pilot:
             await settle(pilot)
             await pilot.press("c")
             await pilot.pause()
-            screen = app.screen
-            assert isinstance(screen, ConfigScreen)
-            assert screen.settings_list.spec.dotted == "autoswitch.threshold"
+            config = app.screen.config
+            assert config.settings_list.spec.dotted == "autoswitch.threshold"
             await pilot.press("8", "1", "enter")
-            await pilot.pause(ConfigScreen.NOTIFY_DELAY_S + 0.2)
+            await pilot.pause(ConfigView.NOTIFY_DELAY_S + 0.2)
             await settle(pilot)
             assert len(fake_engine.instances) == 2
             assert fake_engine.instances[0].stopped
@@ -2146,7 +2238,7 @@ class TestEngineHosting:
     async def test_holding_right_on_config_restarts_engine_once(self, tmp_path, fake_engine):
         """Every step is written, but the engine restarts once the keys stop."""
         from claude_rotater.settings import load_settings
-        from claude_rotater.tui.config import ConfigScreen
+        from claude_rotater.tui.config import ConfigView
 
         app = make_app(three_accounts(tmp_path))
         async with app.run_test(size=(120, 40)) as pilot:
@@ -2155,7 +2247,7 @@ class TestEngineHosting:
             await pilot.pause()
             await pilot.press(*["right"] * 5)
             assert load_settings(tmp_path).threshold == 95.0
-            await pilot.pause(ConfigScreen.NOTIFY_DELAY_S + 0.2)
+            await pilot.pause(ConfigView.NOTIFY_DELAY_S + 0.2)
             await settle(pilot)
             assert len(fake_engine.instances) == 2
             assert fake_engine.instances[1].settings.threshold == 95.0
@@ -2204,7 +2296,7 @@ class TestEngineHosting:
             class Msg:
                 key = "autoswitch.cooldownSeconds"
 
-            app.on_config_screen_setting_changed(Msg())
+            app.on_config_view_setting_changed(Msg())
             await settle(pilot)
             assert len(fake_engine.instances) == 2
             assert fake_engine.instances[1].settings.cooldown_seconds == 60.0
@@ -2602,7 +2694,7 @@ class TestLongTermView:
             assert "4 windows · 1 past 90%" in detail  # 3 past + the running one
             assert app.long_term["1"].peaks_5h
             # the page still fits: the key strip stays on screen
-            assert app.screen.query_one("#actions").region.bottom <= 40
+            assert app.screen.query_one("#prompt").region.bottom <= 40
             await pilot.press("h")
             await settle(pilot)
             assert not app.long_view
@@ -2626,16 +2718,6 @@ class TestLongTermView:
             await pilot.press("escape")  # on the charts esc does nothing
             await settle(pilot)
             assert not app.long_view
-
-    async def test_history_button(self, tmp_path):
-        fake = three_accounts(tmp_path)
-        with_history(fake, long_history(time.time()))
-        app = make_app(fake)
-        async with app.run_test(size=(120, 40)) as pilot:
-            await settle(pilot)
-            await pilot.click("#act-history")
-            await settle(pilot)
-            assert app.long_view
 
     async def test_history_follows_highlight(self, tmp_path):
         fake = three_accounts(tmp_path)
@@ -2706,15 +2788,14 @@ class TestStatuslineKey:
             assert "● feed live" in painted(app, "#status")
 
     async def test_s_confirms_then_installs(self, tmp_path, monkeypatch):
-        from claude_rotater.tui.modals import ConfirmModal
-
         calls = self._calls(monkeypatch, self._status("not-installed", "off"))
         app = make_app(three_accounts(tmp_path))
         async with app.run_test(size=(120, 40)) as pilot:
             await settle(pilot)
             await pilot.press("s")
             await pilot.pause()
-            assert isinstance(app.screen, ConfirmModal)
+            assert prompt_plain(app).startswith("feed usage to rota from Claude Code's statusline")
+            assert "y set up  n no" in prompt_plain(app)
             await pilot.press("n")
             await settle(pilot)
             assert calls == []
@@ -2725,8 +2806,6 @@ class TestStatuslineKey:
             assert calls == [("install", tmp_path)]
 
     async def test_s_when_installed_offers_removal(self, tmp_path, monkeypatch):
-        from claude_rotater.tui.modals import ConfirmModal
-
         calls = self._calls(monkeypatch, self._status("installed", "stale"))
         app = make_app(three_accounts(tmp_path))
         async with app.run_test(size=(120, 40)) as pilot:
@@ -2734,14 +2813,12 @@ class TestStatuslineKey:
             assert "◐ feed stale" in painted(app, "#status")
             await pilot.press("s")
             await pilot.pause()
-            assert isinstance(app.screen, ConfirmModal)
+            assert prompt_plain(app).startswith("remove rota from Claude Code's statusline")
             await pilot.press("y")
             await settle(pilot)
             assert calls == [("uninstall", tmp_path)]
 
     async def test_install_failure_is_shown_not_raised(self, tmp_path):
-        from claude_rotater.tui.modals import OutputModal
-
         settings = self._settings()
         settings.parent.mkdir(parents=True, exist_ok=True)
         settings.write_text("{not json")
@@ -2750,9 +2827,9 @@ class TestStatuslineKey:
             await settle(pilot)
             await pilot.press("s", "y")
             await settle(pilot)
-            assert isinstance(app.screen, OutputModal)
-            shown = " ".join(str(w.render()) for w in app.screen.query("Static"))
-            assert "were not changed" in shown and "not valid JSON" in shown
+            shown = app.prompt.message or ""
+            assert shown.startswith("set up statusline feed failed: Claude Code's settings were not changed")
+            assert "not valid JSON" in shown
             assert not app.busy
         assert settings.read_text() == "{not json"
 
@@ -2773,8 +2850,6 @@ class TestStatuslineKey:
         assert "statusLine" not in json.loads(self._settings().read_text())
 
     async def test_foreign_statusline_is_wrapped_and_restored(self, tmp_path):
-        from claude_rotater.tui.modals import ConfirmModal
-
         settings = self._settings()
         settings.parent.mkdir(parents=True, exist_ok=True)
         original = {"statusLine": {"type": "command", "command": "my-line --x"}}
@@ -2785,8 +2860,7 @@ class TestStatuslineKey:
             assert app.feed_install == "foreign"
             await pilot.press("s")
             await pilot.pause()
-            assert isinstance(app.screen, ConfirmModal)
-            assert "rota wraps it" in app.screen._message
+            assert "rota wraps it" in prompt_plain(app)
             await pilot.press("y")
             await settle(pilot)
             assert app.feed_install == "installed"
@@ -2818,7 +2892,7 @@ class TestWidths:
             assert len(page) == size[1] and all(len(line) <= size[0] for line in page)
             for gone in ("~ = estimate", "~?", "on duty", "not enough data", "disabled"):
                 assert gone not in text, gone
-            assert page[-1].rstrip().endswith("? more")
+            assert page[-1].strip() == "⏎ switch · a add · ? keys"
             assert all(row.region.height == 1 for row in app.screen.query(AccountRow))
 
     @pytest.mark.parametrize("size", [(60, 20), (80, 24), (120, 40), (160, 50)])
@@ -2869,14 +2943,12 @@ class TestWidths:
                 await pilot.press("h")
                 await settle(pilot)
             detail = app.screen.query_one("#detail")
-            actions = app.screen.query_one("#actions")
+            actions = app.screen.query_one("#prompt")
             assert braille(painted(app, "#detail")) or "█" in painted(app, "#detail")
             assert actions.region.y - detail.region.bottom <= 1  # graphs reach the key strip
 
     @pytest.mark.parametrize("size", [(80, 30), (120, 40), (160, 50)])
     async def test_main_page_fits_with_table_and_charts(self, tmp_path, size):
-        from textual.widgets import Button
-
         fake = three_accounts(tmp_path)
         with_history(fake, long_history(time.time()))
         app = make_app(fake)
@@ -2893,8 +2965,7 @@ class TestWidths:
             detail = painted(app, "#detail").splitlines()
             assert braille("".join(detail))
             assert all(len(line) <= width for line in detail)
-            assert all(b.region.right <= width for b in app.screen.query(Button) if b.display)
-            assert app.screen.query_one("#actions").region.bottom <= size[1]
+            assert app.screen.query_one("#prompt").region.bottom <= size[1]
 
     @pytest.mark.parametrize("size", [(80, 24), (120, 40), (160, 50)])
     async def test_model_columns_follow_the_data(self, tmp_path, size):
@@ -2940,7 +3011,12 @@ class TestWidths:
             await pilot.press("c")
             await pilot.pause()
             title = app.screen.query_one("#config-title").render().plain
-            assert title.startswith(" rota ") and "settings" in title
+            assert title.startswith("settings")
+            strips = app.screen._compositor.render_strips()
+            page = ["".join(seg.text for seg in strip).rstrip() for strip in strips]
+            assert page[0].strip().startswith("rota") and "auto on" in page[0]  # the same header
+            assert page[-1].strip().endswith("esc back")  # the hint follows the view
+            assert all(len(line) <= size[0] for line in page)
             await pilot.press("right")  # ←/→ still adjust on the restyled list
             await pilot.pause()
             from claude_rotater.settings import effective_settings

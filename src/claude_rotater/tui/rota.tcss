@@ -1,5 +1,5 @@
 /* rota TUI: a quiet roster. One solid band on top (the header), open space
-   below, and a key strip at the bottom with no chip backgrounds.
+   below, and one bare prompt line at the bottom. No popups, no buttons.
    Colors come from the registered rota-dark / rota-light themes (theme.py);
    this file only handles layout, spacing, and the few component states. */
 
@@ -69,124 +69,15 @@ Screen {
     scrollbar-size-vertical: 0;
 }
 
-/* The key strip sits on the bottom row, whatever the page above holds. */
-#actions {
-    dock: bottom;
-    height: 1;
+/* The body (table, charts, log) and the settings list take turns in the
+   same place; the header and the prompt line stay put. */
+#body {
+    height: 1fr;
+}
+
+/* The prompt line: one bare row at the bottom, a blank row above it. No
+   chips, no buttons: a hint when idle, questions and results otherwise. */
+#prompt {
     margin-top: 1;
-    padding: 0 1;
     background: $background;
-}
-
-/* Key strip: "l login  a add …", the key in the accent (markup in main.py),
-   no chip fill so the bar reads as a legend, not a toolbar. */
-#actions Button {
-    border: none;
-    height: 1;
-    min-width: 0;
-    width: auto;
-    padding: 0;  /* Button's own line-pad leaves one cell each side */
-    margin-right: 1;
-    background: $background;
-    color: $foreground;
-    text-style: none;
-}
-
-#actions Button:hover {
-    background: $surface;
-}
-
-/* -- modals ----------------------------------------------------------------- */
-
-ConfirmModal, AddTokenModal, OutputModal, KeysModal, AddModal {
-    align: center middle;
-    background: $background 60%;
-}
-
-.modal-box {
-    width: 64;
-    max-width: 90%;
-    height: auto;
-    max-height: 80%;
-    background: $surface;
-    border: round $panel;
-    padding: 1 2;
-}
-
-.modal-box-wide {
-    width: 90;
-}
-
-/* The key list and the add chooser size to their content, so they fit a
-   60x20 terminal whole. */
-#keys-box, #add-box {
-    width: auto;
-    max-width: 100%;
-    max-height: 100%;
-}
-
-#keys-box > *, #add-box > * {
-    width: auto;
-}
-
-.modal-title {
-    text-style: bold;
-    color: $primary;
-    margin-bottom: 1;
-}
-
-.modal-body {
-    color: $foreground;
-    margin-bottom: 1;
-}
-
-.modal-buttons {
-    height: auto;
-    align-horizontal: right;
-    margin-top: 1;
-}
-
-/* Flat chip buttons: quiet at rest, terracotta block when focused. ←/→ move
-   focus between them, Enter presses — the accent shows where Enter lands. */
-.modal-buttons Button {
-    border: none;
-    height: 1;
-    min-width: 12;
-    padding: 0 2;
-    margin-left: 2;
-    background: $panel;
-    color: $foreground;
-    text-style: none;
-}
-
-.modal-buttons Button:hover {
-    background: $panel-lighten-1;
-}
-
-.modal-buttons Button:focus {
-    background: $primary;
-    color: $background;
-    text-style: bold;
-}
-
-.modal-hint {
-    height: 1;
-    margin-top: 1;
-    color: $secondary;
-}
-
-.modal-output {
-    height: auto;
-    max-height: 20;
-    background: $background;
-    padding: 1;
-}
-
-.form-error {
-    height: 1;
-    color: $error;
-}
-
-AddTokenModal Input {
-    margin-bottom: 1;
 }

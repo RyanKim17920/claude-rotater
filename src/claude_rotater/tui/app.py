@@ -10,6 +10,10 @@ The engine is the only scheduled fetcher. It runs LIVE for the whole session
 (no dry-run gate in the TUI; its own guards: threshold, hysteresis, shared
 cooldown, quarantine, disabled accounts). The 3 s poller therefore only reads
 the store; ``f`` asks for one normal pass, which the store still paces.
+
+Nothing pops up: questions, text entry and every result go through the main
+page's prompt line (:mod:`claude_rotater.tui.prompt`), never a modal or a
+toast.
 """
 
 from __future__ import annotations
@@ -45,7 +49,7 @@ from claude_rotater.settings import (
 from claude_rotater.poll_policy import load_cadence
 from claude_rotater.snapshot_source import account_identity
 from claude_rotater.switcher import ClaudeAccountSwitcher
-from claude_rotater.tui.config import ConfigScreen
+from claude_rotater.tui.config import ConfigView
 from claude_rotater.tui.data import ActionResult, SnapshotSource, compact_duration, run_action
 from claude_rotater.tui.main import (
     LONG_5H_SPAN_S,
@@ -54,7 +58,7 @@ from claude_rotater.tui.main import (
     LongTerm,
     MainScreen,
 )
-from claude_rotater.tui.modals import AddModal, AddTokenModal, ConfirmModal, OutputModal, TokenForm
+from claude_rotater.tui.prompt import Choice, PromptLine
 from claude_rotater.tui.theme import ROTA_DARK, ROTA_LIGHT
 from claude_rotater.usage_history import Point
 
@@ -89,12 +93,16 @@ def default_refresher_factory(switcher, on_event) -> TokenRefresher:
 
 
 class RotaApp(App):
-    """rota interactive TUI: one main page plus the config page."""
+    """rota interactive TUI: one screen; the settings show in its body."""
 
     TITLE = "rota"
     CSS_PATH = "rota.tcss"
     ENABLE_COMMAND_PALETTE = False
-    BINDINGS = [Binding("ctrl+t", "toggle_theme", "Theme")]
+    BINDINGS = [
+        Binding("ctrl+t", "toggle_theme", show=False),
+        # Quits at once, even with a question open on the prompt line.
+        Binding("ctrl+c", "quit", show=False, priority=True),
+    ]
 
     POLL_INTERVAL_S = 3.0
     # Snapshot age stays hidden while polling is healthy (age never exceeds
@@ -300,13 +308,19 @@ class RotaApp(App):
         self._start_engine()
         self.request_refresh()
 
-    def on_config_screen_setting_changed(self, message: ConfigScreen.SettingChanged) -> None:
+    def on_config_view_setting_changed(self, message: ConfigView.SettingChanged) -> None:
         self.on_settings_changed(message.key)
 
-    def action_open_config(self) -> None:
-        if isinstance(self.screen, ConfigScreen):
-            return
-        self.push_screen(ConfigScreen(self.switcher.backup_dir))
+    # -- the prompt line ----------------------------------------------------------
+
+    @property
+    def prompt(self) -> PromptLine:
+        return self.main_screen.prompt
+
+    def say(self, text: str, role: str = "info") -> None:
+        """A result or an error, on the prompt line for a few seconds."""
+        if self.main_screen.is_attached:
+            self.prompt.say(text, role)
 
     # -- snapshot poll loop ---------------------------------------------------
 
@@ -533,28 +547,21 @@ class RotaApp(App):
             if msg != self._last_refresh_error:
                 self._last_refresh_error = msg
                 lane = "store refresh" if event.worker.group == "refresh-store" else "refresh"
-                self.notify(
-                    f"{lane.capitalize()} failed: {msg}", severity="warning", timeout=6
-                )
+                self.say(f"{lane} failed: {msg}", "warn")
         elif event.worker.group == "action":
             self.busy = False
-            self.notify(f"Action failed: {event.worker.error}", severity="error")
+            self.say(f"action failed: {event.worker.error}", "error")
         elif event.worker.group == "refresher":
-            self.notify(
-                f"Token refresher stopped: {event.worker.error}", severity="error"
-            )
+            self.say(f"token refresher stopped: {event.worker.error}", "error")
         elif event.worker.group == "engine":
             self.auto_status = replace(self.auto_status, running=False)
-            self.notify(
-                f"Auto-switch engine stopped: {event.worker.error}",
-                severity="error",
-            )
+            self.say(f"auto-switch engine stopped: {event.worker.error}", "error")
 
     # -- mutating actions (single-flight, captured, off-thread) ---------------
 
     def _start_action(self, label: str, fn, *, show_output: bool = False) -> None:
         if self.busy:
-            self.notify("Another action is still running", severity="warning")
+            self.say("another action is still running", "warn")
             return
         self.busy = True
         self.run_worker(
@@ -575,7 +582,8 @@ class RotaApp(App):
         self.busy = False
         self.request_refresh()
         if not result.ok:
-            self.push_screen(OutputModal(f"{label} — failed", result.output))
+            detail = result.first_line.removeprefix("Error:").strip() or "no output"
+            self.say(f"{label.lower()} failed: {detail}", "error")
             return
         payload = result.payload or {}
         if "switched" in payload:
@@ -586,15 +594,13 @@ class RotaApp(App):
             if payload.get("switched"):
                 to = payload.get("to") or {}
                 target = to.get("email") or f"account {to.get('number')}"
-                self.notify(f"Switched to {target}", title="Switch")
+                self.say(f"switched to {target}", "ok")
             else:
                 reason = str(payload.get("reason") or "no switch performed")
-                self.notify(reason, title="No switch", severity="warning")
+                self.say(f"no switch: {reason}", "warn")
             return
-        if show_output and result.output.strip():
-            self.push_screen(OutputModal(label, result.output))
-        elif result.first_line:
-            self.notify(result.first_line)
+        if result.first_line:
+            self.say(result.first_line, "ok" if show_output else "info")
 
     # -- account operations ----------------------------------------------------
 
@@ -621,28 +627,30 @@ class RotaApp(App):
         )
 
     def confirm_remove(self, number: str, email: str) -> None:
-        self.push_screen(
-            ConfirmModal(
-                f"Remove account {number} ({email})?\n\n"
-                "Its stored credentials and config backup are deleted.",
-                title="Remove account",
-                yes_label="Remove",
-            ),
+        self.prompt.confirm(
+            f"remove {email} and its stored login?",
             partial(self._on_remove_confirm, number),
+            yes="remove",
         )
 
-    def _on_remove_confirm(self, number: str, confirmed: bool | None) -> None:
+    def _on_remove_confirm(self, number: str, confirmed: bool) -> None:
         if confirmed:
             self._start_action(
                 f"Remove account {number}",
                 partial(self.switcher.remove_account, number, assume_yes=True),
             )
 
+    ADD_CHOICES = (
+        Choice("b", "browser login", "login"),
+        Choice("c", "current login", "current"),
+        Choice("t", "paste token", "token"),
+    )
+
     def action_add(self) -> None:
         """``a``: choose how to add an account (log in, current login, token)."""
-        self.push_screen(AddModal(), self._on_add_choice)
+        self.prompt.ask("add:", self.ADD_CHOICES, self._on_add_choice)
 
-    def _on_add_choice(self, choice: str | None) -> None:
+    def _on_add_choice(self, choice: object | None) -> None:
         if choice == "login":
             self.start_login()
         elif choice == "current":
@@ -670,10 +678,10 @@ class RotaApp(App):
         suspended so its browser / paste-code flow owns the terminal; the
         capture runs in a worker. The stage is removed on every path."""
         if self.busy:
-            self.notify("Another action is still running", severity="warning")
+            self.say("another action is still running", "warn")
             return
         # Seen at once, and still on screen when the app comes back.
-        self.notify(f"Logging in {email or 'an account'}…", title="Log in", timeout=4)
+        self.say(f"logging in {email or 'an account'}…")
         stage = self._login_factory(self.switcher.backup_dir)
         try:
             with self.suspend():
@@ -681,14 +689,11 @@ class RotaApp(App):
                 stage.authenticate(email=email)
         except SuspendNotSupported:
             stage.cleanup()
-            self.notify(
-                "Logging in needs a real terminal (the app could not suspend).",
-                severity="error",
-            )
+            self.say("logging in needs a real terminal (the app could not suspend)", "error")
             return
         except LoginError as e:
             stage.cleanup()
-            self.notify(str(e), title="Log in", severity="warning")
+            self.say(f"log in: {e}", "warn")
             return
         except BaseException:
             stage.cleanup()
@@ -703,35 +708,63 @@ class RotaApp(App):
             stage.cleanup()
 
     def action_add_token(self) -> None:
-        self.push_screen(AddTokenModal(), self._on_token_form)
+        """``t``: the token, then an optional email label and slot, each on
+        the prompt line; enter skips an optional one, esc drops the lot."""
+        self.prompt.read(
+            "token:", self._on_token, secret=True, note="setup-token or API key"
+        )
 
-    def _on_token_form(self, form: TokenForm | None) -> None:
-        if form is None:
+    def _on_token(self, token: str | None) -> None:
+        if token is None:
             return
+        if not token:
+            self.say("no token given: nothing added", "warn")
+            return
+        self.prompt.read(
+            "email label:", partial(self._on_token_email, token), note="optional, ⏎ skips"
+        )
+
+    def _on_token_email(self, token: str, email: str | None) -> None:
+        if email is None:
+            return
+        self._ask_slot(token, email or None)
+
+    def _ask_slot(self, token: str, email: str | None, note: str = "optional, ⏎ next free") -> None:
+        self.prompt.read("slot:", partial(self._on_token_slot, token, email), note=note)
+
+    def _on_token_slot(self, token: str, email: str | None, raw: str | None) -> None:
+        if raw is None:
+            return
+        slot: int | None = None
+        if raw:
+            try:
+                slot = int(raw)
+            except ValueError:
+                slot = 0
+            if slot < 1:  # asked again, the reason in place of the note
+                self._ask_slot(token, email, note=f"{raw!r} is not a slot: a number from 1")
+                return
         run = partial(
             self._start_action,
             "Add account from token",
             partial(
                 self.switcher.add_account_from_token,
-                token=form.token,
-                email=form.email,
-                slot=form.slot,
+                token=token,
+                email=email,
+                slot=slot,
                 assume_yes=True,
             ),
             show_output=True,
         )
-        occupant = self._slot_occupant(form.slot)
-        if occupant is not None:
-            self.push_screen(
-                ConfirmModal(
-                    f"Slot {form.slot} is occupied by {occupant}. Overwrite?",
-                    title="Overwrite slot",
-                    yes_label="Overwrite",
-                ),
-                lambda confirmed: run() if confirmed else None,
-            )
-        else:
+        occupant = self._slot_occupant(slot)
+        if occupant is None:
             run()
+            return
+        self.prompt.confirm(
+            f"slot {slot} holds {occupant}: overwrite?",
+            lambda confirmed: run() if confirmed else None,
+            yes="overwrite",
+        )
 
     def _slot_occupant(self, slot: int | None) -> str | None:
         if slot is None or self.snapshot is None:
@@ -745,38 +778,28 @@ class RotaApp(App):
 
     def action_refresh_full(self) -> None:
         self.request_refresh(full=True)
-        self.notify("Refreshing usage…", timeout=2)
+        self.say("refreshing usage…")
 
     # -- statusline feed -----------------------------------------------------
 
     def action_statusline(self) -> None:
         """``s``: set up the statusline feed, or remove it if it is set up.
-        Always behind a confirm: it edits Claude Code's settings."""
+        Always asked first: it edits Claude Code's settings."""
         if self.feed_installed:
-            message = (
-                "Remove rota from Claude Code's statusline?\n\n"
-                "rota stops receiving live usage from your sessions and polls "
-                "the active account instead. Your previous statusline is restored."
-            )
-            yes, setup, label = "Remove", statusline_setup.uninstall, "Remove statusline feed"
+            question = "remove rota from Claude Code's statusline (your previous one comes back)?"
+            yes, setup, label = "remove", statusline_setup.uninstall, "Remove statusline feed"
         else:
             if self.feed_install == statusline_setup.FOREIGN:
-                keeps = (
-                    "Your current statusline keeps showing: rota wraps it and "
-                    "only reads what it is sent."
-                )
+                keeps = "yours keeps showing, rota wraps it"
             else:
-                keeps = "rota shows a minimal statusline of its own."
-            message = (
-                "Add rota to Claude Code's statusline?\n\n"
-                "Each response then reports the active account's usage to rota "
-                f"at no API cost, so it polls less. {keeps}"
-            )
-            yes, setup, label = "Set up", statusline_setup.install, "Set up statusline feed"
+                keeps = "rota shows a minimal one"
+            question = f"feed usage to rota from Claude Code's statusline ({keeps})?"
+            yes, setup, label = "set up", statusline_setup.install, "Set up statusline feed"
         fn = partial(self._statusline_change, setup)
-        self.push_screen(
-            ConfirmModal(message, title="Statusline", yes_label=yes),
+        self.prompt.confirm(
+            question,
             lambda confirmed: self._start_action(label, fn) if confirmed else None,
+            yes=yes,
         )
 
     def _statusline_change(self, setup) -> None:
@@ -808,10 +831,10 @@ class RotaApp(App):
         try:
             set_setting(self.switcher.backup_dir, "ui.theme", name)
         except Exception as exc:  # persistence is best-effort; never crash the UI
-            self.notify(f"Could not save theme: {exc}", severity="warning")
+            self.say(f"could not save the theme: {exc}", "warn")
 
     def action_toggle_theme(self) -> None:
         order = ("dark", "light", "auto")
         nxt = order[(order.index(self._theme_name) + 1) % len(order)]
         self.apply_theme(nxt)
-        self.notify(f"Theme: {nxt}")
+        self.say(f"theme: {nxt}")
