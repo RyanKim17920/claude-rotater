@@ -4,7 +4,8 @@ Layout, top to bottom, as tall as the terminal allows:
 
 - header band: the ``rota`` chip, the auto-switch state, the statusline feed
   state, why a switch is held (only while one is), and the estimate legend;
-- one ``AccountRow`` per account, measured now: on-duty bar, the account, a
+- one ``AccountRow`` per account, measured now: "›" (and an accent band, bold
+  name) on the row under the cursor, "●" on the account on duty, the account, a
   short tag only when it matters (a dead or lapsing login, "off", a real
   org), then per window (5h, 7d, each per-model window in use) its pct, a
   short bar (measured fill, then a ``░`` hatch out to the projection at
@@ -12,7 +13,7 @@ Layout, top to bottom, as tall as the terminal allows:
   reset, then one forecast cell for the binding window
   (``ok``, ``~7d limit in 15h``, ``~?``). Columns shrink as the width runs
   short (:data:`LEVELS`);
-- the highlighted account's 5h and 7d charts (measured history solid, the
+- a line naming the highlighted account, then its 5h and 7d charts (measured history solid, the
   projection dotted and coloured by outcome, the threshold line, the reset at the right
   edge), filling the spare height and hidden when fewer than
   :data:`CHART_MIN_ROWS` rows are spare.
@@ -256,9 +257,10 @@ def status_text(
 # Account table: measured now, plus one forecast cell
 # ---------------------------------------------------------------------------
 
-ON_DUTY_MARK = "▌"
+ON_DUTY_MARK = "●"
+CURSOR_MARK = "›"
 PRIMARY_WINDOWS = ("5h", "7d")
-_PREFIX_W = 2  # "▌ "
+_PREFIX_W = 3  # "›● ": cursor, on duty, space
 _GAP = 2  # between table columns
 _REL_W = 5  # "1h20m" (countdown_text)
 _RESET_GLYPH = "↻"
@@ -638,14 +640,19 @@ def account_row_text(
     login_warn_days: int = 3,
     models: Sequence[str] = (),
     cadence: PollCadence = DEFAULT_CADENCE,
+    selected: bool = False,
 ) -> Text:
     """One account on one line, laid out by ``layout``:
-    ``▌ me@x.com  Acme  5h 58% ↻1h20m  7d 48% ↻23h  Fable 0%  ~7d limit in 15h``."""
+    ``›● me@x.com  Acme  5h 58% ↻1h20m  7d 48% ↻23h  ~7d limit in 15h``.
+
+    ``›`` and a bold name mark the row under the cursor (its band is CSS);
+    ``●`` marks the account on duty, so the two read apart at a glance."""
     text = Text(no_wrap=True, overflow="ellipsis")
-    # The on-duty account carries a solid accent bar at the left edge.
-    text.append(ON_DUTY_MARK + " " if acc.is_active else "  ", style=palette.accent)
+    text.append(CURSOR_MARK if selected else " ", style=f"bold {palette.accent}")
+    text.append(ON_DUTY_MARK if acc.is_active else " ", style=palette.accent)
+    text.append(" ")
     name_style = palette.muted if acc.disabled else palette.foreground
-    text.append(_fit(account_name(acc), layout.name_w), style=f"bold {name_style}" if acc.is_active else name_style)
+    text.append(_fit(account_name(acc), layout.name_w), style=f"bold {name_style}" if selected else name_style)
     if layout.tag_w:
         tag, warn = row_tag(acc, now, login_warn_days, cadence)
         text.append(" " * _GAP + _fit(tag, layout.tag_w), style=palette.sev_warn if warn else palette.muted)
@@ -684,7 +691,7 @@ def account_row_text(
 
 # Below this many spare rows the charts are hidden; above it they fill the
 # spare height up to a cap.
-CHART_MIN_ROWS = 8
+CHART_MIN_ROWS = 9  # the account line, then 2 x (title + a 3-line plot) when stacked
 CHART_MAX_PLOT = 14
 
 
@@ -802,11 +809,16 @@ def chart_lines(
     height: int,
     palette: Palette = Palette.DARK,
 ) -> list[Text]:
-    """The charts in at most ``height`` lines, or none below :data:`CHART_MIN_ROWS`."""
+    """The charts in at most ``height`` lines, or none below :data:`CHART_MIN_ROWS`:
+    a line naming the account they belong to, then the 5h and 7d charts."""
     if acc is None or height < CHART_MIN_ROWS:
         return []
     blocks = chart_blocks(acc, est, series, now=now, threshold=threshold, palette=palette)
-    return _arrange(blocks, width=width, height=height, max_plot=CHART_MAX_PLOT)
+    if not blocks:
+        return []
+    title = Text(f"{CURSOR_MARK} ", style=f"bold {palette.accent}", no_wrap=True)
+    title.append(account_title(acc, palette))
+    return [title, *_arrange(blocks, width=width, height=height - 1, max_plot=CHART_MAX_PLOT)]
 
 
 # ---------------------------------------------------------------------------
@@ -1181,6 +1193,7 @@ class MainScreen(Screen):
             login_warn_days=self.app.login_warn_days,
             models=self.app.models,
             cadence=self.app.cadence,
+            selected=number == self.selected_number,
         )
 
     def detail_text(self, width: int, _height: int) -> Text:
@@ -1260,6 +1273,9 @@ class MainScreen(Screen):
         self.repaint()
 
     def on_list_view_highlighted(self, _event: ListView.Highlighted) -> None:
+        # The cursor glyph and bold name move with the highlight.
+        for row in self.query(AccountRow):
+            row.repaint()
         self._repaint_detail()
 
     def on_list_view_selected(self, event: ListView.Selected) -> None:

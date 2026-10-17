@@ -48,6 +48,25 @@ def _contrast(hex_a: str, hex_b: str) -> float:
     return (lb + 0.05) / (la + 0.05)
 
 
+def _blend(top: str, bottom: str, alpha: float) -> str:
+    """``top`` at ``alpha`` over ``bottom``, as Textual's ``$primary 14%`` paints it."""
+    a = [int(top[i:i+2], 16) for i in (1, 3, 5)]
+    b = [int(bottom[i:i+2], 16) for i in (1, 3, 5)]
+    return "#" + "".join(f"{round(y + (x - y) * alpha):02x}" for x, y in zip(a, b))
+
+
+def test_cursor_band_is_visible_in_both_themes():
+    """The row under the cursor must read as highlighted against the page
+    and stand apart from the header band ($surface)."""
+    for accent, bg, surface in (
+        (theme.ACCENT, theme.BACKGROUND, theme.SURFACE),
+        (theme.ACCENT_LIGHT, theme.BACKGROUND_LIGHT, theme.SURFACE_LIGHT),
+    ):
+        band = _blend(accent, bg, theme.CURSOR_ALPHA)
+        assert _contrast(band, bg) >= 1.15, band
+        assert band not in (bg, surface)
+
+
 def test_light_text_meets_AA_on_all_backgrounds():
     # Accent and severity colors render as PERCENTAGE TEXT on highlighted
     # ($surface) and flash ($panel) rows, not just the base background — so
@@ -61,7 +80,8 @@ def test_light_text_meets_AA_on_all_backgrounds():
         theme.SEV_WARN_LIGHT,
         theme.SEV_CRIT_LIGHT,
     )
-    backgrounds = (theme.BACKGROUND_LIGHT, theme.SURFACE_LIGHT, theme.PANEL_LIGHT)
+    backgrounds = (theme.BACKGROUND_LIGHT, theme.SURFACE_LIGHT, theme.PANEL_LIGHT,
+                   _blend(theme.ACCENT_LIGHT, theme.BACKGROUND_LIGHT, theme.CURSOR_ALPHA))
     for color in text_colors:
         for bg in backgrounds:
             assert _contrast(color, bg) >= 4.5, f"{color} on {bg}"
@@ -73,7 +93,8 @@ def test_dark_text_meets_AA_on_all_backgrounds():
         theme.SEV_OK, theme.SEV_WARN, theme.SEV_CRIT,
     )
     for color in text_colors:
-        for bg in (theme.BACKGROUND, theme.SURFACE, theme.PANEL):
+        for bg in (theme.BACKGROUND, theme.SURFACE, theme.PANEL,
+                   _blend(theme.ACCENT, theme.BACKGROUND, theme.CURSOR_ALPHA)):
             assert _contrast(color, bg) >= 4.5, f"{color} on {bg}"
 
 

@@ -31,6 +31,10 @@ SEV_OK = "#6fc4aa"  # sea glass: plenty of headroom
 SEV_WARN = "#e3b866"  # saffron: climbing (>= 70%)
 SEV_CRIT = "#f08c82"  # rose: near the limit (>= 90%)
 TRACK = "#2a3442"  # unfilled meter track
+# The row under the cursor: the accent blended over the page at this
+# strength (rota.tcss: ``background: $primary 14%``). Strong enough to see at
+# a glance, weak enough that every text colour keeps AA contrast on it.
+CURSOR_ALPHA = 0.14
 
 # Severity band edges. WARN mirrors where a user starts caring; CRIT mirrors
 # the auto-switch default threshold so bar color and switch behavior agree.

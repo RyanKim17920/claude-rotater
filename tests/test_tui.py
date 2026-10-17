@@ -766,7 +766,7 @@ class TestAccountRowText:
 
     def test_active_marker_and_pcts(self):
         row = self._row(make_account(1, active=True, entry=make_entry(62.0, 31.0), email="me@x.com"))
-        assert row.startswith("▌ me@x.com")
+        assert row.startswith(" ● me@x.com")  # on duty, not under the cursor
         assert "5h  62%" in row and "7d  31%" in row
         assert has_bar(row)  # each window carries its bar
 
@@ -790,7 +790,7 @@ class TestAccountRowText:
 
     def test_inactive_has_no_marker(self):
         row = self._row(make_account(2, entry=make_entry(12.0, 44.0), email="work@y.com"))
-        assert row.startswith("  work@y.com")
+        assert row.startswith("   work@y.com")
 
     def test_disabled_tag_is_off_personal_tag_hidden(self):
         row = self._row(make_account(3, disabled=True), tag_need=8)
@@ -1234,7 +1234,7 @@ class TestMainPage:
             await settle(pilot)
             assert not app.screen.query("#columns")  # no header line: cells name themselves
             first = row_plain(app, "1")
-            assert first.startswith("▌") and "me@x.com" in first and "5h  62%" in first
+            assert first.startswith("›●") and "me@x.com" in first and "5h  62%" in first
             assert "\n" not in first
             assert "personal" not in first  # a personal account needs no tag
             assert "work@y.com" in row_plain(app, "2")
@@ -1291,12 +1291,12 @@ class TestMainPage:
             assert braille("\n".join(lines))
             assert detail.size.height == len(lines) <= app.screen.detail_budget()
             side_by_side = size[0] >= 100
-            assert len(lines) == min(app.screen.detail_budget(), (1 if side_by_side else 2) * (1 + CHART_MAX_PLOT))
+            assert len(lines) == min(app.screen.detail_budget(), 1 + (1 if side_by_side else 2) * (1 + CHART_MAX_PLOT))
             actions = app.screen.query_one("#actions")
             assert actions.region.y == detail.region.bottom + 1
             assert actions.region.bottom <= size[1]
 
-    @pytest.mark.parametrize("height, shown", [(16, True), (15, False)])
+    @pytest.mark.parametrize("height, shown", [(17, True), (16, False)])
     async def test_charts_hide_when_too_few_rows_are_spare(self, tmp_path, height, shown):
         """Three accounts leave height - 8 rows; the charts need 8."""
         fake = three_accounts(tmp_path)
@@ -1318,6 +1318,32 @@ class TestMainPage:
             await pilot.resize_terminal(120, 14)
             await settle(pilot)
             assert not braille(painted(app, "#detail"))
+
+    @pytest.mark.parametrize("theme_name", ["rota-dark", "rota-light"])
+    async def test_cursor_row_is_distinct_from_the_on_duty_row(self, tmp_path, theme_name):
+        """The row under the cursor gets "›", a bold name and an accent-tinted
+        band; the account on duty keeps its "●" wherever the cursor is."""
+        from claude_rotater.tui.main import AccountRow
+
+        app = make_app(three_accounts(tmp_path))
+        async with app.run_test(size=(120, 40)) as pilot:
+            await settle(pilot)
+            app.theme = theme_name
+            await pilot.press("down")
+            await settle(pilot)
+            assert row_plain(app, "1").startswith(" ● me@x.com")  # on duty, cursor elsewhere
+            assert row_plain(app, "2").startswith("›  work@y.com")
+            rows = {r.number: r for r in app.screen.query(AccountRow)}
+            band = rows["2"].styles.background
+            assert band.a > 0 and band != rows["1"].styles.background
+            name = rows["2"].children[0].render()
+            assert any("bold" in st for st in styles_of(name, "work@y.com"))
+            assert not any("bold" in st for st in styles_of(rows["1"].children[0].render(), "me@x.com"))
+            # the charts say whose they are
+            assert painted(app, "#detail").splitlines()[0].startswith("› work@y.com")
+            await pilot.hover(rows["3"])
+            await pilot.pause()
+            assert rows["3"].styles.background.a > 0  # hover tints too
 
     async def test_question_mark_lists_the_other_keys(self, tmp_path):
         from claude_rotater.tui.main import MainScreen
@@ -1427,7 +1453,7 @@ class TestMainPage:
             # 62% at 15%/h → 90% in ~1h52m, before the 2h reset
             assert "~5h limit in 2h" in first, first
             assert "%/h" not in first
-            title = painted(app, "#detail").splitlines()[0]
+            title = painted(app, "#detail").splitlines()[1]
             assert title.startswith("5h  ~limit in 2h") and "7d  ~" in title and "% at reset" in title
             # account 2 has no history: its forecast is unsure, not a number
             assert row_plain(app, "2").rstrip().endswith("~?")
@@ -1501,7 +1527,7 @@ class TestMainPage:
             assert ("switch_to", "2") in fake_calls(app)
             assert fake_engine.instances[-1].wakes == 1
             await settle(pilot)
-            assert row_plain(app, "2").startswith("▌")
+            assert row_plain(app, "2").startswith("›●")
 
     async def test_switch_button(self, tmp_path):
         app = make_app(three_accounts(tmp_path))
@@ -2324,7 +2350,8 @@ class TestChartLines:
 
     def test_side_by_side_when_wide(self):
         lines = self._lines(120)
-        assert lines[0].plain.startswith("5h") and "7d" in lines[0].plain
+        assert lines[0].plain.startswith("› me@x.com") and "on duty" in lines[0].plain
+        assert lines[1].plain.startswith("5h") and "7d" in lines[1].plain
         assert all(len(line.plain) <= 120 for line in lines)
 
     def test_stacked_when_narrow(self):
@@ -2344,12 +2371,12 @@ class TestChartLines:
 
         half = (120 - 3) // 2
         now_col = lines[-2].plain.index(NOW_GLYPH, 4)
-        right = braille_cells(lines[1:-1], now_col + 1, half)
+        right = braille_cells(lines[2:-1], now_col + 1, half)
         assert right and all(SEV_CRIT in st and "dim" not in st for _c, st in right)
-        assert braille_cells(lines[1:-1], 0, now_col)  # the measured curve
+        assert braille_cells(lines[2:-1], 0, now_col)  # the measured curve
 
     def test_titles_carry_only_the_forecast(self):
-        title = self._lines(120)[0]
+        title = self._lines(120)[1]
         five = title.plain.split("7d")[0]
         assert "~limit in 2h" in five  # 62% at 15%/h, 90% before the 2h reset
         assert has_color(title, "~limit in 2h", SEV_CRIT)
@@ -2359,20 +2386,20 @@ class TestChartLines:
     def test_stays_under_shows_where_it_lands(self):
         now = time.time()
         series = burn_history(now, rate=2.0)["1"]
-        title = self._lines(120, series=series)[0]
+        title = self._lines(120, series=series)[1]
         assert "% at reset" in title.plain and has_color(title, "% at reset", SEV_OK)
 
     def test_thin_history_draws_no_projection(self):
         lines = self._lines(120, series={}, est=None)
-        title = lines[0].plain
+        title = lines[1].plain
         assert title.count("~? not enough data yet") == 2
         from claude_rotater.tui.plot import NOW_GLYPH
 
         now_col = lines[-2].plain.index(NOW_GLYPH, 4)
-        assert not braille_cells(lines[1:-1], now_col + 1, (120 - 3) // 2)  # nothing right of now
+        assert not braille_cells(lines[2:-1], now_col + 1, (120 - 3) // 2)  # nothing right of now
 
     def test_unused_and_at_limit_titles(self):
-        title = self._lines(120, series={}, est=None, entry=make_entry(0.0, 95.0))[0].plain
+        title = self._lines(120, series={}, est=None, entry=make_entry(0.0, 95.0))[1].plain
         assert "5h  unused" in title and "7d  at limit" in title and "~" not in title
 
     def test_hidden_below_the_minimum_and_capped_above(self):
@@ -2380,7 +2407,7 @@ class TestChartLines:
 
         assert self._lines(120, CHART_MIN_ROWS - 1) == []
         assert len(self._lines(120, CHART_MIN_ROWS)) == CHART_MIN_ROWS
-        assert len(self._lines(120, 30)) == 1 + CHART_MAX_PLOT
+        assert len(self._lines(120, 30)) == 2 + CHART_MAX_PLOT
         assert len(self._lines(120, 12)) == 12  # fills what is spare
 
     def test_dead_login_has_no_charts(self):

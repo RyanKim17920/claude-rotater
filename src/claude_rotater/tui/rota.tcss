@@ -33,11 +33,18 @@ Screen {
     padding: 0 0 0 1;
 }
 
+/* The row under the cursor: an accent-tinted band across the full width
+   (plus the "›" glyph and a bold name drawn in main.py). The on-duty
+   account has its own "●" mark, so cursor and duty never look alike. */
 #accounts ListItem.-highlight,
 #accounts:focus ListItem.-highlight {
     color: $foreground;
-    background: $surface;
+    background: $primary 14%;  /* theme.CURSOR_ALPHA */
     text-style: none;
+}
+
+#accounts ListItem:hover {
+    background: $primary 7%;
 }
 
 /* As tall as its content: the charts fill the spare rows up to a cap (or
