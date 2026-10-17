@@ -1786,10 +1786,10 @@ class TestUsageFetchStamps:
 
 class TestActiveAccountRefresh:
     """`_fetch_active_usage`: an expired active token is refreshed under
-    Claude Code's own lock protocol — owner or no owner. CC 2.1.218 adopts an
-    externally rotated credential (race-resolved re-read, 401 store recovery),
-    so the locks make the rotation safe; what is never safe is discarding a
-    consumed generation, so a successful grant persists unconditionally."""
+    Claude Code's own lock protocol, and only while no claude is running
+    (upstream's rule: a running claude holds the same refresh token). What
+    is never safe is discarding a consumed generation, so a successful grant
+    persists unconditionally."""
 
     # Active credential with an already-expired access token (expiresAt in 1970).
     _EXPIRED = json.dumps({
@@ -1889,11 +1889,11 @@ class TestActiveAccountRefresh:
         write_live.assert_called_once_with(self._REFRESHED)
         write_backup.assert_called_once_with("1", "test@example.com", self._REFRESHED)
 
-    def test_owner_present_no_longer_blocks_the_refresh(
+    def test_a_rota_run_session_does_not_block_the_refresh(
         self, temp_home: Path, mock_claude_config: Path, sample_sequence_data: dict
     ):
-        """A running Claude Code does not veto the refresh — the locks
-        serialize against it and it adopts the rotation (race_resolved)."""
+        """A ``rota run`` session pid alone is not a running claude here: with
+        no claude process on the machine, the locked refresh still runs."""
         switcher = self._switcher(sample_sequence_data)
 
         with patch.object(switcher, "_read_credentials", return_value=self._EXPIRED), \
@@ -1911,6 +1911,60 @@ class TestActiveAccountRefresh:
 
         assert result.sentinel is None
         write_live.assert_called_once_with(self._REFRESHED)
+
+    def test_a_running_claude_blocks_the_expired_refresh(
+        self, temp_home: Path, mock_claude_config: Path, sample_sequence_data: dict,
+        monkeypatch,
+    ):
+        """Upstream's rule: a running claude holds the same refresh token, so
+        rota neither POSTs it nor rewrites either store; claude refreshes on
+        its own next use and the engine reads "expired", never a failover."""
+        monkeypatch.setattr(
+            "claude_rotater.process_detection.any_claude_process_running",
+            lambda: True,
+        )
+        switcher = self._switcher(sample_sequence_data)
+
+        with patch.object(switcher, "_read_credentials", return_value=self._EXPIRED), \
+             patch.object(
+                 switcher, "_read_account_credentials", return_value=self._EXPIRED
+             ), \
+             patch.object(switcher, "_write_credentials") as write_live, \
+             patch.object(switcher, "_write_account_credentials") as write_backup, \
+             patch("claude_rotater.oauth.try_refresh_oauth_credentials") as post:
+            result = switcher._fetch_active_usage("1", "test@example.com", self._EXPIRED)
+
+        assert result.sentinel == USAGE_TOKEN_EXPIRED
+        post.assert_not_called()
+        write_live.assert_not_called()
+        write_backup.assert_not_called()
+
+    def test_a_running_claude_blocks_the_refresh_on_401(
+        self, temp_home: Path, mock_claude_config: Path, sample_sequence_data: dict,
+        monkeypatch,
+    ):
+        """The 401 leg too: the server-rejected token surfaces as its 401
+        record (store backoff), and nothing is POSTed or written."""
+        monkeypatch.setattr(
+            "claude_rotater.process_detection.any_claude_process_running",
+            lambda: True,
+        )
+        switcher = self._switcher(sample_sequence_data)
+        valid = self._REFRESHED  # locally unexpired
+
+        with patch.object(switcher, "_read_credentials", return_value=valid), \
+             patch.object(switcher, "_read_account_credentials", return_value=valid), \
+             patch.object(switcher, "_write_credentials") as write_live, \
+             patch.object(switcher, "_write_account_credentials") as write_backup, \
+             patch("claude_rotater.oauth.try_refresh_oauth_credentials") as post, \
+             patch("claude_rotater.oauth.try_fetch_usage_for_account",
+                   return_value=oauth.UsageOutcome(None, error="http-401")):
+            result = switcher._fetch_active_usage("1", "test@example.com", valid)
+
+        assert result.error == "http-401"
+        post.assert_not_called()
+        write_live.assert_not_called()
+        write_backup.assert_not_called()
 
     def test_lock_reread_adopts_a_fresher_live_credential(
         self, temp_home: Path, mock_claude_config: Path, sample_sequence_data: dict

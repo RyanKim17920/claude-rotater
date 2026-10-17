@@ -714,6 +714,18 @@ def sample_sequence_data_with_org():
 
 
 @pytest.fixture(autouse=True)
+def _no_claude_running(request, monkeypatch):
+    """The developer's own running claude must not decide whether the suite
+    passes: unit tests see no claude unless they say otherwise. The E2E
+    harness drives a real claude and keeps the real check."""
+    if "/e2e/" in str(request.node.path):
+        return
+    monkeypatch.setattr(
+        "claude_rotater.process_detection.any_claude_process_running", lambda: False
+    )
+
+
+@pytest.fixture(autouse=True)
 def _deterministic_poll_jitter(monkeypatch):
     """Zero the poll-plan jitter so cadence tests are clock-exact; the jitter
     itself is exercised in test_poll_policy via an injected rng."""

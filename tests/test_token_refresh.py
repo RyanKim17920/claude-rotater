@@ -89,14 +89,6 @@ def clock():
     return Clock()
 
 
-@pytest.fixture(autouse=True)
-def no_claude_running(monkeypatch):
-    """Tests run on machines where claude may be running; default to none."""
-    monkeypatch.setattr(
-        "claude_rotater.process_detection.any_claude_process_running", lambda: False
-    )
-
-
 class TestAnyClaudeRunning:
     def test_refuses_every_refresh_while_any_claude_runs(self, tmp_path, clock):
         sw = FakeSwitcher(tmp_path, clock, {"1": creds("a", expires_in=3600), "2": creds("b", expires_in=60)})

@@ -84,7 +84,7 @@ from claude_rotater.paths import (
 )
 from claude_rotater.legacy_import import import_legacy_data
 from claude_rotater.process_detection import get_running_instances
-from claude_rotater import poll_policy
+from claude_rotater import poll_policy, process_detection
 from claude_rotater.estimator import estimate_account
 from claude_rotater.usage_history import UsageHistory
 from claude_rotater.settings import (
@@ -3542,6 +3542,25 @@ class ClaudeAccountSwitcher:
                 account_num,
             )
             return FetchRecord(error="store-unmirrored")
+
+        # Upstream's rule, restored: never refresh (or rewrite) the active
+        # login while a claude is running. That claude holds the same refresh
+        # token; whichever side rotates it second gets invalid_grant, and the
+        # loser was the user's open session. Checked machine-wide, because a
+        # claude in another profile can hold this login too and rota cannot
+        # see which one it loaded. Claude Code refreshes on its own next use;
+        # the defer reads as "expired, idle" to the engine, never a failover.
+        if process_detection.any_claude_process_running():
+            key = (account_num, email, "claude-running")
+            if key not in self._provenance_warned:
+                self._provenance_warned.add(key)
+                self._logger.info(
+                    "Account %s's active token needs a refresh, but claude is "
+                    "running; leaving it to Claude Code's own refresh.",
+                    account_num,
+                )
+            return _defer(force_refresh)
+        self._provenance_warned.discard((account_num, email, "claude-running"))
 
         # Attribution against the slot's
         # stored backup decides HOW to recover, never whether to give up
