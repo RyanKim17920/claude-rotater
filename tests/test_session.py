@@ -1355,8 +1355,12 @@ class TestRun:
         refresh_rotates,
         capsys,
     ):
-        monkeypatch.setenv("CLAUDE_CONFIG_DIR", "/somewhere/else")
-        # Even a matching identity must NOT fast-path when the env var is set.
+        # A rota session terminal (another account's session profile).
+        monkeypatch.setenv(
+            "CLAUDE_CONFIG_DIR",
+            str(session_dir_for(manager.switcher.backup_dir, "1", "a@b.com")),
+        )
+        # Even a matching identity must NOT fast-path inside a session.
         monkeypatch.setattr(
             manager.switcher,
             "_get_current_account",

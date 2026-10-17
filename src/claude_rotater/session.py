@@ -58,7 +58,11 @@ from claude_rotater.exceptions import (
 from claude_rotater.fsutil import replace_with_retry
 from claude_rotater.locking import FileLock
 from claude_rotater.models import Platform
-from claude_rotater.paths import get_default_global_config_path
+from claude_rotater.paths import (
+    get_base_claude_config_home,
+    get_base_global_config_path,
+    is_inside_sessions_dir,
+)
 from claude_rotater.printer import accent, dimmed, muted, warning
 from claude_rotater.process_detection import ClaudeSession, scan_sessions
 from claude_rotater.settings import atomic_write_json
@@ -559,6 +563,16 @@ class SessionManager:
         self.sessions_dir = switcher.backup_dir / "sessions"
         self._logger = switcher._logger
 
+    def base_config_home(self) -> Path:
+        """Config home of the profile sessions are launched from.
+
+        The operator's own ``CLAUDE_CONFIG_DIR`` profile (e.g.
+        ``~/.claude-work``) when one is set, else ``~/.claude``; a
+        ``CLAUDE_CONFIG_DIR`` naming one of our session profiles (a nested
+        ``rota run``) falls back to ``~/.claude``. Sharing mirrors from here.
+        """
+        return get_base_claude_config_home(self.sessions_dir)
+
     # -- launch ----------------------------------------------------------
 
     def run(
@@ -595,19 +609,22 @@ class SessionManager:
         self._ensure_not_api_key(account_num, email)
 
         config_dir_preset = os.environ.get("CLAUDE_CONFIG_DIR")
-        if config_dir_preset:
-            # With CLAUDE_CONFIG_DIR set, "current default account" is
-            # meaningless (we may already be inside a session terminal), so
-            # the same-account fast path below must not trigger.
+        if config_dir_preset and is_inside_sessions_dir(
+            config_dir_preset, self.sessions_dir
+        ):
+            # Inside a rota session terminal, "current default account" is
+            # the session's own login, not the operator's, so the
+            # same-account fast path below must not trigger.
             warning(
                 f"CLAUDE_CONFIG_DIR is already set ({config_dir_preset}); "
                 "overriding it for this launch."
             )
         else:
             # Same-account fast path: never create a second credential copy
-            # for the account that is already the active default login —
-            # two copies of one account can drift if the server rotates the
-            # refresh token.
+            # for the account that is already the active login of the base
+            # profile (~/.claude, or the operator's own CLAUDE_CONFIG_DIR
+            # profile, which _get_current_account reads) — two copies of one
+            # account can drift if the server rotates the refresh token.
             current = self.switcher._get_current_account()
             if current is not None and current == (email, org_uuid):
                 if require_session:
@@ -1062,17 +1079,18 @@ class SessionManager:
     def _sync_sharing(
         self, session_dir: Path, share: bool, share_history: bool = False
     ) -> None:
-        """Mirror shared items from ~/.claude into the profile (or undo it).
+        """Mirror shared items from the base profile into the session (or undo it).
 
         ``share`` governs SHARED_ITEMS (customizations) and the mcpServers
         mirror (see ``_sync_mcp_servers`` — its --no-share removal is gated
         on the adoption marker); ``share_history`` governs HISTORY_ITEMS
         (conversation history) — independent concerns, so ``--no-share
         --share-history`` gives a bare profile with unified history.
-        Idempotent; runs on every launch. Deliberately sources from the
-        default ``~/.claude`` (not ``get_claude_config_home()``): sharing
-        always mirrors the default profile, even when ``CLAUDE_CONFIG_DIR``
-        is set in the invoking environment. File/dir sharing is lock-free on
+        Idempotent; runs on every launch. Sources from the base profile
+        (:meth:`base_config_home`): the operator's own ``CLAUDE_CONFIG_DIR``
+        profile (e.g. ``~/.claude-work``) when one is set, else ``~/.claude``
+        — never a rota session profile, so a nested ``rota run`` does not
+        mirror the session it runs inside. File/dir sharing is lock-free on
         the reuse path — concurrent runs with different flags are last-writer-
         wins and self-heal on the next launch; only the MCP mirror takes
         Claude's config lock, and only when it needs to write.
@@ -1087,7 +1105,7 @@ class SessionManager:
         active_items = (SHARED_ITEMS if share else ()) + (
             HISTORY_ITEMS if share_history else ()
         )
-        source_root = Path.home() / ".claude"
+        source_root = self.base_config_home()
         manifest_path = session_dir / SHARE_MANIFEST
         managed = self._read_manifest(manifest_path)
 
@@ -1179,12 +1197,13 @@ class SessionManager:
         self._write_manifest(manifest_path, new_managed)
 
     def _sync_mcp_servers(self, session_dir: Path, share: bool) -> None:
-        """Mirror the default profile's user-scope ``mcpServers`` (issue #139).
+        """Mirror the base profile's user-scope ``mcpServers`` (issue #139).
 
-        Pure mirror: the default profile is the single source of truth, so
-        adds, edits, and deletions all propagate, and MCP changes made inside
-        a session are overwritten the next time rota prepares the profile.
-        Nothing ever flows back into the default config, and per-project
+        Pure mirror: the base profile (see :meth:`base_config_home`) is the
+        single source of truth, so adds, edits, and deletions all propagate,
+        and MCP changes made inside a session are overwritten the next time
+        rota prepares the profile. Nothing ever flows back into the base
+        config, and per-project
         (``projects[…].mcpServers``) entries are untouched on both sides.
 
         ``share=False`` removes the mirrored key — but only from profiles
@@ -1291,18 +1310,20 @@ class SessionManager:
                 f"Could not sync MCP servers ({e}) — skipping this launch."
             )
 
-    @staticmethod
-    def _read_mcp_source() -> dict | None:
-        """The default profile's user-scope mcpServers, or None if unusable.
+    def _read_mcp_source(self) -> dict | None:
+        """The base profile's user-scope mcpServers, or None if unusable.
 
         ``{}`` and ``None`` are distinct: a readable config without the key
         genuinely has no user servers (``{}`` propagates the removal), while
         a missing/corrupt config or a non-dict key returns ``None`` so the
-        caller leaves the profile untouched. Reads the default-home path
-        (ignoring CLAUDE_CONFIG_DIR — a nested `rota run` must not source
-        from another session); no lock needed, claude's writes are atomic.
+        caller leaves the profile untouched. Reads the base profile's global
+        config (the operator's CLAUDE_CONFIG_DIR profile, never a rota
+        session — a nested `rota run` must not source from another session);
+        no lock needed, claude's writes are atomic.
         """
-        config = SessionManager._load_json_object(get_default_global_config_path())
+        config = self._load_json_object(
+            get_base_global_config_path(self.sessions_dir)
+        )
         if config is None:
             return None
         value = config.get(MCP_KEY, {})
@@ -1355,7 +1376,7 @@ class SessionManager:
             return False
         print(
             dimmed(
-                "Session MCP servers now mirror your default profile; the "
+                "Session MCP servers now mirror your main profile; the "
                 f"profile's previous definitions were saved to {stash.name}."
             )
         )
