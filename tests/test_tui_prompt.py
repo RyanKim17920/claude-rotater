@@ -1,9 +1,13 @@
-"""Pilot tests for the prompt line (tui/prompt.py).
+"""Pilot tests for the prompt line (tui/prompt.py), alone and on the main page.
 
 The widget tests drive a bare host: a focusable list and the prompt line.
+The page tests drive the real app at 60/80/120/160 columns in both themes:
+every question, entry and result must sit whole on the bottom row.
 """
 
 from __future__ import annotations
+
+import time
 
 import pytest
 from textual import events
@@ -12,6 +16,15 @@ from textual.widgets import ListItem, ListView, Static
 
 from claude_rotater.tui.prompt import Choice, PromptLine
 
+from .test_tui import (
+    FakeSwitcher,
+    burn_history,
+    make_app,
+    prompt_plain,
+    settle,
+    three_accounts,
+    with_history,
+)
 
 
 class Host(App):
@@ -189,3 +202,105 @@ class TestPromptLineWidget:
             await pilot.press(*"someone.with.a.long.name@example.com")
             text = shown(app)
             assert len(text) <= width - 2 and text.rstrip().endswith("example.com▌")
+
+
+THEMES = ["dark", "light"]
+SIZES = [(60, 20), (80, 24), (120, 40), (160, 50)]
+
+
+def page(app) -> list[str]:
+    strips = app.screen._compositor.render_strips()
+    return ["".join(seg.text for seg in strip).rstrip() for strip in strips]
+
+
+def themed_app(tmp_path, theme_name: str, fake: FakeSwitcher | None = None):
+    from claude_rotater.settings import set_setting
+
+    set_setting(tmp_path, "ui.theme", theme_name)
+    fake = fake or three_accounts(tmp_path)
+    with_history(fake, burn_history(time.time()))
+    return make_app(fake)
+
+
+def bottom(app, size) -> str:
+    """The bottom row of the terminal, which is the prompt line."""
+    lines = page(app)
+    assert len(lines) == size[1] and all(len(line) <= size[0] for line in lines)
+    return lines[-1].strip()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("theme_name", THEMES)
+@pytest.mark.parametrize("size", SIZES)
+class TestPromptLineOnThePage:
+    async def test_idle_hint_on_the_bottom_row(self, tmp_path, size, theme_name):
+        app = themed_app(tmp_path, theme_name)
+        async with app.run_test(size=size) as pilot:
+            await settle(pilot)
+            assert bottom(app, size) == "⏎ switch · a add · ? keys"
+
+    async def test_confirm_yes_no_and_esc(self, tmp_path, size, theme_name):
+        app = themed_app(tmp_path, theme_name)
+        async with app.run_test(size=size) as pilot:
+            await settle(pilot)
+            await pilot.press("down", "x")
+            await pilot.pause()
+            assert bottom(app, size).endswith("y remove  n no  esc")
+            await pilot.press("escape")
+            await pilot.pause()
+            assert bottom(app, size) == "⏎ switch · a add · ? keys"
+            await pilot.press("x", "n", "x", "y")
+            await settle(pilot)
+            assert [c for c in app.switcher.calls if c[0] == "remove"] == [("remove", "2", True)]
+
+    async def test_add_chooser_and_token_entry(self, tmp_path, size, theme_name):
+        app = themed_app(tmp_path, theme_name)
+        async with app.run_test(size=size) as pilot:
+            await settle(pilot)
+            await pilot.press("a")
+            await pilot.pause()
+            assert bottom(app, size) == "add:  b browser login  c current login  t paste token  esc"
+            await pilot.press("t", *"sk-ant-oat-y")
+            await pilot.pause()
+            line = bottom(app, size)
+            assert line.startswith("token: ") and "▌" in line and "sk-ant" not in line
+            await pilot.press("enter", "enter", "enter")  # no label, next free slot
+            await settle(pilot)
+            assert ("add_token", "sk-ant-oat-y", None, None, True) in app.switcher.calls
+
+    async def test_error_is_shown_inline(self, tmp_path, size, theme_name):
+        from claude_rotater.exceptions import ClaudeSwitchError
+
+        fake = three_accounts(tmp_path)
+
+        def refuse(number, **_kw):
+            raise ClaudeSwitchError("account 2 is busy")
+
+        fake.switch_to = refuse
+        app = themed_app(tmp_path, theme_name, fake)
+        async with app.run_test(size=size) as pilot:
+            await settle(pilot)
+            await pilot.press("down", "enter")
+            await settle(pilot)
+            line = bottom(app, size)
+            full = "switch to account 2 failed: account 2 is busy"
+            assert line == full or (line.endswith("…") and full.startswith(line[:-1]))
+            assert len(app.screen_stack) == 2  # the default screen and the main page: no popup
+
+    async def test_keys_panel_and_config_in_place(self, tmp_path, size, theme_name):
+        app = themed_app(tmp_path, theme_name)
+        async with app.run_test(size=size) as pilot:
+            await settle(pilot)
+            screen = app.screen
+            await pilot.press("question_mark")
+            await pilot.pause()
+            assert screen.keys_shown and "this list" in "\n".join(page(app))
+            await pilot.press("question_mark", "c")
+            await pilot.pause()
+            assert app.screen is screen and screen.config_shown
+            assert bottom(app, size).endswith("esc back")
+            assert page(app)[0].strip().startswith("rota")  # the same header
+            await pilot.press("escape")
+            await pilot.pause()
+            assert not screen.config_shown
+            assert bottom(app, size) == "⏎ switch · a add · ? keys"
