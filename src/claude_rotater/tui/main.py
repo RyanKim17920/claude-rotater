@@ -6,14 +6,16 @@ Layout, top to bottom, as tall as the terminal allows:
   state, why a switch is held (only while one is), and the estimate legend;
 - one ``AccountRow`` per account, measured now: on-duty bar, the account, a
   short tag only when it matters (a dead or lapsing login, "off", a real
-  org), then per window (5h, 7d, each per-model window in use) its pct and a
-  countdown to its reset, then one forecast cell for the binding window
+  org), then per window (5h, 7d, each per-model window in use) its pct, a
+  short bar (measured fill, then a dim ``░`` hatch out to the projection at
+  the reset, warning-coloured past the threshold) and a countdown to its
+  reset, then one forecast cell for the binding window
   (``ok``, ``~7d limit in 15h``, ``~?``). Columns shrink as the width runs
   short (:data:`LEVELS`);
 - the highlighted account's 5h and 7d charts (measured history solid, the
   projection dotted and dim, the threshold line, the reset at the right
   edge), filling the spare height and hidden when fewer than
-  :data:`CHART_MIN_ROWS` rows are spare (the rows then get small meters).
+  :data:`CHART_MIN_ROWS` rows are spare.
   ``h`` swaps in the long-term view (past 5h peaks, the 7d curve across
   weeks);
 - a 3-line log of recent non-routine engine events (hidden until the first);
@@ -65,7 +67,7 @@ from claude_rotater.tui.plot import (
 )
 from claude_rotater.tui.modals import KeysModal
 from claude_rotater.tui.theme import Palette, brand_chip
-from claude_rotater.tui.widgets import bar_cells
+from claude_rotater.tui.widgets import BAR_EIGHTHS, BAR_FULL, BAR_TICK
 from claude_rotater.usage_history import Point
 from claude_rotater.usage_store import STALE_OK_S
 
@@ -252,7 +254,8 @@ _FORECAST_SHORT_W = 10  # "~7d in 15h"
 class Level:
     """How much one table row carries; :data:`LEVELS` goes richest first.
 
-    ``bar_w`` meters only appear when the charts are hidden for height."""
+    ``bar_w`` is the projection bar's width (0: no bar). Bars shrink before
+    a whole name gives way, and go before the 5h/7d countdowns do."""
 
     bar_w: int
     model_reset: bool  # per-model windows (Fable, ...) keep their countdown
@@ -261,9 +264,12 @@ class Level:
 
 
 LEVELS: tuple[Level, ...] = (
-    Level(4, True, True, True),
-    Level(0, True, True, True),
-    Level(0, False, True, True),
+    Level(10, True, True, True),
+    Level(8, True, True, True),
+    Level(8, False, True, True),
+    Level(8, False, False, True),
+    Level(6, False, False, True),
+    Level(4, False, False, True),
     Level(0, False, False, True),
     Level(0, False, False, False),
 )
@@ -308,12 +314,11 @@ class RowLayout:
         *,
         name_need: int = _MAX_NAME_W,
         tag_need: int = 0,
-        bars: bool = False,
     ) -> "RowLayout":
         windows = tuple(windows)
         name_need = max(_MIN_NAME_W, min(name_need, _MAX_NAME_W))
         tag_w = min(tag_need, _MAX_TAG_W)
-        levels = [lv for lv in LEVELS if bars or not lv.bar_w]
+        levels = LEVELS
 
         def room(level: Level) -> int:
             layout = cls(width, windows, 0, tag_w, level)
@@ -324,7 +329,7 @@ class RowLayout:
                 + layout.forecast_w + _GAP
             )
 
-        # A whole name beats meters, model countdowns and the long forecast;
+        # A whole name beats wide bars, model countdowns and the long forecast;
         # the 5h/7d countdowns beat a whole name (it shrinks to a few cells
         # first); only past that do they go.
         for level in levels:
@@ -424,10 +429,13 @@ def window_cell(
     threshold: float | None,
     palette: Palette,
     stale: bool = False,
+    projected: float | None = None,
 ) -> Text:
     """One window column, exactly ``layout.window_w(label)`` cells:
-    ``5h 58% ↻1h20m``. All measured, so nothing here is dim; a stale
-    reading is muted instead. An unused window drops its countdown."""
+    ``5h  58% ███▌░░░▕ ↻1h20m``. The pct, the solid fill and the countdown
+    are measured (a stale reading is muted, never dim); the hatch is the
+    projection to the reset, in the estimate style. An unused window drops
+    its countdown."""
     width = layout.window_w(label)
     cell = Text(no_wrap=True)
     cell.append(label, style=palette.muted)
@@ -438,13 +446,70 @@ def window_cell(
         cell.append(f" {pct:3.0f}%", style=palette.muted if stale else palette.severity(pct))
         if layout.bar_w:
             cell.append(" ")
-            cell.append(bar_cells(pct, layout.bar_w, stale=stale, threshold=threshold, palette=palette))
+            cell.append(projection_bar(
+                pct, projected, layout.bar_w, threshold=threshold, palette=palette, stale=stale,
+            ))
         if layout.has_reset(label) and resets_at is not None and pct > 0:
             rel = countdown_text(resets_at - now) if resets_at > now else "now"
             cell.append(f" {_RESET_GLYPH}{rel}", style=palette.muted)
     cell.truncate(width)
     cell.pad_right(width - cell.cell_len)
     return cell
+
+
+PROJECTION_HATCH = "░"
+
+
+def projection_bar(
+    pct: float,
+    projected: float | None,
+    width: int,
+    *,
+    threshold: float | None,
+    palette: Palette,
+    stale: bool = False,
+) -> Text:
+    """``███▌░░░▕``: the measured pct as a solid fill, then a dim hatch out to
+    ``projected`` (the estimate at the reset), turning the warning colour
+    where it runs past the threshold; the threshold tick where nothing covers it."""
+    text = Text(no_wrap=True)
+    if width <= 0:
+        return text
+    track = f"on {palette.track}"
+    eighths = round(min(max(pct, 0.0), 100.0) / 100.0 * width * 8)
+    full, part = divmod(eighths, 8)
+    measured_end = full + (1 if part else 0)
+    proj_end = measured_end
+    if projected is not None and projected > pct:
+        proj_end = max(measured_end, round(min(projected, 100.0) / 100.0 * width))
+    tick_at = None
+    if threshold is not None:
+        tick_at = min(width - 1, max(0, round(threshold / 100.0 * width) - 1))
+    crosses = projected is not None and threshold is not None and projected >= threshold
+    fill = f"{palette.muted} {track}" if stale else f"{palette.severity(pct)} {track}"
+    for i in range(width):
+        if i < full:
+            text.append(BAR_FULL, style=fill)
+        elif i == full and part:
+            text.append(BAR_EIGHTHS[part], style=fill)
+        elif i < proj_end:
+            over = crosses and tick_at is not None and i >= tick_at
+            color = palette.sev_warn if over else palette.foreground
+            text.append(PROJECTION_HATCH, style=f"{estimate_style(color)} {track}")
+        elif i == tick_at:
+            text.append(BAR_TICK, style=f"{palette.sev_warn} {track}")
+        else:
+            text.append(" ", style=track)
+    return text
+
+
+def projected_at_reset(west: WindowEstimate, resets_at: float | None, now: float) -> float | None:
+    """Where a trusted estimate puts the window just before its measured
+    reset; None when the estimate is too thin or the reset is unknown/past."""
+    west = _at_measured_reset(west, resets_at)
+    if west.confidence not in _TRUSTED or west.resets_at is None or west.resets_at <= now:
+        return None
+    return west.projected_pct(west.resets_at - 1)
 
 
 @dataclass(frozen=True)
@@ -541,10 +606,15 @@ def account_row_text(
 
     stale = acc.usage.age_s is not None and acc.usage.age_s > STALE_OK_S
     for label in layout.windows:
+        measured = pcts.get(label)
+        projected = None
+        if measured is not None and est is not None and label in est.windows:
+            projected = projected_at_reset(est.windows[label], measured[1], now)
         text.append(" " * _GAP)
         text.append(
             window_cell(
-                label, pcts.get(label), layout, now=now, threshold=threshold, palette=palette, stale=stale
+                label, measured, layout, now=now, threshold=threshold, palette=palette,
+                stale=stale, projected=projected,
             )
         )
     fc = forecast(acc, est, threshold=threshold, now=now, models=models)
@@ -559,8 +629,8 @@ def account_row_text(
 # Charts: the selected account's 5h and 7d windows
 # ---------------------------------------------------------------------------
 
-# Below this many spare rows the charts are hidden (and the table gets its
-# small meters back); above it they fill the spare height up to a cap.
+# Below this many spare rows the charts are hidden; above it they fill the
+# spare height up to a cap.
 CHART_MIN_ROWS = 8
 CHART_MAX_PLOT = 14
 
@@ -1003,7 +1073,6 @@ class MainScreen(Screen):
             table_windows(accounts, self.app.models),
             name_need=max(names, default=_MIN_NAME_W),
             tag_need=max(tags, default=0),
-            bars=not self.charts_fit(),
         )
 
     def detail_budget(self) -> int:
@@ -1128,7 +1197,8 @@ class MainScreen(Screen):
         self.repaint()
 
     def on_resize(self, _event) -> None:
-        # Whether the charts fit decides whether the rows carry meters.
+        # A height change alone does not resize the chart pane's width, so
+        # make it re-measure the spare rows.
         self.repaint()
 
     def on_list_view_highlighted(self, _event: ListView.Highlighted) -> None:

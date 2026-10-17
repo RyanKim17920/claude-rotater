@@ -24,7 +24,7 @@ from claude_rotater.json_output import USAGE_API_KEY, USAGE_TOKEN_EXPIRED
 from claude_rotater.models import AccountSnapshot, AccountsSnapshot
 from claude_rotater.switcher import ClaudeAccountSwitcher
 from claude_rotater.tui import data as tui_data
-from claude_rotater.tui.theme import SEV_WARN
+from claude_rotater.tui.theme import SEV_WARN, Palette
 from claude_rotater.usage_store import UsageEntry
 
 sys.path.insert(0, str(Path(__file__).parent))
@@ -753,11 +753,24 @@ class TestAccountRowText:
         row = self._row(make_account(1, active=True, entry=make_entry(62.0, 31.0), email="me@x.com"))
         assert row.startswith("▌ me@x.com")
         assert "5h  62%" in row and "7d  31%" in row
-        assert not has_bar(row)  # meters only when the charts are hidden
+        assert has_bar(row)  # each window carries its bar
 
-    def test_meters_when_charts_are_hidden(self):
-        row = self._row(make_account(1, entry=make_entry(62.0, 31.0)), bars=True)
-        assert has_bar(row)
+    def test_bar_hatches_out_to_the_projection(self):
+        from claude_rotater.tui.main import PROJECTION_HATCH
+
+        est, now = window_est(rate=5.0, conf="high")  # 60% → ~67% at the 2h reset
+        text = self._text(make_account(1, entry=make_entry(60.0, 10.0)), est, now=now, width=160)
+        assert PROJECTION_HATCH in text.plain and is_dim(text, PROJECTION_HATCH)
+        # the 7d window has no estimate: a solid fill only
+        seven = text.plain[text.plain.index("7d"):]
+        assert PROJECTION_HATCH not in seven
+
+    def test_thin_estimate_draws_no_hatch(self):
+        from claude_rotater.tui.main import PROJECTION_HATCH
+
+        est, now = window_est(conf="low")
+        text = self._text(make_account(1, entry=make_entry(60.0, 10.0)), est, now=now, width=160)
+        assert PROJECTION_HATCH not in text.plain
 
     def test_inactive_has_no_marker(self):
         row = self._row(make_account(2, entry=make_entry(12.0, 44.0), email="work@y.com"))
@@ -864,17 +877,46 @@ class TestAccountRowText:
         assert rows[0].index("7d") == rows[1].index("7d")
 
 
+class TestProjectionBar:
+    def _bar(self, pct, projected, width=10, threshold=90.0):
+        from claude_rotater.tui.main import projection_bar
+
+        return projection_bar(pct, projected, width, threshold=threshold, palette=Palette.DARK)
+
+    def test_measured_fill_then_hatch_then_tick(self):
+        bar = self._bar(30.0, 60.0)
+        assert bar.plain == "███░░░  ▕ "
+        assert not is_dim(bar, "███") and is_dim(bar, "░░░")
+
+    def test_crossing_the_threshold_turns_the_overflow_warning(self):
+        bar = self._bar(50.0, 100.0)
+        assert bar.plain == "█████░░░░░"
+        over = [str(sp.style) for sp in bar.spans if sp.start == 9]
+        under = [str(sp.style) for sp in bar.spans if sp.start == 5]
+        assert any(SEV_WARN in st and "dim" in st for st in over)
+        assert not any(SEV_WARN in st for st in under)
+
+    def test_no_projection_is_measured_only(self):
+        assert self._bar(30.0, None).plain == "███     ▕ "
+        assert self._bar(30.0, 20.0).plain == "███     ▕ "  # never hatches backwards
+
+    def test_partial_cell_is_an_eighth_block(self):
+        assert self._bar(35.0, None).plain.startswith("███▌")
+
+
 class TestRowLayout:
-    def test_meters_only_when_allowed(self):
+    def test_bars_shrink_with_the_width(self):
         from claude_rotater.tui.main import RowLayout
 
-        assert RowLayout.for_width(160, ("5h", "7d")).bar_w == 0
-        assert RowLayout.for_width(160, ("5h", "7d"), bars=True).bar_w == 4
+        windows = ("5h", "7d", "Fable")
+        widths = [RowLayout.for_width(w, windows, name_need=10, tag_need=9).bar_w for w in (160, 120, 100, 78)]
+        assert widths[0] == 10 and 8 <= widths[1] <= 10
+        assert widths == sorted(widths, reverse=True) and widths[-1] <= 4
 
     def test_degrades_in_order(self):
         from claude_rotater.tui.main import LEVELS, RowLayout
 
-        widths = [RowLayout.for_width(w, ("5h", "7d", "Fable"), tag_need=8, bars=True)
+        widths = [RowLayout.for_width(w, ("5h", "7d", "Fable"), tag_need=8)
                   for w in (200, 120, 95, 80, 66, 50)]
         ranks = [LEVELS.index(lay.level) for lay in widths]
         assert ranks == sorted(ranks)
@@ -1205,12 +1247,10 @@ class TestMainPage:
             actions = app.screen.query_one("#actions")
             assert actions.region.y == detail.region.bottom + 1
             assert actions.region.bottom <= size[1]
-            assert not has_bar(row_plain(app, "1"))  # meters only without charts
 
     @pytest.mark.parametrize("height, shown", [(16, True), (15, False)])
     async def test_charts_hide_when_too_few_rows_are_spare(self, tmp_path, height, shown):
-        """Three accounts leave height - 8 rows; the charts need 8. Hidden,
-        the rows get their small meters back."""
+        """Three accounts leave height - 8 rows; the charts need 8."""
         fake = three_accounts(tmp_path)
         with_history(fake, burn_history(time.time()))
         app = make_app(fake)
@@ -1218,7 +1258,6 @@ class TestMainPage:
             await settle(pilot)
             assert app.screen.charts_fit() is shown
             assert braille(painted(app, "#detail")) is shown
-            assert has_bar(row_plain(app, "1")) is not shown
             assert app.screen.query_one("#actions").region.bottom <= height
 
     async def test_charts_resize_with_the_terminal(self, tmp_path):
@@ -1230,7 +1269,7 @@ class TestMainPage:
             assert braille(painted(app, "#detail"))
             await pilot.resize_terminal(120, 14)
             await settle(pilot)
-            assert not braille(painted(app, "#detail")) and has_bar(row_plain(app, "1"))
+            assert not braille(painted(app, "#detail"))
 
     async def test_question_mark_lists_the_other_keys(self, tmp_path):
         from claude_rotater.tui.main import MainScreen
@@ -1309,7 +1348,6 @@ class TestMainPage:
             await settle(pilot)
             first = row_plain(app, "1")
             assert "me@x.com" in first and "62%" in first
-            assert not has_bar(first)  # the charts are up, so no meters
             if size[0] >= 80:  # below the supported widths the countdowns go first
                 assert "1h59m" in first or "2h00m" in first
             assert len(first) <= size[0]
