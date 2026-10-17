@@ -45,9 +45,11 @@ rota run <num|email> [-- ...]  # run Claude Code as an account, this terminal on
 rota auto                      # headless auto-switch loop (see rota auto -h)
 ```
 
-Add accounts in the TUI: `a` asks how (log in with the browser, use the
-account Claude Code is logged in with now, or paste a token); `l` and `t`
-jump straight to logging in and pasting a token. Do not use `/logout` to change accounts; it can
+Add accounts in the TUI: `a` asks how on the bottom line (`b` log in with
+the browser, `c` use the account Claude Code is logged in with now, `t`
+paste a token); `l` and `t` jump straight to logging in and pasting a token.
+Nothing pops up: every question (`y` / `n`, `esc` cancels), text entry and
+result shows on that one line. Do not use `/logout` to change accounts; it can
 revoke the stored refresh token.
 
 ### Keys
@@ -62,11 +64,11 @@ revoke the stored refresh token.
 | `x` | remove an account |
 | `f` | refresh usage now |
 | `h` / `esc` | history: past 5h peaks and the 7d curve across weeks, and back |
-| `?` | every key, grouped |
+| `?` / `esc` | every key, grouped, in place of the charts, and back |
 | `s` | set up or remove the statusline feed |
 | `c` | settings (`↑`/`↓` select, `←`/`→` change, digits or `enter` exact value, `esc` back) |
 | `ctrl+t` | theme |
-| `q` | quit |
+| `q` / `ctrl+c` | quit |
 
 ### Statusline step
 
