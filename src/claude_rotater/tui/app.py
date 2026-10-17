@@ -236,6 +236,10 @@ class RotaApp(App):
             threshold=self.settings.threshold,
             cooldown_s=self.settings.cooldown_seconds,
             next_check_at=None,
+            mode=self.settings.mode,
+            limit_guard=self.settings.manual_limit_guard,
+            # A verdict reached on the old settings no longer holds.
+            decision=None,
         )
         self.run_worker(
             engine.run_loop,
@@ -934,6 +938,23 @@ class RotaApp(App):
             set_setting(self.switcher.backup_dir, "ui.theme", name)
         except Exception as exc:  # persistence is best-effort; never crash the UI
             self.say(f"could not save the theme: {exc}", "warn")
+
+    def toggle_mode(self) -> None:
+        """``m``: flip between auto and manual, saved in this profile's
+        settings, and restart the engine on it."""
+        mode = "auto" if self.settings.mode == "manual" else "manual"
+        try:
+            set_setting(self.switcher.backup_dir, "autoswitch.mode", mode)
+        except Exception as exc:
+            self.say(f"could not change the mode: {exc}", "error")
+            return
+        self.on_settings_changed("autoswitch.mode")
+        if mode == "auto":
+            self.say("auto: rota switches accounts on its own")
+        elif self.settings.manual_limit_guard:
+            self.say("manual: you pick; rota steps in only at a hard limit")
+        else:
+            self.say("manual: you pick; rota never switches")
 
     def action_toggle_theme(self) -> None:
         order = ("dark", "light", "auto")

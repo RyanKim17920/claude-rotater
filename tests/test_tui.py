@@ -1414,7 +1414,7 @@ class TestMainPage:
             assert "estimate" not in status and "~" not in status  # no legend: titles say it
             assert "90%" not in status
             # no button bar, no quit button, no stock header/footer: one dim hint
-            assert prompt_plain(app) == "⏎ switch · a add · ? keys"
+            assert prompt_plain(app) == "⏎ switch · a add · m manual · ? keys"
             for stock in (Button, Footer, Header):
                 assert not app.screen.query(stock)
             assert app.focused is app.screen.query_one("#accounts")  # the list keeps the keys
@@ -1619,7 +1619,7 @@ class TestMainPage:
             assert "me@x.com" in first and "62%" in first
             assert "1h59m" in first or "2h00m" in first  # the 5h reset at any width
             assert len(first) <= size[0]
-            assert prompt_plain(app) == "⏎ switch · a add · ? keys"  # whole at any width
+            assert prompt_plain(app) == "⏎ switch · a add · m manual · ? keys"  # whole at any width
             # too few rows for readable charts: hidden, never squeezed
             assert app.screen.query_one("#prompt").region.bottom == size[1]
             assert not braille(painted(app, "#detail"))
@@ -1801,7 +1801,7 @@ class TestMainPage:
             await pilot.press("n")
             await settle(pilot)
             assert not any(c[0] == "remove" for c in fake_calls(app))
-            assert prompt_plain(app) == "⏎ switch · a add · ? keys"
+            assert prompt_plain(app) == "⏎ switch · a add · m manual · ? keys"
             await pilot.press("delete")
             await pilot.pause()
             await pilot.press("escape")  # esc cancels as well
@@ -1942,7 +1942,7 @@ class TestMainPage:
             await pilot.pause()
             assert not screen.config_shown and screen.query_one("#body").display
             assert app.focused is screen.query_one("#accounts")
-            assert prompt_plain(app) == "⏎ switch · a add · ? keys"
+            assert prompt_plain(app) == "⏎ switch · a add · m manual · ? keys"
             await pilot.press("c", "c")  # c toggles back as well
             await pilot.pause()
             assert not screen.config_shown
@@ -3226,7 +3226,7 @@ class TestWidths:
             assert len(page) == size[1] and all(len(line) <= size[0] for line in page)
             for gone in ("~ = estimate", "~?", "on duty", "not enough data", "disabled"):
                 assert gone not in text, gone
-            assert page[-1].strip() == "⏎ switch · a add · ? keys"
+            assert page[-1].strip() == "⏎ switch · a add · m manual · ? keys"
             assert all(row.region.height == 1 for row in app.screen.query(AccountRow))
 
     @pytest.mark.parametrize("size", [(60, 20), (80, 24), (120, 40), (160, 50)])
@@ -3400,3 +3400,97 @@ class TestRepaintDiscipline:
                 if t.name != "screen_update"  # Textual's own compositor tick
             ]
             assert intervals and min(intervals) >= app.POLL_INTERVAL_S
+
+
+@pytest.mark.asyncio
+class TestModeToggle:
+    """``m`` flips auto/manual, saved in the profile's settings; the header
+    names the mode and the limit guard; a click on the label does the same."""
+
+    async def test_m_flips_the_mode_and_back(self, tmp_path):
+        from claude_rotater.settings import load_settings
+
+        app = make_app(three_accounts(tmp_path))
+        async with app.run_test(size=(120, 40)) as pilot:
+            await settle(pilot)
+            assert "auto on" in painted(app, "#status")
+            await pilot.press("m")
+            await settle(pilot)
+            assert load_settings(tmp_path).mode == "manual"
+            assert FakeEngine.instances[-1].settings.mode == "manual"
+            assert FakeEngine.instances[0].stopped  # restarted on the new mode
+            status = painted(app, "#status")
+            assert "manual · limit guard" in status and "auto on" not in status
+            assert "steps in only at a hard limit" in prompt_plain(app)
+            assert app.screen.prompt.hint.plain == "⏎ switch · a add · m auto · ? keys"
+            await pilot.press("m")
+            await settle(pilot)
+            assert load_settings(tmp_path).mode == "auto"
+            assert "auto on" in painted(app, "#status")
+
+    async def test_manual_without_the_guard_says_so(self, tmp_path):
+        from claude_rotater.settings import set_setting
+
+        set_setting(tmp_path, "autoswitch.mode", "manual")
+        set_setting(tmp_path, "autoswitch.manualLimitGuard", "false")
+        app = make_app(three_accounts(tmp_path))
+        async with app.run_test(size=(120, 40)) as pilot:
+            await settle(pilot)
+            status = painted(app, "#status")
+            assert "manual" in status and "limit guard" not in status
+            await pilot.press("m")
+            await settle(pilot)
+            await pilot.press("m")
+            await settle(pilot)
+            assert "rota never switches" in prompt_plain(app)
+
+    async def test_the_manual_verdict_shows_in_the_header(self, tmp_path):
+        from claude_rotater.settings import set_setting
+
+        set_setting(tmp_path, "autoswitch.mode", "manual")
+        app = make_app(three_accounts(tmp_path))
+        async with app.run_test(size=(160, 40)) as pilot:
+            await settle(pilot)
+            await emit(FakeEngine.instances[-1], NoSwitchEvent(
+                reason="manual",
+                detail="stay: you pick the account; the guard moves only at a hard limit",
+            ))
+            await settle(pilot)
+            assert (
+                "manual · limit guard · stay: you pick the account; the guard "
+                "moves only at a hard limit"
+            ) in painted(app, "#status")
+
+    async def test_clicking_the_mode_label_toggles(self, tmp_path):
+        from claude_rotater.settings import load_settings
+
+        app = make_app(three_accounts(tmp_path))
+        async with app.run_test(size=(120, 40)) as pilot:
+            await settle(pilot)
+            x = painted(app, "#status").index("auto on") + 1  # + the band's padding
+            await pilot.click("#status", offset=(x + 1, 0))
+            await settle(pilot)
+            assert load_settings(tmp_path).mode == "manual"
+            await pilot.click("#status", offset=(1, 0))  # the brand chip: nothing
+            await settle(pilot)
+            assert load_settings(tmp_path).mode == "manual"
+
+    async def test_m_is_listed_with_the_keys(self, tmp_path):
+        import re
+
+        app = make_app(three_accounts(tmp_path))
+        async with app.run_test(size=(120, 40)) as pilot:
+            await settle(pilot)
+            await pilot.press("question_mark")
+            await pilot.pause()
+            assert re.search(r"(^|   )m +auto / manual", painted(app, "#detail"), re.M)
+
+    async def test_m_stands_down_on_the_settings_page(self, tmp_path):
+        from claude_rotater.settings import load_settings
+
+        app = make_app(three_accounts(tmp_path))
+        async with app.run_test(size=(120, 40)) as pilot:
+            await settle(pilot)
+            await pilot.press("c", "m")
+            await settle(pilot)
+            assert load_settings(tmp_path).mode == "auto"

@@ -53,6 +53,7 @@ import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Sequence
 
+from rich.style import Style
 from rich.text import Text
 from textual.app import ComposeResult
 from textual.binding import Binding
@@ -199,6 +200,10 @@ class AutoStatus:
     last_outcome: str = ""  # most recent no-switch reason / error summary
     last_reason: str = ""  # its machine reason ("cooldown", "no-candidates", "error", ...)
     decision: Decision | None = None  # the engine's latest verdict, for the header
+    # autoswitch.mode ("auto" / "manual") and, for manual, whether the limit
+    # guard still moves off an account at its hard limit.
+    mode: str = "auto"
+    limit_guard: bool = True
     # Set when another rota on this data dir runs the engine (this one only
     # shows): "another rota is running (pid 4242, older code)".
     view_only: str = ""
@@ -264,6 +269,28 @@ def same_verdict(new: Decision, old: Decision | None) -> bool:
 
 DECISION_SEP = " · "
 MIN_DECISION_W = 12  # narrower than "stay: reset…" says nothing; drop it
+# Clicking the header's mode label runs the same action as ``m``.
+MODE_CLICK = Style(meta={"@click": "screen.toggle_mode"})
+
+
+def mode_label(status: AutoStatus, palette: Palette) -> Text:
+    """``auto on`` / ``manual · limit guard`` / ``auto off``: who decides when
+    to switch, and whether the engine runs here at all."""
+    label = Text(no_wrap=True)
+    label.append(status.mode, style=palette.muted)
+    if status.running:
+        if status.mode == "manual":
+            if status.limit_guard:
+                label.append(" · ", style=palette.muted)
+                label.append("limit guard", style=f"bold {palette.accent}")
+        else:
+            label.append(" on", style=f"bold {palette.accent}")
+    elif status.view_only:
+        label.append(" view-only", style=f"bold {palette.sev_warn}")
+    else:
+        label.append(" off", style=f"bold {palette.sev_crit}")
+    label.stylize(MODE_CLICK)
+    return label
 
 
 def status_text(
@@ -286,13 +313,8 @@ def status_text(
     if profile:  # a named profile, so it is obvious which one is open
         head.append(" · ", style=palette.muted)
         head.append(profile, style=f"bold {palette.accent}")
-    head.append("  auto ", style=palette.muted)
-    if status.running:
-        head.append("on", style=f"bold {palette.accent}")
-    elif status.view_only:
-        head.append("view-only", style=f"bold {palette.sev_warn}")
-    else:
-        head.append("off", style=f"bold {palette.sev_crit}")
+    head.append("  ")
+    head.append_text(mode_label(status, palette))
     tail = Text(no_wrap=True)
     if feed in FEED_LABELS:
         glyph, role, words = FEED_LABELS[feed]
@@ -1177,8 +1199,16 @@ class _Painted(Static):
 MAIN_HINT_KEYS: tuple[tuple[str, str], ...] = (
     ("⏎", "switch"),
     ("a", "add"),
+    ("m", "manual"),
     ("?", "keys"),
 )
+
+
+def main_hint_keys(mode: str) -> tuple[tuple[str, str], ...]:
+    """The idle hint; ``m`` names the mode it switches to."""
+    if mode != "manual":
+        return MAIN_HINT_KEYS
+    return tuple((k, "auto" if k == "m" else w) for k, w in MAIN_HINT_KEYS)
 
 KeyGroup = tuple[str, tuple[tuple[str, str], ...]]  # (heading, ((key, words), ...))
 
@@ -1208,6 +1238,7 @@ KEY_COLUMNS: tuple[tuple[KeyGroup, ...], ...] = (
             ("ctrl+t", "theme"),
         )),
         ("setup", (
+            ("m", "auto / manual"),
             ("c", "config"),
             ("s", "statusline feed"),
         )),
@@ -1256,7 +1287,7 @@ KEYS_ROWS = len(keys_text().plain.splitlines())
 MAIN_ONLY_ACTIONS = frozenset({
     "login_selected", "add", "add_token", "toggle_selected", "remove_selected",
     "toggle_long", "statusline", "refresh_full", "help", "leave_panel",
-    "cursor_down", "cursor_up", "open_config",
+    "cursor_down", "cursor_up", "open_config", "toggle_mode",
 })
 
 
@@ -1271,6 +1302,7 @@ class MainScreen(Screen):
         Binding("d", "toggle_selected", show=False),
         Binding("x,delete", "remove_selected", show=False),
         Binding("c", "open_config", show=False),
+        Binding("m", "toggle_mode", show=False),
         Binding("h", "toggle_long", show=False),
         Binding("s", "statusline", show=False),
         Binding("f", "refresh_full", show=False),
@@ -1486,7 +1518,7 @@ class MainScreen(Screen):
         self.query_one("#status").refresh()
 
     def _set_hint(self) -> None:
-        keys = CONFIG_HINT_KEYS if self.config_shown else MAIN_HINT_KEYS
+        keys = CONFIG_HINT_KEYS if self.config_shown else main_hint_keys(self.app.settings.mode)
         self.prompt.set_hint(hint_text(keys, self.palette))
 
     def _on_theme(self) -> None:
@@ -1587,6 +1619,10 @@ class MainScreen(Screen):
 
     def action_add(self) -> None:
         self.app.action_add()
+
+    def action_toggle_mode(self) -> None:
+        self.app.toggle_mode()
+        self._set_hint()
 
     def action_add_token(self) -> None:
         self.app.action_add_token()

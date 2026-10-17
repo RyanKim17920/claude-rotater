@@ -83,6 +83,7 @@ revoke the stored refresh token.
 | `t` | add a setup-token or API key |
 | `d` | turn an account off or on for rotation |
 | `x` | remove an account |
+| `m` | auto or manual: in manual rota never switches on its own, and with `autoswitch.manualLimitGuard` (on by default) still steps in at a hard limit; the header shows which (click it to flip too) |
 | `f` | refresh usage now |
 | `h` / `esc` | history: past 5h peaks and the 7d curve across weeks, and back |
 | `?` / `esc` | every key, grouped, in place of the charts, and back |
