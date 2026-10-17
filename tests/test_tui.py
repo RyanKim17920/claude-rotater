@@ -722,13 +722,16 @@ def has_color(text, needle: str, color: str) -> bool:
     return any(color in style for style in styles_of(text, needle))
 
 
-def braille_cells(lines, start: int = 0, end: int | None = None) -> list[tuple[int, str]]:
-    """(column, style) of every braille cell in ``lines`` between the columns."""
+def braille_cells(lines, start: int = 0, end: int | None = None, *, glyph: str | None = None) -> list[tuple[int, str]]:
+    """(column, style) of every braille cell (or every ``glyph``) in ``lines``
+    between the columns."""
     out = []
     for line in lines:
         for sp in line.spans:
             for c in range(sp.start, sp.end):
-                if start <= c < (end if end is not None else 10**6) and 0x2800 <= ord(line.plain[c]) <= 0x28FF:
+                ch = line.plain[c]
+                hit = ch == glyph if glyph is not None else 0x2800 <= ord(ch) <= 0x28FF
+                if start <= c < (end if end is not None else 10**6) and hit:
                     out.append((c, str(sp.style)))
     return out
 
@@ -2414,13 +2417,15 @@ class TestChartLines:
         lines = self._lines(120)
         body = "\n".join(line.plain for line in lines)
         assert THRESHOLD_GLYPH in body and RESET_GLYPH in body and "now" in body
-        # the 5h projection crosses 90% before the reset: red dots right of now
-        from claude_rotater.tui.plot import NOW_GLYPH
+        # the 5h projection crosses 90% before the reset: red dots right of now,
+        # drawn in their own glyph, never braille like the measured curve
+        from claude_rotater.tui.plot import NOW_GLYPH, PROJECTION_GLYPH
 
         half = (120 - 3) // 2
         now_col = lines[-2].plain.index(NOW_GLYPH, 4)
-        right = braille_cells(lines[2:-1], now_col + 1, half)
+        right = braille_cells(lines[2:-1], now_col + 1, half, glyph=PROJECTION_GLYPH)
         assert right and all(SEV_CRIT in st and "dim" not in st for _c, st in right)
+        assert not braille_cells(lines[2:-1], now_col + 2, half)
         assert braille_cells(lines[2:-1], 0, now_col)  # the measured curve
 
     def test_titles_carry_only_the_forecast(self):
@@ -2444,7 +2449,10 @@ class TestChartLines:
         from claude_rotater.tui.plot import NOW_GLYPH
 
         now_col = lines[-2].plain.index(NOW_GLYPH, 4)
+        from claude_rotater.tui.plot import PROJECTION_GLYPH
+
         assert not braille_cells(lines[2:-1], now_col + 1, (120 - 3) // 2)  # nothing right of now
+        assert not braille_cells(lines[2:-1], now_col + 1, (120 - 3) // 2, glyph=PROJECTION_GLYPH)
 
     def test_unused_and_at_limit_titles(self):
         title = self._lines(120, series={}, est=None, entry=make_entry(0.0, 95.0))[1].plain

@@ -5,8 +5,9 @@ the clock, the store, or the app. That keeps the drawing exactly testable
 (golden renders) and lets the app call it from any thread.
 
 The line plot draws one usage window on a braille canvas (2x4 dots per
-cell): the measured series as a solid line, the estimator's projection as a
-dotted line from the last measurement up to the reset (or 100%), the
+cell): the measured series as a solid braille line, the estimator's
+projection as a row of sparse ``·`` dots from the last measurement up to the
+reset (or 100%), the
 auto-switch threshold as a dashed row, the reset as a marker column, and a
 dim vertical line at "now", where the measured line ends and the projection
 begins.
@@ -28,6 +29,10 @@ SPARK_GLYPHS = "▁▂▃▄▅▆▇█"
 THRESHOLD_GLYPH = "┄"
 RESET_GLYPH = "┊"
 NOW_GLYPH = "│"  # where measurement ends and the projection starts
+# The projection is drawn in its own glyph, a row of single centred dots,
+# so it reads apart from the dense braille of the measured line even where
+# colours are hard to tell apart.
+PROJECTION_GLYPH = "·"
 GUTTER = 4  # "100┤" — y-axis label plus its tick
 MIN_PLOT_WIDTH = 20
 MIN_PLOT_HEIGHT = 3  # total lines, including the time-axis row
@@ -156,9 +161,10 @@ def line_plot(
 ) -> list[Text]:
     """Multi-row plot of one window; ``height`` lines including the time axis.
 
-    The projection is told apart from the measured line by being dotted, not
-    by fading: ``projection_color`` colours it by its outcome (the caller's
-    call), else it takes the height colour like the measured line.
+    The projection is told apart from the measured line by its glyph
+    (:data:`PROJECTION_GLYPH` dots, not braille), never by fading:
+    ``projection_color`` colours it by its outcome (the caller's call), else
+    it takes the height colour like the measured line.
 
     The x range is ``[max(window_start, now - lookback_s), resets_at or now +
     1h]`` (``lookback_s`` defaults to the window length, i.e. the whole
@@ -276,9 +282,10 @@ def _grid_rows(
         color = palette.severity(row_pct)
         for c in range(cols):
             solid, dotted = canvas.solid[r][c], canvas.dotted[r][c]
-            if solid or dotted:
-                glyph = chr(_BRAILLE_BASE | solid | dotted)
-                line.append(glyph, style=color if solid else (projection_color or color))
+            if solid:
+                line.append(chr(_BRAILLE_BASE | solid | dotted), style=color)
+            elif dotted:
+                line.append(PROJECTION_GLYPH, style=projection_color or color)
             elif r == thr_row:
                 line.append(THRESHOLD_GLYPH, style=f"{palette.sev_warn} dim")
             elif c == reset_col:
@@ -472,4 +479,6 @@ def peak_columns(
     return lines
 
 
-__all__ = ["history_plot", "line_plot", "peak_columns", "sparkline", "windows_per_bar"]
+__all__ = [
+    "PROJECTION_GLYPH", "history_plot", "line_plot", "peak_columns", "sparkline", "windows_per_bar",
+]

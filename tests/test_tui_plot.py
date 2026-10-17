@@ -10,6 +10,7 @@ import pytest
 from claude_rotater.estimator import WindowEstimate, estimate_account
 from claude_rotater.tui.plot import (
     NOW_GLYPH,
+    PROJECTION_GLYPH,
     GUTTER,
     RESET_GLYPH,
     SPARK_GLYPHS,
@@ -121,9 +122,9 @@ class TestLinePlot:
         _pts, est = burn_5h()
         lines = line_plot(est, now=NOW, threshold=90, width=40, height=8)
         assert [line.plain for line in lines] == [
-            "100┤┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄⡀⠄⠄⠂⠁┄┄┄┄┄┄┄┄",
-            "   │              │   ⡀⠄⠂⠂⠁            ┊",
-            "   │            ⢀⡠⠄⠂⠁⠁                 ┊",
+            "100┤┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄·····┄┄┄┄┄┄┄┄",
+            "   │              │   ·····            ┊",
+            "   │            ⢀⡠⠄···                 ┊",
             "   │        ⣀⠤⠒⠊⠁ │                    ┊",
             "   │   ⢀⠤⠔⠊⠉      │                    ┊",
             "   │              │                    ┊",
@@ -137,7 +138,7 @@ class TestLinePlot:
         assert [line.plain for line in lines] == [
             "100┤┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄",
             "   │                      │   ",
-            "   │⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒⠂⠂⠂⠂",
+            "   │⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒⠂···",
             "  0┤                      │   ",
             "    Tue 16:13        Tue 23:13",
         ]
@@ -161,8 +162,10 @@ class TestLinePlot:
         solid = [c for line in body for sp in line.spans if "#123456" not in str(sp.style)
                  for c in range(sp.start, sp.end) if dots(line.plain[c])]
         dotted = [c for line in body for sp in line.spans if "#123456" in str(sp.style)
-                  for c in range(sp.start, sp.end) if dots(line.plain[c])]
+                  for c in range(sp.start, sp.end) if line.plain[c] == PROJECTION_GLYPH]
         assert max(solid) <= col <= min(dotted)
+        # the projection is its own glyph: no braille right of now
+        assert not any(dots(line.plain[c]) for line in body for c in range(col + 2, len(line.plain)))
         # told apart by the dots, never by fading
         assert not any("dim" in str(sp.style) for line in body for sp in line.spans
                        if dots(line.plain[sp.start]))
@@ -185,7 +188,8 @@ class TestLinePlot:
         # must end on the reset column, not run past it.
         _pts, est = burn_5h(per_step=0.2)
         lines = line_plot(est, now=NOW, threshold=None, width=40, height=8)
-        cols = {c for line in lines[:-1] for c, ch in enumerate(line.plain[GUTTER:]) if dots(ch)}
+        cols = {c for line in lines[:-1] for c, ch in enumerate(line.plain[GUTTER:])
+                if dots(ch) or ch == PROJECTION_GLYPH}
         assert max(cols) == 40 - GUTTER - 1
 
     def test_projection_stops_at_100(self, utc):
@@ -194,7 +198,8 @@ class TestLinePlot:
         _pts, est = burn_5h(start=50.0, per_step=3.0)
         lines = line_plot(est, now=NOW, threshold=None, width=40, height=8)
         reset_col = 40 - GUTTER - 1
-        cols = {c for line in lines[:-1] for c, ch in enumerate(line.plain[GUTTER:]) if dots(ch)}
+        cols = {c for line in lines[:-1] for c, ch in enumerate(line.plain[GUTTER:])
+                if dots(ch) or ch == PROJECTION_GLYPH}
         assert max(cols) < reset_col - 5
 
     def test_no_projection_without_rate(self, utc):
