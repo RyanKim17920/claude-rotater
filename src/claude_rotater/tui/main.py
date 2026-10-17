@@ -765,6 +765,42 @@ def forecast_text(fc: Forecast | None, width: int, *, long: bool, palette: Palet
     return Text(_fit(words, width), style=color, no_wrap=True)
 
 
+def summary_line(
+    acc: AccountSnapshot,
+    est: AccountEstimate | None,
+    *,
+    threshold: float | None,
+    now: float,
+    models: Sequence[str] = (),
+) -> str:
+    """One account as plain text, for the clipboard (``y``):
+    ``me@x.com (active) · 5h 20% resets 25m · 7d 28% resets 5d8h · ok``."""
+    name = account_name(acc)
+    if acc.is_active:
+        name += " (active)"
+    if acc.disabled:
+        name += " (off)"
+    parts = [name]
+    if acc.usage.sentinel is not None:
+        parts.append(_SENTINEL_TAGS.get(acc.usage.sentinel, acc.usage.sentinel))
+    else:
+        windows = shown_windows(acc)
+        if not windows:
+            parts.append("no reading yet")
+        for label, (pct, resets_at) in windows.items():
+            if label not in PRIMARY_WINDOWS and pct <= 0:
+                continue
+            cell = f"{label} {pct:.0f}%"
+            if resets_at is not None and pct > 0:
+                rel = countdown_text(resets_at - now) if resets_at > now else "now"
+                cell += f" resets {rel}"
+            parts.append(cell)
+    fc = forecast(acc, est, threshold=threshold, now=now, models=models)
+    if fc is not None:
+        parts.append(fc.text)
+    return " · ".join(parts)
+
+
 def account_row_text(
     acc: AccountSnapshot,
     est: AccountEstimate | None,
@@ -1233,6 +1269,7 @@ KEY_COLUMNS: tuple[tuple[KeyGroup, ...], ...] = (
     ),
     (
         ("view", (
+            ("y / Y", "copy row / table"),
             ("h", "history (esc back)"),
             ("f", "refresh now"),
             ("ctrl+t", "theme"),
@@ -1287,7 +1324,8 @@ KEYS_ROWS = len(keys_text().plain.splitlines())
 MAIN_ONLY_ACTIONS = frozenset({
     "login_selected", "add", "add_token", "toggle_selected", "remove_selected",
     "toggle_long", "statusline", "refresh_full", "help", "leave_panel",
-    "cursor_down", "cursor_up", "open_config", "toggle_mode",
+    "cursor_down", "cursor_up", "open_config", "toggle_mode", "copy_row",
+    "copy_table",
 })
 
 
@@ -1303,6 +1341,8 @@ class MainScreen(Screen):
         Binding("x,delete", "remove_selected", show=False),
         Binding("c", "open_config", show=False),
         Binding("m", "toggle_mode", show=False),
+        Binding("y", "copy_row", show=False),
+        Binding("Y", "copy_table", show=False),
         Binding("h", "toggle_long", show=False),
         Binding("s", "statusline", show=False),
         Binding("f", "refresh_full", show=False),
@@ -1620,6 +1660,31 @@ class MainScreen(Screen):
     def action_add(self) -> None:
         self.app.action_add()
 
+    def summary(self, number: str) -> str:
+        acc = self.account(number)
+        if acc is None:
+            return ""
+        return summary_line(
+            acc,
+            self.app.estimates.get(number),
+            threshold=self.app.threshold_pct,
+            now=time.time(),
+            models=self.app.models,
+        )
+
+    def action_copy_row(self) -> None:
+        """``y``: the selected account's line, as plain text."""
+        number = self.selected_number
+        if number is not None:
+            self.app.copy_text(self.summary(number), "the row")
+
+    def action_copy_table(self) -> None:
+        """``Y``: every account's line, as plain text."""
+        snap = self.app.snapshot
+        if snap is not None and snap.accounts:
+            lines = [self.summary(acc.number) for acc in snap.accounts]
+            self.app.copy_text("\n".join(lines), "the table")
+
     def action_toggle_mode(self) -> None:
         self.app.toggle_mode()
         self._set_hint()
@@ -1670,4 +1735,5 @@ __all__ = [
     "long_term_lines",
     "snapshot_key",
     "status_text",
+    "summary_line",
 ]

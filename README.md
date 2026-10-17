@@ -84,6 +84,7 @@ revoke the stored refresh token.
 | `d` | turn an account off or on for rotation |
 | `x` | remove an account |
 | `m` | auto or manual: in manual rota never switches on its own, and with `autoswitch.manualLimitGuard` (on by default) still steps in at a hard limit; the header shows which (click it to flip too) |
+| `y` / `Y` | copy the highlighted account's line / every account's line as plain text |
 | `f` | refresh usage now |
 | `h` / `esc` | history: past 5h peaks and the 7d curve across weeks, and back |
 | `?` / `esc` | every key, grouped, in place of the charts, and back |
@@ -91,6 +92,11 @@ revoke the stored refresh token.
 | `c` | settings (`↑`/`↓` select, `←`/`→` change, digits or `enter` exact value, `esc` back) |
 | `ctrl+t` | theme |
 | `q` / `ctrl+c` | quit |
+
+rota takes the mouse, so dragging does not select text. `y` and `Y` copy
+through `pbcopy` (macOS), `wl-copy` or `xclip`/`xsel` (Linux), or else the
+terminal's OSC 52. To select with the mouse anyway, hold Option (most macOS
+terminals) or Shift (most others) while dragging.
 
 ### Statusline step
 

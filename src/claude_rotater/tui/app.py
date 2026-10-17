@@ -31,7 +31,7 @@ from textual.binding import Binding
 from textual.reactive import reactive
 from textual.worker import WorkerState
 
-from claude_rotater import legacy_import, printer
+from claude_rotater import clipboard, legacy_import, printer
 from claude_rotater.autoswitch import (
     ALERT_REASONS,
     STATE_FILENAME,
@@ -938,6 +938,15 @@ class RotaApp(App):
             set_setting(self.switcher.backup_dir, "ui.theme", name)
         except Exception as exc:  # persistence is best-effort; never crash the UI
             self.say(f"could not save the theme: {exc}", "warn")
+
+    def copy_text(self, text: str, what: str) -> None:
+        """Put ``text`` on the clipboard: the system's clipboard command,
+        else the terminal's OSC 52; confirm on the prompt line."""
+        if clipboard.system_copy(text):
+            self.say(f"copied {what}", "ok")
+        else:
+            self.copy_to_clipboard(text)  # OSC 52: the terminal does the copy
+            self.say(f"copied {what} (via the terminal)", "ok")
 
     def toggle_mode(self) -> None:
         """``m``: flip between auto and manual, saved in this profile's

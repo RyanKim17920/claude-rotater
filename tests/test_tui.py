@@ -21,7 +21,11 @@ from pathlib import Path
 import pytest
 
 from claude_rotater.autoswitch import NoSwitchEvent, PollEvent, SleepEvent, SwitchEvent
-from claude_rotater.json_output import USAGE_API_KEY, USAGE_TOKEN_EXPIRED
+from claude_rotater.json_output import (
+    USAGE_API_KEY,
+    USAGE_RELOGIN_REQUIRED,
+    USAGE_TOKEN_EXPIRED,
+)
 from claude_rotater.models import AccountSnapshot, AccountsSnapshot
 from claude_rotater.switcher import ClaudeAccountSwitcher
 from claude_rotater.tui import data as tui_data
@@ -3494,3 +3498,94 @@ class TestModeToggle:
             await pilot.press("c", "m")
             await settle(pilot)
             assert load_settings(tmp_path).mode == "auto"
+
+
+def test_summary_line_is_plain_text():
+    import re
+
+    from claude_rotater.tui.main import summary_line
+
+    now = time.time()
+    acc = make_account(1, active=True, entry=make_entry(62.0, 31.0), email="me@x.com")
+    line = summary_line(acc, None, threshold=90.0, now=now)
+    assert re.fullmatch(
+        r"me@x\.com \(active\) · 5h 62% resets (2h|1h59m) · 7d 31% resets (3d|2d23h)", line
+    ), line
+    assert summary_line(
+        make_account(2, entry=make_entry(95.0, 10.0)), None, threshold=90.0, now=now
+    ).endswith("· 5h at limit")
+    assert summary_line(
+        make_account(3, disabled=True, entry=UsageEntry()), None, threshold=90.0, now=now
+    ) == "user3@example.com (off) · no reading yet"
+    assert summary_line(
+        make_account(4, entry=make_entry(sentinel=USAGE_RELOGIN_REQUIRED)), None,
+        threshold=90.0, now=now,
+    ) == "user4@example.com · re-login"
+
+
+@pytest.mark.asyncio
+class TestCopy:
+    """``y`` copies the selected row, ``Y`` the table, as plain text; the
+    clipboard command is stubbed, OSC 52 is the fallback."""
+
+    @pytest.fixture
+    def copied(self, monkeypatch):
+        got: list[str] = []
+        monkeypatch.setattr(
+            "claude_rotater.clipboard.system_copy", lambda text: got.append(text) or True
+        )
+        return got
+
+    async def test_y_copies_the_selected_row(self, tmp_path, copied):
+        app = make_app(three_accounts(tmp_path))
+        async with app.run_test(size=(120, 40)) as pilot:
+            await settle(pilot)
+            await pilot.press("down", "y")
+            await settle(pilot)
+            assert len(copied) == 1
+            assert copied[0].startswith("work@y.com · 5h 12% resets ")
+            assert "7d 44% resets " in copied[0] and "\n" not in copied[0]
+            assert not set(copied[0]) & set("█▏▕↻›●")  # no bars or glyphs
+            assert prompt_plain(app) == "copied the row"
+
+    async def test_shift_y_copies_the_table(self, tmp_path, copied):
+        app = make_app(three_accounts(tmp_path))
+        async with app.run_test(size=(120, 40)) as pilot:
+            await settle(pilot)
+            await pilot.press("Y")
+            await settle(pilot)
+            lines = copied[0].splitlines()
+            assert [line.split(" · ")[0] for line in lines] == [
+                "me@x.com (active)", "work@y.com", "old@z.com (off)",
+            ]
+            assert prompt_plain(app) == "copied the table"
+
+    async def test_falls_back_to_osc52(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("claude_rotater.clipboard.system_copy", lambda text: False)
+        app = make_app(three_accounts(tmp_path))
+        sent: list[str] = []
+        monkeypatch.setattr(app, "copy_to_clipboard", sent.append)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await settle(pilot)
+            await pilot.press("y")
+            await settle(pilot)
+            assert sent and sent[0].startswith("me@x.com (active) · ")
+            assert prompt_plain(app) == "copied the row (via the terminal)"
+
+    async def test_copy_keys_are_listed(self, tmp_path, copied):
+        import re
+
+        app = make_app(three_accounts(tmp_path))
+        async with app.run_test(size=(120, 40)) as pilot:
+            await settle(pilot)
+            await pilot.press("question_mark")
+            await pilot.pause()
+            assert re.search(r"(^|   )y / Y +copy row / table", painted(app, "#detail"), re.M)
+
+    async def test_nothing_to_copy_with_no_accounts(self, tmp_path, copied):
+        app = make_app(FakeSwitcher([], tmp_path))
+        async with app.run_test(size=(120, 40)) as pilot:
+            await settle(pilot)
+            await pilot.press("y", "Y")
+            await settle(pilot)
+            assert copied == []
