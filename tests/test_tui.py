@@ -845,6 +845,35 @@ class TestAccountRowText:
         assert "stale 1h00m" in text.plain
         assert has_color(text, "62%", SEV_OK) and has_color(text, "█", SEV_OK)  # never washed out
 
+    def test_idle_account_between_spare_polls_is_not_stale(self):
+        from claude_rotater.poll_policy import PollCadence
+
+        spare = make_account(2, entry=make_entry(62.0, 31.0, age_s=9 * 60.0))
+        assert "stale" not in self._row(spare, tag_need=11)  # due every 10 min: on time
+        late = make_account(2, entry=make_entry(62.0, 31.0, age_s=16 * 60.0))
+        assert "stale 16m" in self._row(late, tag_need=11)  # past 1.5× the spare interval
+        from claude_rotater.tui.main import account_row_text
+
+        quick = PollCadence(spare_s=120.0)
+        text = account_row_text(spare, None, self._layout(120, tag_need=11), now=time.time(),
+                                threshold=90.0, cadence=quick).plain
+        assert "stale 9m" in text  # the account's own cadence decides
+
+    def test_active_account_is_stale_past_the_feed_limit(self):
+        from claude_rotater.poll_policy import DEFAULT_CADENCE
+
+        limit = 1.5 * DEFAULT_CADENCE.feed_stale_s
+        fresh = make_account(1, active=True, entry=make_entry(62.0, 31.0, age_s=limit - 30))
+        assert "stale" not in self._row(fresh, tag_need=11)
+        late = make_account(1, active=True, entry=make_entry(62.0, 31.0, age_s=limit + 60))
+        assert "stale" in self._row(late, tag_need=11)
+
+    def test_failed_poll_flags_an_aging_reading_early(self):
+        entry = dataclasses.replace(make_entry(62.0, 31.0, age_s=6 * 60.0), last_error="http-429")
+        assert "stale 6m" in self._row(make_account(2, entry=entry), tag_need=11)
+        fresh = dataclasses.replace(make_entry(62.0, 31.0, age_s=60.0), last_error="http-429")
+        assert "stale" not in self._row(make_account(2, entry=fresh), tag_need=11)
+
     def test_measured_cells_are_never_estimate_styled(self):
         est, now = window_est()
         text = self._text(make_account(1, entry=make_entry(60.0, 10.0)), est, now=now)

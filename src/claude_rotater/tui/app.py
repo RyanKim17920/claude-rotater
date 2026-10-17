@@ -42,6 +42,7 @@ from claude_rotater.settings import (
     parse_model_names,
     set_setting,
 )
+from claude_rotater.poll_policy import load_cadence
 from claude_rotater.snapshot_source import account_identity
 from claude_rotater.switcher import ClaudeAccountSwitcher
 from claude_rotater.tui.config import ConfigScreen
@@ -153,6 +154,7 @@ class RotaApp(App):
             ui = UiSettings()
         self._theme_name = ui.theme
         self.login_warn_days = ui.login_warn_days
+        self.cadence = load_cadence(switcher.backup_dir)  # when a reading counts as overdue
         self.main_screen = MainScreen()
 
     def _load_settings(self) -> None:
@@ -268,6 +270,8 @@ class RotaApp(App):
 
     def on_settings_changed(self, dotted_key: str) -> None:
         """A setting changed on the Config page: apply it live."""
+        if dotted_key.startswith("autoswitch."):
+            self.cadence = load_cadence(self.switcher.backup_dir)
         if dotted_key == "ui.loginWarnDays":
             try:
                 self.login_warn_days = load_ui_settings(self.switcher.backup_dir).login_warn_days

@@ -59,6 +59,7 @@ from claude_rotater.estimator import (
 )
 from claude_rotater.json_output import USAGE_API_KEY, USAGE_RELOGIN_REQUIRED
 from claude_rotater.models import AccountSnapshot, AccountsSnapshot
+from claude_rotater.poll_policy import DEFAULT_CADENCE, PollCadence
 from claude_rotater.tui import data
 from claude_rotater.tui.plot import (
     GUTTER,
@@ -375,7 +376,33 @@ def account_name(acc: AccountSnapshot) -> str:
 _SENTINEL_TAGS = {USAGE_RELOGIN_REQUIRED: "re-login"}
 
 
-def row_tag(acc: AccountSnapshot, now: float, warn_days: int) -> tuple[str, bool]:
+# A reading is only flagged stale once it is overdue for its own cadence:
+# idle accounts are polled every pollSpareSeconds and the active one leans on
+# the feed, so a fixed limit would flag every idle account between polls.
+# Display only: the auto-switch trust limit (STALE_OK_S) is unchanged.
+OVERDUE_FACTOR = 1.5
+
+
+def overdue_after(acc: AccountSnapshot, cadence: PollCadence = DEFAULT_CADENCE) -> float:
+    """Seconds after which this account's reading is overdue: 1.5× the feed
+    staleness for the active account, 1.5× the spare poll interval otherwise."""
+    return OVERDUE_FACTOR * (cadence.feed_stale_s if acc.is_active else cadence.spare_s)
+
+
+def stale_age(acc: AccountSnapshot, now: float, cadence: PollCadence = DEFAULT_CADENCE) -> float | None:
+    """The reading's age when it is overdue (or aging after a failed poll), else None."""
+    fetched = acc.usage.fetched_at
+    if fetched is None:
+        return None
+    age = now - fetched
+    if age > overdue_after(acc, cadence) or (acc.usage.last_error and age > STALE_OK_S):
+        return age
+    return None
+
+
+def row_tag(
+    acc: AccountSnapshot, now: float, warn_days: int, cadence: PollCadence = DEFAULT_CADENCE
+) -> tuple[str, bool]:
     """(tag, is_warning): a dead login, a login about to lapse, "off" for a
     disabled account, "stale 2h" for an old measurement, else a real org name. A personal account has no tag:
     its org is named after the email (see ``models.org_tag``)."""
@@ -387,9 +414,9 @@ def row_tag(acc: AccountSnapshot, now: float, warn_days: int) -> tuple[str, bool
     warning = login_warning(acc, now, warn_days)
     if warning is not None:
         return warning, True
-    fetched = acc.usage.fetched_at
-    if fetched is not None and now - fetched > STALE_OK_S:
-        return f"stale {countdown_text(now - fetched)}", False
+    age = stale_age(acc, now, cadence)
+    if age is not None:
+        return f"stale {countdown_text(age)}", False
     tag = acc.display_tag
     return ("" if tag == "personal" else tag), False
 
@@ -610,6 +637,7 @@ def account_row_text(
     palette: Palette = Palette.DARK,
     login_warn_days: int = 3,
     models: Sequence[str] = (),
+    cadence: PollCadence = DEFAULT_CADENCE,
 ) -> Text:
     """One account on one line, laid out by ``layout``:
     ``▌ me@x.com  Acme  5h 58% ↻1h20m  7d 48% ↻23h  Fable 0%  ~7d limit in 15h``."""
@@ -619,7 +647,7 @@ def account_row_text(
     name_style = palette.muted if acc.disabled else palette.foreground
     text.append(_fit(account_name(acc), layout.name_w), style=f"bold {name_style}" if acc.is_active else name_style)
     if layout.tag_w:
-        tag, warn = row_tag(acc, now, login_warn_days)
+        tag, warn = row_tag(acc, now, login_warn_days, cadence)
         text.append(" " * _GAP + _fit(tag, layout.tag_w), style=palette.sev_warn if warn else palette.muted)
 
     pcts = shown_windows(acc)
@@ -1095,7 +1123,7 @@ class MainScreen(Screen):
         accounts = snap.accounts if snap else ()
         now = time.time()
         names = [len(account_name(acc)) for acc in accounts]
-        tags = [len(row_tag(acc, now, self.app.login_warn_days)[0]) for acc in accounts]
+        tags = [len(row_tag(acc, now, self.app.login_warn_days, self.app.cadence)[0]) for acc in accounts]
         return RowLayout.for_width(
             width,
             table_windows(accounts, self.app.models),
@@ -1152,6 +1180,7 @@ class MainScreen(Screen):
             palette=self.palette,
             login_warn_days=self.app.login_warn_days,
             models=self.app.models,
+            cadence=self.app.cadence,
         )
 
     def detail_text(self, width: int, _height: int) -> Text:
