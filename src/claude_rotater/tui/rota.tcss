@@ -33,6 +33,13 @@ Screen {
     padding: 0 0 0 1;
 }
 
+/* One line per account at any width: the row lays itself out to fit and
+   is cut, never wrapped, if it still runs over. */
+#accounts ListItem Static {
+    text-wrap: nowrap;
+    text-overflow: ellipsis;
+}
+
 /* The row under the cursor: an accent-tinted band across the full width
    (plus the "›" glyph and a bold name drawn in main.py). The on-duty
    account has its own "●" mark, so cursor and duty never look alike. */

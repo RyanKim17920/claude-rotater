@@ -11,8 +11,10 @@ Layout, top to bottom, as tall as the terminal allows:
   short bar (measured fill, then a ``░`` hatch out to the projection at
   the reset, coloured by its outcome) and a countdown to its
   reset, then one forecast cell for the binding window
-  (``ok``, ``~7d limit in 15h``, ``~?``). Columns shrink as the width runs
-  short (:data:`LEVELS`);
+  (``ok``, ``~7d limit in 15h``, ``~?``). Columns give way as the width runs
+  short (:data:`LEVELS`): bars, then the org, then countdowns past the 5h
+  one, then per-model windows; a long email keeps its local part
+  (``work@…``). A row is always one line, and the 5h reset always shows;
 - a line naming the highlighted account, then its 5h and 7d charts (measured history solid, the
   projection dotted and coloured by outcome, the threshold line, the reset at the right
   edge), filling the spare height and hidden when fewer than
@@ -275,13 +277,16 @@ _FORECAST_SHORT_W = 10  # "~7d in 15h"
 class Level:
     """How much one table row carries; :data:`LEVELS` goes richest first.
 
-    ``bar_w`` is the projection bar's width (0: no bar). Bars shrink before
-    a whole name gives way, and go before the 5h/7d countdowns do."""
+    ``bar_w`` is the projection bar's width (0: no bar). The 5h countdown is
+    on every level: it is the reset that matters soonest."""
 
     bar_w: int
     model_reset: bool  # per-model windows (Fable, ...) keep their countdown
     long_forecast: bool  # "~7d limit in 15h" rather than "~7d in 15h"
-    reset: bool  # 5h/7d keep their countdown
+    reset: bool  # the 7d window keeps its countdown
+    org: bool = True  # the org name sits in the tag column (warnings always do)
+    models: bool = True  # per-model windows get a column at all
+    forecast: bool = True  # the forecast cell
 
 
 LEVELS: tuple[Level, ...] = (
@@ -292,7 +297,10 @@ LEVELS: tuple[Level, ...] = (
     Level(6, False, False, True),
     Level(4, False, False, True),
     Level(0, False, False, True),
-    Level(0, False, False, False),
+    Level(0, False, False, True, org=False),
+    Level(0, False, False, False, org=False),
+    Level(0, False, False, False, org=False, models=False),
+    Level(0, False, False, False, org=False, models=False, forecast=False),
 )
 
 
@@ -313,9 +321,13 @@ class RowLayout:
 
     @property
     def forecast_w(self) -> int:
+        if not self.level.forecast:
+            return 0
         return _FORECAST_W if self.level.long_forecast else _FORECAST_SHORT_W
 
     def has_reset(self, label: str) -> bool:
+        if label == "5h":
+            return True
         return self.level.reset if label in PRIMARY_WINDOWS else self.level.model_reset
 
     def window_w(self, label: str) -> int:
@@ -335,32 +347,46 @@ class RowLayout:
         *,
         name_need: int = _MAX_NAME_W,
         tag_need: int = 0,
+        short_name_need: int | None = None,
+        warn_tag_need: int | None = None,
     ) -> "RowLayout":
+        """The richest level that fits ``width``.
+
+        ``tag_need`` is the widest tag, ``warn_tag_need`` the widest one that
+        is not an org name (a warning, "off", "stale 2h"): the org column goes
+        first. Names stay whole while anything else can give way; past that
+        they shrink to ``short_name_need`` (the local part, ``work@…``)
+        before the forecast goes."""
         windows = tuple(windows)
         name_need = max(_MIN_NAME_W, min(name_need, _MAX_NAME_W))
-        tag_w = min(tag_need, _MAX_TAG_W)
-        levels = LEVELS
+        short_need = max(_MIN_NAME_W, min(short_name_need or name_need, name_need))
+        warn_need = tag_need if warn_tag_need is None else min(warn_tag_need, tag_need)
+
+        def build(level: Level, name_w: int) -> "RowLayout":
+            shown = windows if level.models else tuple(w for w in windows if w in PRIMARY_WINDOWS)
+            tag_w = min(tag_need if level.org else warn_need, _MAX_TAG_W)
+            return cls(width, shown, name_w, tag_w, level)
 
         def room(level: Level) -> int:
-            layout = cls(width, windows, 0, tag_w, level)
+            layout = build(level, 0)
             return width - (
                 _PREFIX_W
-                + (tag_w + _GAP if tag_w else 0)
-                + sum(layout.window_w(label) + _GAP for label in windows)
-                + layout.forecast_w + _GAP
+                + (layout.tag_w + _GAP if layout.tag_w else 0)
+                + sum(layout.window_w(label) + _GAP for label in layout.windows)
+                + (layout.forecast_w + _GAP if layout.forecast_w else 0)
             )
 
-        # A whole name beats wide bars, model countdowns and the long forecast;
-        # the 5h/7d countdowns beat a whole name (it shrinks to a few cells
-        # first); only past that do they go.
-        for level in levels:
-            if level.reset and room(level) >= name_need:
-                return cls(width, windows, name_need, tag_w, level)
-        leanest_with_reset = [lv for lv in levels if lv.reset][-1]
-        for level in (leanest_with_reset, levels[-1]):
-            if room(level) >= _MIN_NAME_W:
-                return cls(width, windows, min(name_need, room(level)), tag_w, level)
-        return cls(width, windows, _MIN_NAME_W, tag_w, levels[-1])
+        # A whole name beats bars, countdowns past the 5h one, the org and
+        # the model columns; the forecast beats a whole name, which first
+        # shrinks to its local part.
+        for level in LEVELS:
+            if level.forecast and room(level) >= name_need:
+                return build(level, name_need)
+        for level in LEVELS:
+            if room(level) >= short_need:
+                return build(level, min(name_need, room(level)))
+        leanest = LEVELS[-1]
+        return build(leanest, max(_MIN_NAME_W, min(name_need, room(leanest))))
 
 
 def _fit(text: str, width: int) -> str:
@@ -369,6 +395,23 @@ def _fit(text: str, width: int) -> str:
     if len(text) <= width:
         return text.ljust(width)
     return text[: max(0, width - 1)] + "…"
+
+
+def fit_name(name: str, width: int) -> str:
+    """``name`` in ``width`` cells; an email that does not fit keeps its
+    local part (``work@…``), the part that tells accounts apart."""
+    if len(name) > width and "@" in name:
+        local = name.split("@", 1)[0].split("(")[-1].strip()
+        if len(local) + 2 <= width:
+            return f"{local}@…".ljust(width)
+    return _fit(name, width)
+
+
+def short_name_len(name: str) -> int:
+    """Cells ``fit_name`` needs for the ``work@…`` form of ``name``."""
+    if "@" not in name:
+        return len(name)
+    return min(len(name), len(name.split("@", 1)[0].split("(")[-1].strip()) + 2)
 
 
 def account_name(acc: AccountSnapshot) -> str:
@@ -402,12 +445,12 @@ def stale_age(acc: AccountSnapshot, now: float, cadence: PollCadence = DEFAULT_C
     return None
 
 
-def row_tag(
+def status_tag(
     acc: AccountSnapshot, now: float, warn_days: int, cadence: PollCadence = DEFAULT_CADENCE
-) -> tuple[str, bool]:
-    """(tag, is_warning): a dead login, a login about to lapse, "off" for a
-    disabled account, "stale 2h" for an old measurement, else a real org name. A personal account has no tag:
-    its org is named after the email (see ``models.org_tag``)."""
+) -> tuple[str, bool] | None:
+    """(tag, is_warning) for a state worth a word: "off" for a disabled
+    account, a dead login, a login about to lapse, "stale 2h" for an old
+    measurement. None when the account is fine."""
     sentinel = acc.usage.sentinel
     if acc.disabled:
         return "off", False
@@ -419,6 +462,18 @@ def row_tag(
     age = stale_age(acc, now, cadence)
     if age is not None:
         return f"stale {countdown_text(age)}", False
+    return None
+
+
+def row_tag(
+    acc: AccountSnapshot, now: float, warn_days: int, cadence: PollCadence = DEFAULT_CADENCE
+) -> tuple[str, bool]:
+    """(tag, is_warning): the :func:`status_tag`, else a real org name. A
+    personal account has no tag: its org is named after the email (see
+    ``models.org_tag``)."""
+    status = status_tag(acc, now, warn_days, cadence)
+    if status is not None:
+        return status
     tag = acc.display_tag
     return ("" if tag == "personal" else tag), False
 
@@ -483,14 +538,12 @@ def window_cell(
     """One window column, exactly ``layout.window_w(label)`` cells:
     ``5h  58% ███▌░░░▕ ↻1h20m``. The pct, the solid fill and the countdown
     are measured; the hatch is the projection to the reset, coloured by its
-    outcome. An unused window drops its countdown. A stale reading keeps its
+    outcome. An unused window drops its countdown; an absent one is blank. A stale reading keeps its
     colours: the row's tag says how old it is."""
     width = layout.window_w(label)
     cell = Text(no_wrap=True)
-    cell.append(label, style=palette.muted)
-    if measured is None:
-        cell.append("    ·", style=palette.track)
-    else:
+    if measured is not None:  # an absent window is blank, label and all
+        cell.append(label, style=palette.muted)
         pct, resets_at = measured
         cell.append(f" {pct:3.0f}%", style=palette.severity(pct))
         if layout.bar_w:
@@ -652,9 +705,12 @@ def account_row_text(
     text.append(ON_DUTY_MARK if acc.is_active else " ", style=palette.accent)
     text.append(" ")
     name_style = palette.muted if acc.disabled else palette.foreground
-    text.append(_fit(account_name(acc), layout.name_w), style=f"bold {name_style}" if selected else name_style)
+    text.append(fit_name(account_name(acc), layout.name_w), style=f"bold {name_style}" if selected else name_style)
     if layout.tag_w:
-        tag, warn = row_tag(acc, now, login_warn_days, cadence)
+        if layout.level.org:
+            tag, warn = row_tag(acc, now, login_warn_days, cadence)
+        else:
+            tag, warn = status_tag(acc, now, login_warn_days, cadence) or ("", False)
         text.append(" " * _GAP + _fit(tag, layout.tag_w), style=palette.sev_warn if warn else palette.muted)
 
     pcts = shown_windows(acc)
@@ -677,7 +733,7 @@ def account_row_text(
                 projected=projected,
             )
         )
-    fc = forecast(acc, est, threshold=threshold, now=now, models=models)
+    fc = forecast(acc, est, threshold=threshold, now=now, models=models) if layout.forecast_w else None
     if fc is not None:
         text.append(" " * _GAP)
         text.append(forecast_text(fc, layout.forecast_w, long=layout.level.long_forecast, palette=palette))
@@ -1001,7 +1057,10 @@ class _RowBody(Static):
         screen = self.screen
         if not isinstance(row, AccountRow) or not isinstance(screen, MainScreen):
             return Text()
-        return screen.row_text(row.number, self.size.width or 80)
+        width = self.size.width or 80
+        text = screen.row_text(row.number, width)
+        text.truncate(width, overflow="ellipsis")  # a row never wraps
+        return text
 
 
 class AccountRow(ListItem):
@@ -1134,13 +1193,17 @@ class MainScreen(Screen):
         snap = self.app.snapshot
         accounts = snap.accounts if snap else ()
         now = time.time()
-        names = [len(account_name(acc)) for acc in accounts]
-        tags = [len(row_tag(acc, now, self.app.login_warn_days, self.app.cadence)[0]) for acc in accounts]
+        names = [account_name(acc) for acc in accounts]
+        warn_days, cadence = self.app.login_warn_days, self.app.cadence
+        tags = [len(row_tag(acc, now, warn_days, cadence)[0]) for acc in accounts]
+        warn_tags = [len((status_tag(acc, now, warn_days, cadence) or ("",))[0]) for acc in accounts]
         return RowLayout.for_width(
             width,
             table_windows(accounts, self.app.models),
-            name_need=max(names, default=_MIN_NAME_W),
+            name_need=max(map(len, names), default=_MIN_NAME_W),
+            short_name_need=max(map(short_name_len, names), default=_MIN_NAME_W),
             tag_need=max(tags, default=0),
+            warn_tag_need=max(warn_tags, default=0),
         )
 
     def detail_budget(self) -> int:

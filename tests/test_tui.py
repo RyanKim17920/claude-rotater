@@ -809,10 +809,10 @@ class TestAccountRowText:
         acc = dataclasses.replace(make_account(1, email="me@x.com"), org_name="Acme Corp", org_uuid="o")
         assert "Acme Corp" in self._row(acc, tag_need=9)
 
-    def test_absent_window_is_a_dot_not_invented(self):
+    def test_absent_window_is_blank_not_invented(self):
         row = self._row(make_account(1, entry=make_entry(pct5=92.0, pct7=None)))
         assert "92%" in row
-        assert "7d    ·" in row
+        assert "7d" not in row and "·" not in row
 
     def test_dead_login_is_a_short_tag(self):
         from claude_rotater.json_output import USAGE_RELOGIN_REQUIRED
@@ -896,20 +896,50 @@ class TestAccountRowText:
         row = self._row(make_account(1, entry=entry), width=160, windows=("5h", "7d", "Fable"))
         assert "Fable  55%" in row and row.count("↻") == 3
 
-    def test_model_column_without_that_window_is_a_dot(self):
+    def test_model_column_without_that_window_is_blank(self):
         row = self._row(make_account(1, entry=make_entry(10.0, 20.0)), width=160, windows=("5h", "7d", "Fable"))
-        assert "Fable    ·" in row
+        assert "Fable" not in row and "·" not in row and "7d  20%" in row
 
-    @pytest.mark.parametrize("width", [80, 120, 160])
+    @pytest.mark.parametrize("width", [60, 80, 120, 160])
     def test_fits_the_width(self, width):
         entry = make_entry(62.0, 31.0, scoped=[("Fable", 34.0)])
         est, now = window_est()
         acc = make_account(1, active=True, entry=entry, email="someone@example.com")
-        row = self._row(acc, est, now=now, width=width, windows=("5h", "7d", "Fable"), tag_need=8)
+        row = self._row(acc, est, now=now, width=width, windows=("5h", "7d", "Fable"), tag_need=8,
+                        name_need=19, short_name_need=10)
         assert len(row) <= width
-        assert "62%" in row and "~5h" in row and ("↻1h59m" in row or "↻2h00m" in row)
-        # a long name gives way to the 5h/7d countdowns, never the reverse
-        assert ("someone@example.com" in row) == (width >= 120) and "someone@" in row
+        # name, 5h % and its reset, 7d % at every width
+        assert "62%" in row and "31%" in row and ("↻1h59m" in row or "↻2h00m" in row)
+        assert "~5h" in row
+        # a long name keeps its local part: it gives way to the forecast
+        assert ("someone@example.com" in row) == (width >= 80)
+        assert "someone@" in row
+
+    def test_five_hour_reset_follows_its_pct_at_every_width(self):
+        import re
+
+        for width in (50, 60, 80, 100, 120, 160):
+            row = self._row(make_account(1, entry=make_entry(62.0, 31.0)), width=width, name_need=10)
+            assert re.search(r"5h  62%[^↻]*↻\d", row), (width, row)
+
+    def test_org_column_goes_before_the_name_shrinks_warnings_stay(self):
+        from claude_rotater.tui.main import RowLayout
+
+        windows = ("5h", "7d")
+        wide = RowLayout.for_width(120, windows, name_need=20, tag_need=9, warn_tag_need=8)
+        narrow = RowLayout.for_width(64, windows, name_need=20, short_name_need=7, tag_need=9, warn_tag_need=8)
+        assert wide.level.org and wide.tag_w == 9
+        assert not narrow.level.org and narrow.tag_w == 8  # room kept for "login 2d"
+        org = dataclasses.replace(make_account(2, email="work@y.com"), org_name="Acme Corp", org_uuid="o")
+        assert "Acme" not in self._row(org, width=64, name_need=20, tag_need=9, warn_tag_need=8)
+
+    def test_email_truncates_to_its_local_part(self):
+        from claude_rotater.tui.main import fit_name, short_name_len
+
+        assert fit_name("work@example.com", 8) == "work@…  "
+        assert fit_name("work@example.com", 16) == "work@example.com"
+        assert fit_name("averyveryverylongname@x.com", 8) == "averyve…"
+        assert short_name_len("work@example.com") == 6
 
     def test_rows_line_up_without_a_header(self):
         layout = self._layout(120)
@@ -2632,6 +2662,42 @@ class TestStatuslineKey:
 
 @pytest.mark.asyncio
 class TestWidths:
+    @pytest.mark.parametrize("size", [(60, 20), (80, 24), (120, 40), (160, 50)])
+    async def test_every_account_is_one_line_at_any_width(self, tmp_path, size):
+        from claude_rotater.json_output import USAGE_RELOGIN_REQUIRED
+        from claude_rotater.tui.main import AccountRow
+
+        org = dataclasses.replace(
+            make_account(2, entry=make_entry(12.0, 44.0, scoped=[("Fable", 3.0)]),
+                         email="work.account@example-company.com"),
+            org_name="Acme Corporation Worldwide", org_uuid="o",
+        )
+        fake = FakeSwitcher(
+            [
+                make_account(1, active=True, entry=make_entry(62.0, 31.0, scoped=[("Fable", 34.0)]),
+                             email="me@x.com"),
+                org,
+                make_account(3, entry=make_entry(91.0, 85.0), email="solo@z.com"),
+                make_account(4, disabled=True, entry=UsageEntry(), email="old@z.com"),
+                make_account(5, entry=UsageEntry(sentinel=USAGE_RELOGIN_REQUIRED), email="dead@z.com"),
+                make_account(6, entry=make_entry(1.0, 0.0), email="brandnew@example.com"),
+            ],
+            tmp_path,
+        )
+        app = make_app(fake)
+        async with app.run_test(size=size) as pilot:
+            await settle(pilot)
+            for row in app.screen.query(AccountRow):
+                assert row.region.height == 1
+                assert len(row_plain(app, row.number)) <= row.region.width
+            work = row_plain(app, "2")
+            assert "work.account@" in work  # the local part survives any width
+            assert "62%" in row_plain(app, "1") and "31%" in row_plain(app, "1")
+            assert "↻" in row_plain(app, "1")  # the 5h reset, even at 60
+            assert "re-login" in row_plain(app, "5") and "off" in row_plain(app, "4")
+            if size[0] <= 60:
+                assert "Acme" not in work  # the org goes before the name shrinks
+
     @pytest.mark.parametrize("size", [(80, 24), (120, 40), (160, 50)])
     async def test_main_page_fits_with_table_and_charts(self, tmp_path, size):
         from textual.widgets import Button
@@ -2668,7 +2734,7 @@ class TestWidths:
         async with app.run_test(size=size) as pilot:
             await settle(pilot)
             assert "Fable  34%" in row_plain(app, "1")
-            assert "Fable    ·" in row_plain(app, "2")  # no Fable window: a dot, not 0%
+            assert "Fable" not in row_plain(app, "2")  # no Fable window: blank, not 0%
         unused = FakeSwitcher(
             [make_account(1, active=True, entry=make_entry(62.0, 31.0, scoped=[("Fable", 0.0)]))], tmp_path
         )
