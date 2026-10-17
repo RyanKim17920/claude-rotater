@@ -17,7 +17,7 @@ Layout, top to bottom, as tall as the terminal allows:
   (``work@…``). A row is always one line, and the 5h reset always shows;
 - a line naming the highlighted account, then its 5h and 7d charts (measured history solid, the
   projection dotted and coloured by outcome, the threshold line, the reset at the right
-  edge), filling the spare height and hidden when fewer than
+  edge), filling all the spare height and hidden when fewer than
   :func:`chart_min_rows` rows are spare (the rows then get the room).
   ``h`` swaps in the long-term view (past 5h peaks, the 7d curve across
   weeks);
@@ -751,7 +751,6 @@ SIDE_BY_SIDE_MIN_WIDTH = 100
 # A chart shorter than this many lines (its time axis included) is too
 # cramped to read, so the charts are hidden instead and the rows get the room.
 CHART_MIN_PLOT = 8
-CHART_MAX_PLOT = 14
 
 
 def chart_min_rows(width: int, n_blocks: int = 2) -> int:
@@ -893,7 +892,7 @@ def chart_lines(
         return []
     title = Text(f"{CURSOR_MARK} ", style=f"bold {palette.accent}", no_wrap=True)
     title.append(account_title(acc, palette))
-    return [title, *_arrange(blocks, width=width, height=height - 1, max_plot=CHART_MAX_PLOT)]
+    return [title, *_arrange(blocks, width=width, height=height - 1)]
 
 
 # ---------------------------------------------------------------------------
@@ -901,9 +900,6 @@ def chart_lines(
 # ---------------------------------------------------------------------------
 
 _SIDE_GAP = 3
-# Graph heights are capped, so the history view is sized to what it shows
-# and never turns into a wall on a tall terminal.
-LONG_PLOT_MAX = 10
 LONG_5H_SPAN_S = 7 * 86400.0
 LONG_7D_SPAN_S = 30 * 86400.0
 _MIN_LONG_7D_SPAN_S = 7 * 86400.0
@@ -953,10 +949,11 @@ def _block_width(width: int, n_blocks: int) -> int:
 
 
 def _arrange(
-    blocks: list[tuple[Text, object]], *, width: int, height: int, max_plot: int
+    blocks: list[tuple[Text, object]], *, width: int, height: int
 ) -> list[Text]:
     """Lay out (title, render(width, plot_h) -> lines) blocks in at most
-    ``height`` lines, each plot at most ``max_plot`` rows.
+    ``height`` lines: the plots grow to fill it, so a tall terminal has no
+    dead space under them.
 
     Two blocks go side by side on a wide pane, else they stack and share the
     height. Each block is its title line plus its plot.
@@ -965,14 +962,14 @@ def _arrange(
         return []
     if len(blocks) == 2 and width >= SIDE_BY_SIDE_MIN_WIDTH:
         col_w = _block_width(width, 2)
-        plot_h = min(max_plot, height - 1)
+        plot_h = height - 1
         columns = [[title, *render(col_w, plot_h)] if plot_h > 0 else [title] for title, render in blocks]
         return _side_by_side(columns[0], columns[1], col_w)[:height]
     each = height // len(blocks)
     lines: list[Text] = []
     for i, (title, render) in enumerate(blocks):
         share = height - each * (len(blocks) - 1) if i == len(blocks) - 1 else each
-        plot_h = min(max_plot, share - 1)
+        plot_h = share - 1
         lines.append(title)
         if plot_h > 0:
             lines.extend(render(width, plot_h))
@@ -989,7 +986,6 @@ def long_term_lines(
     height: int,
     palette: Palette = Palette.DARK,
     title: bool = True,
-    max_plot: int = LONG_PLOT_MAX,
 ) -> list[Text]:
     """The long-term view: one column per past 5h window over the last week,
     and the 7d usage curve over up to 30 days (as far back as history goes)."""
@@ -1046,7 +1042,7 @@ def long_term_lines(
             ),
         ),
     ]
-    lines.extend(_arrange(blocks, width=width, height=height - len(lines), max_plot=max_plot))
+    lines.extend(_arrange(blocks, width=width, height=height - len(lines)))
     return lines[:height]
 
 

@@ -54,8 +54,8 @@ Screen {
     background: $primary 7%;
 }
 
-/* As tall as its content: the charts fill the spare rows up to a cap (or
-   are hidden when too few are spare) and the history view caps its graphs. */
+/* As tall as its content: the charts (or the history view) fill every
+   spare row, or are hidden when too few are spare. */
 #detail {
     height: auto;
     padding: 0 1;

@@ -1307,10 +1307,8 @@ class TestMainPage:
 
     @pytest.mark.parametrize("size", [(120, 40), (80, 40)])
     async def test_charts_fill_the_spare_height(self, tmp_path, size):
-        """The selected account's charts sit under the table and fill the
-        spare rows up to their cap; the key strip keeps the bottom row."""
-        from claude_rotater.tui.main import CHART_MAX_PLOT
-
+        """The selected account's charts sit under the table and fill every
+        spare row (no dead space below); the key strip keeps the bottom row."""
         fake = three_accounts(tmp_path)
         with_history(fake, burn_history(time.time()))
         app = make_app(fake)
@@ -1320,8 +1318,7 @@ class TestMainPage:
             lines = painted(app, "#detail").splitlines()
             assert braille("\n".join(lines))
             assert detail.size.height == len(lines) <= app.screen.detail_budget()
-            side_by_side = size[0] >= 100
-            assert len(lines) == min(app.screen.detail_budget(), 1 + (1 if side_by_side else 2) * (1 + CHART_MAX_PLOT))
+            assert len(lines) == app.screen.detail_budget()
             actions = app.screen.query_one("#actions")
             assert actions.region.y >= detail.region.bottom + 1
             assert actions.region.bottom == size[1]
@@ -2453,14 +2450,14 @@ class TestChartLines:
         title = self._lines(120, series={}, est=None, entry=make_entry(0.0, 95.0))[1].plain
         assert "5h  unused" in title and "7d  at limit" in title and "~" not in title
 
-    def test_hidden_below_the_minimum_and_capped_above(self):
-        from claude_rotater.tui.main import CHART_MAX_PLOT, chart_min_rows
+    def test_hidden_below_the_minimum_and_filling_above(self):
+        from claude_rotater.tui.main import chart_min_rows
 
         side = chart_min_rows(120)
         assert side == 10 and chart_min_rows(80) == 19
         assert self._lines(120, side - 1) == []
         assert len(self._lines(120, side)) == side
-        assert len(self._lines(120, 30)) == 2 + CHART_MAX_PLOT
+        assert len(self._lines(120, 30)) == 30 and len(self._lines(160, 44)) == 44  # no cap
         assert len(self._lines(120, 12)) == 12  # fills what is spare
         assert self._lines(80, 18) == [] and len(self._lines(80, 19)) == 19  # stacked
 
@@ -2721,6 +2718,22 @@ class TestWidths:
             assert "re-login" in row_plain(app, "5") and "off" in row_plain(app, "4")
             if size[0] <= 60:
                 assert "Acme" not in work  # the org goes before the name shrinks
+
+    @pytest.mark.parametrize("size", [(120, 40), (160, 50)])
+    @pytest.mark.parametrize("view", ["charts", "history"])
+    async def test_large_terminal_has_no_dead_space_under_the_graphs(self, tmp_path, size, view):
+        fake = three_accounts(tmp_path)
+        with_history(fake, long_history(time.time()))
+        app = make_app(fake)
+        async with app.run_test(size=size) as pilot:
+            await settle(pilot)
+            if view == "history":
+                await pilot.press("h")
+                await settle(pilot)
+            detail = app.screen.query_one("#detail")
+            actions = app.screen.query_one("#actions")
+            assert braille(painted(app, "#detail")) or "█" in painted(app, "#detail")
+            assert actions.region.y - detail.region.bottom <= 1  # graphs reach the key strip
 
     @pytest.mark.parametrize("size", [(80, 30), (120, 40), (160, 50)])
     async def test_main_page_fits_with_table_and_charts(self, tmp_path, size):
