@@ -5816,6 +5816,26 @@ class ClaudeAccountSwitcher:
             )
         return result
 
+    def restore_own_login(self, slot: str) -> dict | None:
+        """Put ``slot``'s stored login back into the live store after another
+        account's credential landed there under ``slot``'s identity.
+
+        Deterministic and offline, unlike a self-switch (whose reconcile
+        needs the profile endpoint and silently no-ops when it cannot answer):
+        the live bytes are stashed first (they may be the only copy of some
+        account's newest refresh token; a failed stash raises and nothing is
+        overwritten), then the slot's backup is activated directly.
+        """
+        email = self.account_email(slot)
+        live = self._read_credentials()
+        if live:
+            backup = self._read_account_credentials(slot, email)
+            if live != backup:
+                self._stash_live_credential(
+                    live, "foreign-under-marked-account", slot, None
+                )
+        return self.switch_to(slot, json_output=True, force=True)
+
     def _live_matches_slot_backup(self, slot: str, email: str) -> bool:
         """Whether the live credential is provably the slot's stored lineage.
 

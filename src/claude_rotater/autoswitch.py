@@ -55,6 +55,7 @@ from claude_rotater.exceptions import ClaudeSwitchError
 from claude_rotater.json_output import (
     SCHEMA_VERSION,
     USAGE_FOREIGN_CREDENTIAL,
+    USAGE_RELOGIN_REQUIRED,
     USAGE_TOKEN_EXPIRED,
 )
 from claude_rotater.locking import FileLock
@@ -535,8 +536,15 @@ class ConfigWarningEvent(AutoSwitchEvent):
 # A NoSwitchEvent with this reason carries a strategy's own one-line verdict
 # in ``detail`` ("stay: resets soonest (19h40m), 37% headroom").
 STAY_REASON = "stay"
+# The engine stopped acting and a person has to look: the marked account's
+# own login cannot be restored (re-login needed), or restoring it did not
+# take. Never answered by switching to some other account.
+RELOGIN_REASON = "relogin-needed"
+REPAIR_FAILED_REASON = "repair-failed"
+# Reasons a UI should surface loudly (header note, prompt line).
+ALERT_REASONS = (RELOGIN_REASON, REPAIR_FAILED_REASON)
 # NoSwitchEvent reasons whose ``detail`` is already a full "stay: ..." line.
-_SELF_EXPLAINED = (STAY_REASON, "manual-hold")
+_SELF_EXPLAINED = (STAY_REASON, "manual-hold", *ALERT_REASONS)
 
 
 @dataclass(frozen=True)
@@ -710,6 +718,12 @@ def _every_account_above_threshold(
     return all((100.0 - h) >= threshold for h in measured)
 
 
+def _fetch_ok(entry) -> bool:
+    """Whether an account's latest usage fetch succeeded (a known row whose
+    last attempt did not fail and carries no live sentinel)."""
+    return entry is not None and entry.sentinel is None and not entry.last_error
+
+
 def _ref(number: str, email: str) -> dict:
     return {"number": int(number), "email": email}
 
@@ -875,6 +889,8 @@ class AutoSwitchEngine:
         # The latest switch/no-switch verdict (see Decision); None until the
         # first tick decides something.
         self.last_decision: Decision | None = None
+        # The last stop logged, so a held stop is logged once, not per tick.
+        self._halt_logged: tuple[str, str] | None = None
 
     # -- state file ---------------------------------------------------------
 
@@ -1166,6 +1182,7 @@ class AutoSwitchEngine:
             return TickOutcome.NO_ACTION
 
         active_headroom = headroom.get(current)
+        failover_reason = ""
         if active_headroom is not None:
             self._unhealthy_ticks = 0
             self._idle_hold_since = None
@@ -1192,17 +1209,19 @@ class AutoSwitchEngine:
             else:
                 trigger = "at-limit" if active_headroom <= 0 else "proactive"
         else:
-            if usage.get(current) == USAGE_FOREIGN_CREDENTIAL and self._repair_active(
-                current, active_ref
-            ):
-                return TickOutcome.SWITCHED
-            if usage.get(current) == USAGE_TOKEN_EXPIRED:
-                # Expired and the refresh could not complete this pass (lock
-                # contention, unattributable lineage, failed persist, or the
-                # row's failure backoff gating the fetch). The locked-refresh
-                # path retries on later passes — no quota burn, nothing to
-                # switch for yet; crawl slowly instead of burning failover
-                # ticks (Finding 2 of the usage-lapse investigation).
+            active_value = usage.get(current)
+            active_entry = entries.get(current)
+            if active_value == USAGE_FOREIGN_CREDENTIAL:
+                # Another account's login sits in the live store under this
+                # account's identity: nothing ran out, so this is never a
+                # failover. Restore the marked account's own login, or stop.
+                self._unhealthy_ticks = 0
+                return self._repair_active(current, active_ref, active_entry)
+            if active_value == USAGE_TOKEN_EXPIRED:
+                # Expired and the refresh could not complete this pass (claude
+                # is running and owns the refresh, lock contention,
+                # unattributable lineage, failed persist, or the row's backoff
+                # gating the fetch). Nothing to switch for; crawl slowly.
                 now = self.clock()
                 if self._idle_hold_since is None:
                     self._idle_hold_since = now
@@ -1219,29 +1238,47 @@ class AutoSwitchEngine:
                         )
                     )
                     return TickOutcome.NO_ACTION
-                # Held far longer than any idle nap should need — likely a
-                # dead refresh token with an *active* user. Fall through to
-                # normal unhealthy counting so failover can still happen.
+                # Held far longer than any idle nap should need. Still not a
+                # failover by itself: only a confirmed dead login is (below).
                 _logger.warning(
                     "Active token expired and owned for over %.0f minutes; "
-                    "resuming unhealthy counting (dead refresh token?)",
+                    "failing over only if the login is confirmed dead",
                     IDLE_HOLD_MAX_S / 60,
                 )
             else:
                 self._idle_hold_since = None
+            dead = self._active_login_dead(active_value, active_entry)
+            if not dead:
+                # Unknown usage (429, network, an unreadable store) says
+                # nothing about the account: switching on it moved users off
+                # healthy accounts onto ones whose own fetch had just failed.
+                self._unhealthy_ticks = 0
+                why = (
+                    active_entry.last_error
+                    if active_entry is not None and active_entry.last_error
+                    else (active_value if isinstance(active_value, str) else "no reading yet")
+                )
+                self._emit(
+                    NoSwitchEvent(
+                        reason="active-usage-unknown",
+                        detail=f"{why}; unknown usage is never a reason to switch",
+                    )
+                )
+                return TickOutcome.NO_ACTION
             self._unhealthy_ticks += 1
             if self._unhealthy_ticks < settings.unhealthy_ticks:
                 self._emit(
                     NoSwitchEvent(
-                        reason="active-usage-unknown",
+                        reason="active-login-dead",
                         detail=(
-                            f"{self._unhealthy_ticks}/{settings.unhealthy_ticks} "
-                            "before failover"
+                            f"{dead}; {self._unhealthy_ticks}/"
+                            f"{settings.unhealthy_ticks} before failover"
                         ),
                     )
                 )
                 return TickOutcome.NO_ACTION
             trigger = "failover"
+            failover_reason = f"failover: account {current}'s login is dead ({dead})"
 
         if trigger in _COOLDOWN_TRIGGERS and self._in_cooldown(state):
             self._emit(NoSwitchEvent(reason="cooldown"))
@@ -1269,6 +1306,20 @@ class AutoSwitchEngine:
         oauth_candidates = [
             n for n in candidates if self.switcher.account_kind_for(n) != "api_key"
         ]
+        if trigger == "failover":
+            # Escaping a dead login onto an account we cannot currently read
+            # trades a known problem for an unknown one: its trusted-but-stale
+            # row (a 429 keeps the last reading "trusted") is no evidence it
+            # works. Only targets whose latest fetch succeeded.
+            unreadable = [
+                n for n in oauth_candidates if not _fetch_ok(entries.get(n))
+            ]
+            if unreadable:
+                _logger.info(
+                    "Failover skips account(s) %s: their latest usage fetch "
+                    "failed", ", ".join(unreadable),
+                )
+            oauth_candidates = [n for n in oauth_candidates if n not in unreadable]
         # The no-return bar itself lives in `_rank` below: it is a statement
         # about the CHOICE, so it belongs where the choice is made rather than
         # in this census of what exists. See `_no_return_account` for the
@@ -1537,7 +1588,9 @@ class AutoSwitchEngine:
             active_headroom,
             _binding_recovery_ts(usage.get(current), self._models, decided_now),
         )
-        return self._freshen_and_switch(ordered, trigger, entries, left_snapshot)
+        return self._freshen_and_switch(
+            ordered, trigger, entries, left_snapshot, failover_reason
+        )
 
     def _freshen_and_switch(
         self,
@@ -2542,6 +2595,14 @@ class AutoSwitchEngine:
             state["leftTrigger"] = trigger
             atomic_write_json(self.state_path, state)
 
+        _logger.log(
+            logging.WARNING if trigger in ("failover", "at-limit") else logging.INFO,
+            "Auto-switch (%s): account %s -> %s; %s",
+            trigger,
+            state["lastSwitchFrom"],
+            number,
+            reason or trigger,
+        )
         self._emit(
             SwitchEvent(
                 trigger=trigger,
@@ -2553,38 +2614,116 @@ class AutoSwitchEngine:
         )
         return TickOutcome.SWITCHED
 
-    def _repair_active(self, current: str, active_ref: dict) -> bool:
-        """Put the active account's own login back when another account's
-        credential sits in the live store. Returns whether it worked.
+    def _repair_active(
+        self, current: str, active_ref: dict, entry=None
+    ) -> TickOutcome:
+        """Another account's credential sits in the live store under the
+        account rota marks active. Put the marked account's own login back,
+        or stop. Never a move to some other account.
 
         The live store holding a foreign credential means something outside
-        rota wrote it (another profile, a ``/login``); the account rota marks
-        active did not run out of anything. Failing over would move the user
-        to a third account they never chose, so re-activate the marked one
-        from its backup instead (a self-switch stashes the foreign credential
-        first). Failover stays the fallback when the backup cannot be
-        restored. Not a switch for cooldown purposes: the account is unchanged.
+        this engine wrote it (another profile, a ``/login``, or a write that
+        landed in a different Keychain item than claude reads, which is how
+        the overnight 1<->3 loop happened: every tick saw a "wrong" login and
+        failed over). The marked account did not run out of anything, so
+        failing over would only move the user to an account they never chose,
+        and it cannot converge if the live store never shows rota's writes.
+
+        Restores only when the account's stored login is usable; otherwise
+        stops with "re-login needed". A restore that does not show up in the
+        live store also stops. Not a switch for cooldown purposes (the
+        account is unchanged).
         """
+        email = active_ref.get("email", "")
+        _logger.warning(
+            "Account %s is marked active but the live login belongs to another "
+            "account (foreign credential).", current,
+        )
+        problem = self._stored_login_problem(current, email, entry)
+        if problem:
+            return self._halt(
+                RELOGIN_REASON,
+                f"stop: account {current}'s live login belongs to another "
+                f"account and its own stored login {problem}; re-login needed "
+                "(press l). Not switching to another account.",
+            )
         if self.dry_run:
             self._emit(SwitchEvent(
                 trigger="repair", from_ref=active_ref, to_ref=active_ref,
                 dry_run=True,
             ))
-            return True
-        email = active_ref.get("email", "")
+            return TickOutcome.SWITCHED
         with self._state_lock():
             try:
-                result = self.switcher.switch_to(current, json_output=True)
-            except ClaudeSwitchError as e:
-                _logger.warning(f"Could not restore Account-{current}'s login: {e}")
-                return False
-            if not self.switcher._live_matches_slot_backup(current, email):
-                return False
+                result = self.switcher.restore_own_login(current)
+            except Exception as e:  # a failed stash or write: stop, never move
+                return self._halt(
+                    REPAIR_FAILED_REASON,
+                    f"stop: could not restore account {current}'s own login "
+                    f"({e}); not switching to another account",
+                )
+            restored = self.switcher._live_matches_slot_backup(current, email)
+        if not restored:
+            return self._halt(
+                REPAIR_FAILED_REASON,
+                f"stop: restored account {current}'s login, but the live login "
+                "still is not it (the write did not reach what claude reads); "
+                "not switching to another account",
+            )
+        _logger.warning(
+            "Repair: restored account %s's own login into the live store.", current
+        )
         self._emit(SwitchEvent(
             trigger="repair", from_ref=active_ref, to_ref=active_ref,
             warnings=(result or {}).get("warnings", []),
+            reason=f"repair: put account {current}'s own login back",
         ))
-        return True
+        return TickOutcome.SWITCHED
+
+    def _stored_login_problem(self, number: str, email: str, entry) -> str:
+        """Why the slot's stored login cannot be restored, or "" when it can."""
+        creds = self.switcher.read_account_credentials(number, email)
+        if not creds:
+            return "is missing"
+        data = oauth.extract_oauth_data(creds)
+        if not data or not data.get("refreshToken"):
+            return "has no refresh token"
+        rt_expires = data.get("refreshTokenExpiresAt")
+        if (
+            isinstance(rt_expires, (int, float))
+            and not isinstance(rt_expires, bool)
+            and rt_expires > 0
+            and rt_expires / 1000 <= self.clock()
+        ):
+            return "has expired"
+        if entry is not None and entry.token_dead(
+            stored_fp=oauth.credential_fingerprint(creds)
+        ):
+            return "was refused by the server (invalid_grant)"
+        return ""
+
+    @staticmethod
+    def _active_login_dead(value, entry) -> str:
+        """Why the active login is confirmed dead, or "" when it is not.
+
+        Only the server's own verdict counts: repeated invalid_grant on the
+        refresh (the store's dead-token strikes, surfaced as "re-login
+        needed"). A 429, a network error or an expired-but-refreshable token
+        is unknown, never dead.
+        """
+        if value == USAGE_RELOGIN_REQUIRED:
+            return "re-login needed"
+        if entry is not None and entry.token_dead():
+            return entry.last_error or "invalid_grant"
+        return ""
+
+    def _halt(self, reason: str, detail: str) -> TickOutcome:
+        """Hold every automatic action and say why; logged once per cause."""
+        if self._halt_logged != (reason, detail):
+            self._halt_logged = (reason, detail)
+            _logger.error("Auto-switch stopped: %s", detail)
+        self._emit(NoSwitchEvent(reason=reason, detail=detail))
+        return TickOutcome.BLOCKED
 
     # -- helpers --------------------------------------------------------------
 

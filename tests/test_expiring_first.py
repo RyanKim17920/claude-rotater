@@ -9,6 +9,7 @@ from pathlib import Path
 import pytest
 
 from claude_rotater import expiring_first as ef
+from claude_rotater.json_output import USAGE_RELOGIN_REQUIRED
 from claude_rotater.autoswitch import (
     Decision,
     NoSwitchEvent,
@@ -502,7 +503,7 @@ class TestEngine:
     def test_failover_still_moves(self, temp_home):
         h = make(temp_home, unhealthy_ticks=1)
         now = h.clock.now
-        u = {"1": None, "2": usage_at(now, seven=40, reset_h=20)}
+        u = {"1": USAGE_RELOGIN_REQUIRED, "2": usage_at(now, seven=40, reset_h=20)}
         assert h.tick_with_usage(u) is TickOutcome.SWITCHED
         assert switches(h)[0].trigger == "failover"
 

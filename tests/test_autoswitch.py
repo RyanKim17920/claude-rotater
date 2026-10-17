@@ -33,7 +33,12 @@ from claude_rotater.autoswitch import (
     _recovery_is_useful,
     pct_label,
 )
-from claude_rotater.json_output import USAGE_FOREIGN_CREDENTIAL, USAGE_TOKEN_EXPIRED
+from claude_rotater.exceptions import ClaudeSwitchError
+from claude_rotater.json_output import (
+    USAGE_FOREIGN_CREDENTIAL,
+    USAGE_RELOGIN_REQUIRED,
+    USAGE_TOKEN_EXPIRED,
+)
 from claude_rotater.usage_store import FetchRecord, UsageEntry
 from claude_rotater.models import Platform
 from claude_rotater.settings import AutoSwitchSettings
@@ -61,6 +66,11 @@ def _iso_at(epoch: float) -> str:
         .isoformat()
         .replace("+00:00", "Z")
     )
+
+
+# The server's own verdict that the login is dead (repeated invalid_grant):
+# the only active-row state that may cause a failover.
+DEAD = USAGE_RELOGIN_REQUIRED
 
 
 def _usage(pct: float, resets_at: str | None = None) -> dict:
@@ -474,14 +484,65 @@ class TestDecisionTable:
         })
         assert outcome is TickOutcome.SWITCHED
 
-    def test_unknown_active_usage_waits_then_fails_over(self, harness):
+    def test_unknown_active_usage_never_fails_over(self, harness):
+        """A 429 / network failure / unreadable row says nothing about the
+        account: no number of unknown ticks moves the user."""
         usage = {"1": None, "2": _usage(10), "3": _usage(50)}
+        for _ in range(10):
+            assert harness.tick_with_usage(usage) is TickOutcome.NO_ACTION
+        assert harness.active_number() == 1
+        assert not [e for e in harness.events if isinstance(e, SwitchEvent)]
+        reasons = {e.reason for e in harness.events if isinstance(e, NoSwitchEvent)}
+        assert reasons == {"active-usage-unknown"}
+
+    def test_a_429_on_the_active_row_is_unknown_not_dead(self, harness):
+        throttled = UsageEntry(
+            last_good=_usage(20), fetched_at=harness.clock.now - 3600,
+            age_s=3600.0, last_error="http-429", consecutive_failures=5,
+        )
+        entries = {
+            "1": throttled,
+            "2": _entry_for(_usage(10), harness.clock.now),
+            "3": _entry_for(_usage(10), harness.clock.now),
+        }
+        for _ in range(5):
+            harness.tick_with_entries(entries)
+        assert harness.active_number() == 1
+
+    def test_dead_active_login_waits_then_fails_over(self, harness, caplog):
+        usage = {"1": DEAD, "2": _usage(10), "3": _usage(50)}
         assert harness.tick_with_usage(usage) is TickOutcome.NO_ACTION
         assert harness.tick_with_usage(usage) is TickOutcome.NO_ACTION
-        assert harness.tick_with_usage(usage) is TickOutcome.SWITCHED
+        with caplog.at_level("INFO", logger="rota"):
+            assert harness.tick_with_usage(usage) is TickOutcome.SWITCHED
         switch = next(e for e in harness.events if isinstance(e, SwitchEvent))
         assert switch.trigger == "failover"
+        assert "login is dead" in switch.reason
         assert harness.active_number() == 2
+        assert any(
+            "Auto-switch (failover): account 1 -> 2" in r.getMessage()
+            and r.levelname == "WARNING"
+            for r in caplog.records
+        )
+
+    def test_failover_never_lands_on_a_target_whose_fetch_failed(self, harness):
+        """The 09:55 shape: the only "healthy" peer is a trusted-but-stale row
+        whose latest fetch just 429'd. Not a target."""
+        now = harness.clock.now
+        stale_429 = UsageEntry(
+            last_good=_usage(5), fetched_at=now - 600, age_s=600.0,
+            last_error="http-429", trust_extended=True,
+        )
+        entries = {
+            "1": _entry_for(DEAD, now),
+            "2": stale_429,
+            "3": _entry_for(_usage(60), now),
+        }
+        for _ in range(3):
+            outcome = harness.tick_with_entries(entries)
+        assert outcome is TickOutcome.SWITCHED
+        assert harness.active_number() == 3
+
 
     def test_known_active_usage_resets_unhealthy_counter(self, harness):
         unknown = {"1": None, "2": _usage(10), "3": _usage(10)}
@@ -538,7 +599,7 @@ class TestDecisionTable:
     def test_failover_ignores_hysteresis_bar(self, harness):
         # Active usage unreadable (auth likely dead); the only candidate with
         # room sits above the hysteresis bar — failover takes it anyway.
-        usage = {"1": None, "2": _usage(85), "3": _usage(100)}
+        usage = {"1": DEAD, "2": _usage(85), "3": _usage(100)}
         harness.tick_with_usage(usage)
         harness.tick_with_usage(usage)
         outcome = harness.tick_with_usage(usage)
@@ -612,16 +673,15 @@ class TestIdleHold:
         assert outcome is TickOutcome.NO_ACTION
         assert harness.engine._next_delay(outcome) >= NO_RESET_FALLBACK_S
 
-    def test_idle_hold_cap_escalates_to_failover(self, harness):
+    def test_idle_hold_cap_does_not_fail_over_on_expiry_alone(self, harness):
         assert harness.tick_with_usage(self._HELD) is TickOutcome.NO_ACTION
         harness.clock.advance(IDLE_HOLD_MAX_S + 1)
-        # Past the cap the sentinel counts as unhealthy again → failover after
-        # unhealthy_ticks (3) consecutive ticks.
-        assert harness.tick_with_usage(self._HELD) is TickOutcome.NO_ACTION
-        assert harness.tick_with_usage(self._HELD) is TickOutcome.NO_ACTION
-        assert harness.tick_with_usage(self._HELD) is TickOutcome.SWITCHED
-        switch = next(e for e in harness.events if isinstance(e, SwitchEvent))
-        assert switch.trigger == "failover"
+        # Past the cap an expired token is still unknown, not dead.
+        for _ in range(5):
+            assert harness.tick_with_usage(self._HELD) is TickOutcome.NO_ACTION
+        assert harness.active_number() == 1
+        assert not [e for e in harness.events if isinstance(e, SwitchEvent)]
+
 
     def test_recovery_resets_the_hold_clock(self, harness):
         healthy = {"1": _usage(50), "2": _usage(10), "3": _usage(20)}
@@ -634,32 +694,65 @@ class TestIdleHold:
         assert harness.engine._unhealthy_ticks == 0
         assert harness.active_number() == 1
 
-    def test_plain_fetch_failure_still_counts_unhealthy(self, harness):
-        # A None (network failure / dead creds) is NOT the idle sentinel:
-        # unhealthy counting and the hold clock reset both apply.
+    def test_plain_fetch_failure_does_not_count_towards_failover(self, harness):
+        # A None (network failure) is neither the idle sentinel nor a dead
+        # login: the hold clock resets and nothing counts towards failover.
         harness.tick_with_usage(self._HELD)
         unknown = {"1": None, "2": _usage(10), "3": _usage(20)}
         assert harness.tick_with_usage(unknown) is TickOutcome.NO_ACTION
-        assert harness.engine._unhealthy_ticks == 1
+        assert harness.engine._unhealthy_ticks == 0
         assert harness.engine._idle_hold_since is None
 
-    def test_foreign_credential_sentinel_fails_over_instead_of_holding(
-        self, harness
-    ):
-        """The foreign sentinel (live credential proven to be another
-        account's) must NOT idle-hold like TOKEN_EXPIRED: holding preserves
-        the drift. When the active slot's own login cannot be restored (here
-        the self-switch cannot classify the live bytes), failover is the
-        fallback repair."""
+
+    def test_foreign_credential_with_unusable_own_login_stops(self, harness, caplog):
+        """The foreign sentinel never idle-holds (that preserves the drift)
+        and never fails over: with the marked account's stored login unusable
+        the engine stops and asks for a re-login."""
+        harness.switcher._write_account_credentials(
+            "1", "a@example.com",
+            json.dumps({"claudeAiOauth": {"accessToken": "sk-1"}}),  # no refresh token
+        )
         foreign = {
             "1": USAGE_FOREIGN_CREDENTIAL, "2": _usage(10), "3": _usage(20),
         }
-        assert harness.tick_with_usage(foreign) is TickOutcome.NO_ACTION
-        assert harness.tick_with_usage(foreign) is TickOutcome.NO_ACTION
-        assert harness.tick_with_usage(foreign) is TickOutcome.SWITCHED
-        switch = next(e for e in harness.events if isinstance(e, SwitchEvent))
-        assert switch.trigger == "failover"
+        with caplog.at_level("WARNING", logger="rota"):
+            for _ in range(5):
+                assert harness.tick_with_usage(foreign) is TickOutcome.BLOCKED
+        assert harness.active_number() == 1
+        assert not [e for e in harness.events if isinstance(e, SwitchEvent)]
+        stops = [e for e in harness.events
+                 if isinstance(e, NoSwitchEvent) and e.reason == "relogin-needed"]
+        assert stops and "re-login needed" in stops[-1].human()
+        assert harness.engine.last_decision.line == stops[-1].detail
+        errors = [r for r in caplog.records if r.levelname == "ERROR"]
+        assert len(errors) == 1  # logged once, not per tick
         assert harness.engine._idle_hold_since is None
+
+    def test_foreign_credential_restore_failure_stops(self, harness):
+        foreign = {
+            "1": USAGE_FOREIGN_CREDENTIAL, "2": _usage(10), "3": _usage(20),
+        }
+        with patch.object(
+            harness.switcher, "restore_own_login",
+            side_effect=ClaudeSwitchError("keychain write refused"),
+        ):
+            for _ in range(4):
+                assert harness.tick_with_usage(foreign) is TickOutcome.BLOCKED
+        assert harness.active_number() == 1
+        assert not [e for e in harness.events if isinstance(e, SwitchEvent)]
+        assert harness.events[-1].reason == "repair-failed"
+
+    def test_foreign_credential_restore_that_does_not_stick_stops(self, harness):
+        """A write the live read never sees (the overnight Keychain item
+        mismatch) must stop the engine, not loop or fail over."""
+        foreign = {
+            "1": USAGE_FOREIGN_CREDENTIAL, "2": _usage(10), "3": _usage(20),
+        }
+        with patch.object(harness.switcher, "restore_own_login", return_value={}):
+            assert harness.tick_with_usage(foreign) is TickOutcome.BLOCKED
+        assert harness.events[-1].reason == "repair-failed"
+        assert harness.active_number() == 1
+
 
     def test_foreign_credential_restores_the_active_account_in_place(
         self, harness
@@ -669,22 +762,21 @@ class TestIdleHold:
         login back rather than failing over to an account nobody chose (the
         incident: a personal profile landed on a third account after a work
         switch clobbered its live item)."""
-        real_switch_to = harness.switcher.switch_to
-        calls: list[str] = []
-
-        def reconcile(number, json_output=False):
-            # Stand-in for a provenance-proven self-switch: rewrite the live
-            # login from the slot's backup.
-            calls.append(number)
-            return real_switch_to(number, json_output=json_output, force=True)
-
         foreign = {
             "1": USAGE_FOREIGN_CREDENTIAL, "2": _usage(10), "3": _usage(20),
         }
-        with patch.object(harness.switcher, "switch_to", side_effect=reconcile):
+        stashed: list[str] = []
+        real_stash = harness.switcher._stash_live_credential
+
+        def stash(creds, *a, **k):
+            stashed.append(creds)
+            return real_stash(creds, *a, **k)
+
+        with patch.object(harness.switcher, "_stash_live_credential", side_effect=stash):
             assert harness.tick_with_usage(foreign) is TickOutcome.SWITCHED
 
-        assert calls == ["1"]
+        # The foreign bytes were kept before being overwritten.
+        assert stashed and "sk-live" in stashed[0]
         assert harness.active_number() == 1
         assert harness.switcher._live_matches_slot_backup("1", "a@example.com")
         switch = next(e for e in harness.events if isinstance(e, SwitchEvent))
@@ -783,7 +875,7 @@ class TestAdaptiveScheduler:
         assert outcome is TickOutcome.NO_ACTION  # still below the threshold
         assert counts == {"1": 1, "2": 1, "3": 1}  # but everyone got refreshed
 
-    def test_active_unknown_escalates_before_failover(self, temp_home, monkeypatch):
+    def test_active_unknown_escalates_but_does_not_fail_over(self, temp_home, monkeypatch):
         h = self._harness(temp_home, monkeypatch, unhealthy_ticks=1)
         counts: dict[str, int] = {}
         outcome = self._tick(
@@ -791,10 +883,11 @@ class TestAdaptiveScheduler:
             {"2": _usage(10), "3": _usage(50)},
             errors_by_num={"1": "timeout"},
         )
-        # Candidate data was refreshed in the same tick the failover ran on.
+        # Candidate data is still refreshed while the active is unknown...
         assert counts == {"1": 1, "2": 1, "3": 1}
-        assert outcome is TickOutcome.SWITCHED
-        assert h.active_number() == 2
+        # ...but a timeout is never a failover reason.
+        assert outcome is TickOutcome.NO_ACTION
+        assert h.active_number() == 1
 
     def test_active_polls_at_the_baseline(self, temp_home, monkeypatch):
         # Far from the threshold (and with no statusline feed), the active
@@ -3654,7 +3747,7 @@ class TestConsumeFirstDepartureRecordsItsOwnTrigger:
         h.make_live("a@example.com", 1)
         out = None
         for _ in range(3):
-            out = h.tick_with_usage({"1": None, "2": _usage(4)})
+            out = h.tick_with_usage({"1": DEAD, "2": _usage(4)})
             h.clock.advance(60.0)
         assert out is TickOutcome.SWITCHED
         state = h.engine._read_state()
@@ -5791,7 +5884,7 @@ class TestHorizonAxisDoesNotFlap:
         outcome = None
         for _ in range(3):  # unhealthy_ticks default is 3
             outcome = h.tick_with_usage({
-                "1": None,                              # unreadable -> failover
+                "1": DEAD,                              # dead login -> failover
                 "2": _usage(4, self._days_out(h, 400)),
             })
             h.clock.advance(60.0)
@@ -5845,7 +5938,7 @@ class TestHorizonAxisDoesNotFlap:
         outcome = None
         for _ in range(3):  # unhealthy_ticks default is 3
             outcome = h.tick_with_usage({
-                "1": None,                              # unreadable -> failover
+                "1": DEAD,                              # dead login -> failover
                 "2": _usage(4, self._days_out(h, 400)),
             })
             h.clock.advance(60.0)
@@ -5856,7 +5949,7 @@ class TestHorizonAxisDoesNotFlap:
         outcomes = []
         for _ in range(10):
             outcomes.append(h.tick_with_usage({
-                "1": None,                                    # still unreadable
+                "1": DEAD,                                    # still unreadable
                 "2": _usage(98, self._days_out(h, 400)),       # active, burnt down
             }))
             h.clock.advance(301.0)
@@ -5898,7 +5991,7 @@ class TestHorizonAxisDoesNotFlap:
         outcome = None
         for _ in range(3):  # unhealthy_ticks default is 3
             outcome = h.tick_with_usage({
-                "1": None,                              # unreadable -> failover
+                "1": DEAD,                              # dead login -> failover
                 "2": _usage(4, self._days_out(h, 400)),
             })
             h.clock.advance(60.0)
@@ -5967,7 +6060,7 @@ class TestHorizonAxisDoesNotFlap:
         outcome = None
         for _ in range(3):  # unhealthy_ticks default is 3
             outcome = h.tick_with_usage({
-                "1": None,                              # unreadable -> failover
+                "1": DEAD,                              # dead login -> failover
                 "2": _usage(4, self._days_out(h, 400)),
             })
             h.clock.advance(60.0)
@@ -6025,7 +6118,7 @@ class TestHorizonAxisDoesNotFlap:
         outcome = None
         for _ in range(3):  # unhealthy_ticks default is 3
             outcome = h.tick_with_usage({
-                "1": None,                              # unreadable -> failover
+                "1": DEAD,                              # dead login -> failover
                 "2": _usage(4, self._at(h, 400 * 3600)),
             })
             h.clock.advance(60.0)
@@ -6104,7 +6197,7 @@ class TestHorizonAxisDoesNotFlap:
             outcome = None
             for _ in range(3):  # unhealthy_ticks default is 3
                 outcome = h.tick_with_usage({
-                    "1": None,                              # unreadable -> failover
+                    "1": DEAD,                              # dead login -> failover
                     "2": _usage(4, self._at(h, 400 * 3600)),
                 })
                 h.clock.advance(60.0)
@@ -6187,7 +6280,7 @@ class TestHorizonAxisDoesNotFlap:
             outcome = None
             for _ in range(3):  # unhealthy_ticks default is 3
                 outcome = h.tick_with_usage({
-                    "1": None,                              # unreadable -> failover
+                    "1": DEAD,                              # dead login -> failover
                     "2": _usage(4, self._at(h, 400 * 3600)),
                 })
                 h.clock.advance(60.0)
@@ -6277,7 +6370,7 @@ class TestHorizonAxisDoesNotFlap:
         outcome = None
         for _ in range(3):
             outcome = h.tick_with_usage({
-                "1": None,
+                "1": DEAD,
                 "2": _usage(4, self._at(h, 400 * 3600)),
             })
             h.clock.advance(60.0)
@@ -6324,7 +6417,7 @@ class TestHorizonAxisDoesNotFlap:
         outcome = None
         for _ in range(3):  # unhealthy_ticks default is 3
             outcome = h.tick_with_usage({
-                "1": None,                              # unreadable -> failover
+                "1": DEAD,                              # dead login -> failover
                 "2": _usage(4, self._days_out(h, 400)),
             })
             h.clock.advance(60.0)
@@ -6686,7 +6779,7 @@ class TestTheReleasePredicateOneStateShapePerTest:
         outcome = None
         for _ in range(3):
             outcome = h.tick_with_usage({
-                "1": None,
+                "1": DEAD,
                 "2": _usage(4, self._at(h, 400 * 3600)),
             })
             h.clock.advance(60.0)

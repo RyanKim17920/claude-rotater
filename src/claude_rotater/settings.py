@@ -252,7 +252,7 @@ SETTING_SPECS: dict[str, SettingSpec] = {
         ),
         SettingSpec(
             "autoswitch", "unhealthyTicks", "unhealthy_ticks", "int", 1, 100,
-            help="Consecutive failed polls before an account is unhealthy",
+            help="Consecutive dead-login verdicts (invalid_grant) before failover",
             group="autoswitch", label="Unhealthy after", step=1.0, unit=" polls",
         ),
         SettingSpec(
