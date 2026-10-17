@@ -11927,3 +11927,63 @@ class TestOrgTag:
         assert ClaudeAccountSwitcher._get_display_tag(email, org, "uuid") == expected
         info = AccountInfo(email, "u", "uuid", org, "", 1)
         assert info.display_label == f"{email} [{expected}]"
+
+
+class TestSwitchUnderCustomConfigDir:
+    """End to end: a switch in a ``CLAUDE_CONFIG_DIR`` profile activates the
+    target in THAT profile's Keychain item and leaves the default profile's
+    login alone (the incident: the write went to the default item, so the
+    profile kept its old account while ``.claude.json`` named the new one)."""
+
+    @staticmethod
+    def _creds(n: int) -> str:
+        return json.dumps({"claudeAiOauth": {
+            "accessToken": f"sk-{n}", "refreshToken": f"rt-{n}",
+            "expiresAt": 9_999_999_999_000,
+        }})
+
+    def test_switch_writes_the_profiles_own_item(
+        self, temp_home: Path, monkeypatch, block_real_keychain
+    ):
+        from claude_rotater.credentials import CLAUDE_CODE_KEYCHAIN_SERVICE
+        from claude_rotater.session import keychain_service_name
+
+        work = temp_home / ".claude-work"
+        work.mkdir()
+        monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(work))
+        monkeypatch.setenv("ROTA_HOME", str(temp_home / "work-rota"))
+        s = ClaudeAccountSwitcher()
+        s.platform = Platform.MACOS
+        s._setup_directories()
+        s._init_sequence_file()
+
+        acct = macos_keychain.keychain_account_name()
+        hashed = keychain_service_name(str(work))
+        kc = block_real_keychain.data
+        kc[(CLAUDE_CODE_KEYCHAIN_SERVICE, acct)] = "PERSONAL-LOGIN"
+        kc[(hashed, acct)] = self._creds(1)
+        data = s._get_sequence_data()
+        for n in (1, 2):
+            email = f"u{n}@example.com"
+            s._write_account_credentials(str(n), email, self._creds(n))
+            s._write_account_config(str(n), email, json.dumps({
+                "oauthAccount": {"emailAddress": email, "accountUuid": f"uuid-{n}"},
+            }))
+            data["accounts"][str(n)] = {
+                "email": email, "uuid": f"uuid-{n}", "organizationUuid": "",
+                "organizationName": "", "added": "2026-01-01T00:00:00Z",
+            }
+            data["sequence"].append(n)
+        data["activeAccountNumber"] = 1
+        s._write_json(s.sequence_file, data)
+        (work / ".claude.json").write_text(json.dumps({
+            "oauthAccount": {"emailAddress": "u1@example.com", "accountUuid": "uuid-1"},
+        }))
+
+        result = s.switch_to("2", json_output=True)
+
+        assert result["switched"] is True
+        assert json.loads(kc[(hashed, acct)])["claudeAiOauth"]["accessToken"] == "sk-2"
+        assert kc[(CLAUDE_CODE_KEYCHAIN_SERVICE, acct)] == "PERSONAL-LOGIN"
+        cfg = json.loads((work / ".claude.json").read_text())
+        assert cfg["oauthAccount"]["accountUuid"] == "uuid-2"

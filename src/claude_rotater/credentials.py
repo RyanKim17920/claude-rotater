@@ -797,10 +797,13 @@ class CredentialStore:
         """
         if self._host.platform != Platform.MACOS:
             return True
+        # Every item claude could read for this profile — not the default
+        # profile's fixed name, which under a custom CLAUDE_CONFIG_DIR would
+        # log out another profile and leave this one's item shadowing the file.
+        account = macos_keychain.keychain_account_name()
         try:
-            macos_keychain.delete_password(
-                CLAUDE_CODE_KEYCHAIN_SERVICE, macos_keychain.keychain_account_name()
-            )
+            for service in _active_oauth_keychain_services():
+                macos_keychain.delete_password(service, account)
         except Exception:
             return False  # best-effort; a down Keychain can't be cleaned now
         return True
@@ -841,7 +844,10 @@ class CredentialStore:
             CredentialWriteError: If persisting the key fails.
         """
         wrote_to_keychain = False
-        if self._use_keychain():
+        # The unsuffixed "Claude Code" item belongs to the default profile
+        # (same gate as the managed-key read): a custom profile keeps its key
+        # in its own config's primaryApiKey rather than another profile's item.
+        if _active_profile_is_default() and self._use_keychain():
             try:
                 self._kc_call(
                     macos_keychain.set_password,
@@ -886,7 +892,13 @@ class CredentialStore:
 
         # Mutual exclusion: drop the OAuth credential so it can't shadow the key.
         self._clear_oauth_credential()
-        if self._host.platform == Platform.MACOS and not wrote_to_keychain:
+        if (
+            self._host.platform == Platform.MACOS
+            and not wrote_to_keychain
+            and _active_profile_is_default()
+        ):
+            # (A custom profile never reads the managed item, so nothing can
+            # shadow its primaryApiKey and there is no residual to pin over.)
             # Same stale-Keychain resurrection guard as the OAuth path: the key
             # fell back to plaintext ``primaryApiKey`` while a stale "Claude Code"
             # Keychain item may remain, and managed-key reads check the Keychain
@@ -922,7 +934,8 @@ class CredentialStore:
         per token while it lies, and a caller/log reader must be able to
         tell "nothing to clear" from "could not check".
         """
-        if self._host.platform == Platform.MACOS:
+        if self._host.platform == Platform.MACOS and _active_profile_is_default():
+            # Never under a custom profile: the item is the default profile's.
             try:
                 macos_keychain.delete_password(
                     CLAUDE_CODE_MANAGED_KEYCHAIN_SERVICE,
@@ -986,7 +999,7 @@ class CredentialStore:
             try:
                 self._kc_call(
                     macos_keychain.set_password,
-                    CLAUDE_CODE_KEYCHAIN_SERVICE,
+                    self._active_oauth_write_service(),
                     macos_keychain.keychain_account_name(),
                     credentials,
                 )
@@ -995,6 +1008,7 @@ class CredentialStore:
                 # (A programming error is NOT caught here — it propagates.)
                 self._host._logger.warning(f"Keychain write failed, falling back to file: {e}")
             else:
+                self._verify_active_read_back(credentials)
                 # Keychain (primary) now holds the fresh credential. Bump an
                 # already-present shadow file's mtime so running sessions hot-reload
                 # (#86); best-effort, never creates one — see the helper.
@@ -1019,6 +1033,43 @@ class CredentialStore:
             # authority, so hand it over rather than re-deriving it from flags.
             self._pin_file_mode(residual_cleared=cleared)
         self._last_active_credentials_backend = "file"
+
+    def _active_oauth_write_service(self) -> str:
+        """The Keychain item an activation writes: the one the active read uses.
+
+        Claude reads only the item it derives for this environment (hashed per
+        ``CLAUDE_CONFIG_DIR``), so writing the default profile's fixed name from
+        a custom profile switches nothing there and overwrites the default
+        profile's login instead. Of the candidates
+        :func:`_active_oauth_keychain_services` lists, the first that exists
+        wins, which is the item :meth:`_read_active_oauth_keychain` reads; with
+        none present the first, which is the one claude itself would create.
+        """
+        services = _active_oauth_keychain_services()
+        if len(services) > 1:
+            account = macos_keychain.keychain_account_name()
+            for service in services:
+                if macos_keychain.item_exists(service, account):
+                    return service
+        return services[0]
+
+    def _verify_active_read_back(self, credentials: str) -> None:
+        """Refuse a write the active read does not see.
+
+        The switch is only real if the item just written is the item read
+        back for this profile, which is the one Claude Code reads too. A
+        mismatch means the write and read resolved different Keychain items
+        (another profile's login was just overwritten) and must fail loudly
+        so the switch rolls back instead of reporting success.
+        An unreadable read-back proves nothing either way and is let through.
+        """
+        value, failed = self._read_active_oauth_keychain()
+        if failed or value == credentials:
+            return
+        raise CredentialWriteError(
+            "Wrote the login, but this profile's Keychain item does not hold "
+            "it: the write and Claude Code's read resolved different items"
+        )
 
     def _refresh_stale_credentials_file(self, credentials: str) -> None:
         """Bump an already-present ``.credentials.json``'s mtime after a Keychain write.

@@ -271,3 +271,155 @@ class TestSecureStorageOverride:
         store = CredentialStore(_Host(tmp_path / "backups"))
         assert store._read_active_credentials().value == SECURE_PROFILE_CREDS
         assert seen == [keychain_service_name(str(secure))]
+
+
+class _FakeKeychain:
+    """An in-memory Keychain recording every write and delete by service."""
+
+    def __init__(self, items: dict[str, str]):
+        self.items = dict(items)
+        self.writes: list[str] = []
+        self.deletes: list[str] = []
+
+    def install(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        kc = "claude_rotater.macos_keychain."
+        monkeypatch.setattr(kc + "get_password", lambda s, a: self.items.get(s))
+        monkeypatch.setattr(kc + "item_exists", lambda s, a: s in self.items)
+        monkeypatch.setattr(kc + "set_password", self._set)
+        monkeypatch.setattr(kc + "delete_password", self._delete)
+
+    def _set(self, service: str, account: str, password: str) -> None:
+        self.writes.append(service)
+        self.items[service] = password
+
+    def _delete(self, service: str, account: str) -> None:
+        self.deletes.append(service)
+        self.items.pop(service, None)
+
+
+class TestActiveWriteStaysOnOneProfile:
+    """A switch writes the item the active read (and claude) uses.
+
+    The incident: under ``CLAUDE_CONFIG_DIR`` the read followed the profile's
+    hashed item while the write still went to the default profile's fixed
+    name. A switch in the custom profile changed nothing claude read there
+    and overwrote the default profile's login with another account's token.
+    """
+
+    def _custom(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+        monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
+        custom = tmp_path / "custom-profile"
+        custom.mkdir()
+        monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(custom))
+        monkeypatch.delenv("CLAUDE_SECURESTORAGE_CONFIG_DIR", raising=False)
+        return custom
+
+    def test_custom_profile_writes_its_own_hashed_item(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        custom = self._custom(tmp_path, monkeypatch)
+        hashed = keychain_service_name(str(custom))
+        kc = _FakeKeychain({
+            CLAUDE_CODE_KEYCHAIN_SERVICE: DEFAULT_PROFILE_CREDS,
+            hashed: CUSTOM_PROFILE_CREDS,
+        })
+        kc.install(monkeypatch)
+        store = CredentialStore(_Host(tmp_path / "backups"))
+
+        store._write_credentials(SECURE_PROFILE_CREDS)
+
+        assert kc.writes == [hashed]
+        assert kc.items[hashed] == SECURE_PROFILE_CREDS
+        assert kc.items[CLAUDE_CODE_KEYCHAIN_SERVICE] == DEFAULT_PROFILE_CREDS
+        assert store._read_active_credentials().value == SECURE_PROFILE_CREDS
+
+    def test_custom_profile_without_an_item_creates_the_hashed_one(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        custom = self._custom(tmp_path, monkeypatch)
+        kc = _FakeKeychain({CLAUDE_CODE_KEYCHAIN_SERVICE: DEFAULT_PROFILE_CREDS})
+        kc.install(monkeypatch)
+
+        CredentialStore(_Host(tmp_path / "backups"))._write_credentials(
+            CUSTOM_PROFILE_CREDS
+        )
+
+        assert kc.writes == [keychain_service_name(str(custom))]
+
+    def test_no_live_write_or_delete_touches_the_default_item(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        """Every path that writes or clears the live login: OAuth activation,
+        managed-key activation (which clears OAuth), and the OAuth activation
+        that clears a managed key."""
+        self._custom(tmp_path, monkeypatch)
+        kc = _FakeKeychain({
+            CLAUDE_CODE_KEYCHAIN_SERVICE: DEFAULT_PROFILE_CREDS,
+            CLAUDE_CODE_MANAGED_KEYCHAIN_SERVICE: "sk-ant-api03-default",
+        })
+        kc.install(monkeypatch)
+        store = CredentialStore(_Host(tmp_path / "backups"))
+
+        store._write_credentials(CUSTOM_PROFILE_CREDS)
+        store._write_credentials("sk-ant-api03-" + "x" * 40)
+        store._write_credentials(CUSTOM_PROFILE_CREDS)
+        store._delete_active_keychain_entry()
+
+        default_items = {CLAUDE_CODE_KEYCHAIN_SERVICE, CLAUDE_CODE_MANAGED_KEYCHAIN_SERVICE}
+        assert not default_items & set(kc.writes + kc.deletes), (kc.writes, kc.deletes)
+        assert kc.items[CLAUDE_CODE_KEYCHAIN_SERVICE] == DEFAULT_PROFILE_CREDS
+        assert kc.items[CLAUDE_CODE_MANAGED_KEYCHAIN_SERVICE] == "sk-ant-api03-default"
+
+    def test_default_profile_still_writes_the_unsuffixed_item(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
+        monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
+        monkeypatch.delenv("CLAUDE_SECURESTORAGE_CONFIG_DIR", raising=False)
+        kc = _FakeKeychain({CLAUDE_CODE_KEYCHAIN_SERVICE: DEFAULT_PROFILE_CREDS})
+        kc.install(monkeypatch)
+
+        CredentialStore(_Host(tmp_path / "backups"))._write_credentials(
+            CUSTOM_PROFILE_CREDS
+        )
+
+        assert kc.writes == [CLAUDE_CODE_KEYCHAIN_SERVICE]
+
+    def test_explicit_default_dir_writes_the_item_the_read_uses(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        """``CLAUDE_CONFIG_DIR`` naming the default profile: the read falls back
+        to the unsuffixed item when no hashed one exists, so the write must
+        land there too, not on a fresh hashed item the read then prefers."""
+        monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
+        default = tmp_path / ".claude"
+        default.mkdir()
+        monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(default))
+        monkeypatch.delenv("CLAUDE_SECURESTORAGE_CONFIG_DIR", raising=False)
+        kc = _FakeKeychain({CLAUDE_CODE_KEYCHAIN_SERVICE: DEFAULT_PROFILE_CREDS})
+        kc.install(monkeypatch)
+
+        CredentialStore(_Host(tmp_path / "backups"))._write_credentials(
+            CUSTOM_PROFILE_CREDS
+        )
+
+        assert kc.writes == [CLAUDE_CODE_KEYCHAIN_SERVICE]
+
+    def test_a_write_the_read_does_not_see_fails_loudly(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        """The read-back guard: had the write and read diverged again, the
+        switch must fail (and roll back) instead of reporting success."""
+        from claude_rotater.exceptions import CredentialWriteError
+
+        custom = self._custom(tmp_path, monkeypatch)
+        hashed = keychain_service_name(str(custom))
+        kc = _FakeKeychain({hashed: CUSTOM_PROFILE_CREDS})
+        kc.install(monkeypatch)
+        store = CredentialStore(_Host(tmp_path / "backups"))
+        monkeypatch.setattr(
+            store, "_active_oauth_write_service", lambda: CLAUDE_CODE_KEYCHAIN_SERVICE
+        )
+
+        with pytest.raises(CredentialWriteError):
+            store._write_credentials(SECURE_PROFILE_CREDS)
