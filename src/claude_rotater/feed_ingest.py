@@ -31,7 +31,9 @@ order:
    account's window, and a pct more than ``BEHIND_PCT`` below the stored one
    within the same window is a stale report (usage never falls inside a
    window). Either drops the record. With nothing stored to compare against,
-   a record whose windows match a *different* account's is dropped too.
+   a record whose windows are a *different* account's (same resets, behind
+   or not) is dropped too, so a session still on the previous account's
+   token after the grace period is never credited to the new one.
 5. Windows that had already reset by record time are ignored.
 
 Dropping is always safe: the account simply falls back to polling, and the
@@ -264,7 +266,10 @@ def attribute(
         return Verdict(None, result)
     if result is None:
         for other, usage in stored.items():
-            if other != slot and _consistency(windows, usage, t) == "match":
+            # Same window as another account's, even if behind its stored
+            # pct (an old session of the account just switched away from):
+            # that account's reading, never the one on duty's.
+            if other != slot and _consistency(windows, usage, t) in ("match", "behind-stored"):
                 return Verdict(None, "matches-other-account")
     return Verdict(slot, ACCEPTED_SESSION if session else ACCEPTED)
 

@@ -130,6 +130,25 @@ class TestAttribute:
         v = verdict(rec(), stored=stored)
         assert v.reason == "matches-other-account"
 
+    def test_old_session_after_the_grace_is_not_credited_to_the_new_account(self):
+        """Switched 1 → 2 long ago; a chat still on account 1's token keeps
+        reporting account 1's windows."""
+        old = rec(t=NOW, pct5=45.0)
+        late = dict(active_slot="2", last_switch_at=NOW - 3600)
+        # Account 2 measured: its own resets disagree.
+        own = {"1": stored_usage(), "2": stored_usage(pct5=5.0, reset5=R5 + 7200,
+                                                      reset7=R7 + 86400)}
+        assert verdict(old, stored=own, **late).reason == "window-mismatch"
+        # Account 2 never measured: the windows are account 1's.
+        unknown = {"1": stored_usage(), "2": None}
+        assert verdict(old, stored=unknown, **late).reason == "matches-other-account"
+        # ...even when that chat lags account 1's stored pct.
+        ahead = {"1": stored_usage(pct5=60.0), "2": None}
+        assert verdict(old, stored=ahead, **late).reason == "matches-other-account"
+        # Account 2's own chat (its own resets) is still taken.
+        mine = rec(t=NOW, pct5=7.0, reset5=R5 + 7200, reset7=R7 + 86400)
+        assert verdict(mine, stored=unknown, **late).slot == "2"
+
     def test_own_match_beats_a_coincident_other(self):
         stored = {"1": stored_usage(), "2": stored_usage()}
         assert verdict(rec(), stored=stored).slot == "1"
@@ -368,6 +387,37 @@ class TestIngest:
         result = ing.ingest()
         assert result.rejected == {"switch-grace": 1}
         assert entry(h).last_good is None
+
+    def test_old_account_session_after_the_grace_never_feeds_the_new_one(self, h):
+        """1 → 2 switch well past the grace; a chat still on account 1's
+        token reports account 1's windows: neither account 2's store nor its
+        history (its forecast) takes them."""
+        ing = FeedIngestor(h.switcher, clock=h.clock)
+        reset5_1, reset7_1 = NOW + 4 * 3600, NOW + 5 * 86400
+        reset5_2, reset7_2 = NOW + 2 * 3600, NOW + 6 * 86400
+        one = {"five_hour": {"pct": 60.0, "resets_at": _iso_at(reset5_1)},
+               "seven_day": {"pct": 30.0, "resets_at": _iso_at(reset7_1)}}
+        two = {"five_hour": {"pct": 5.0, "resets_at": _iso_at(reset5_2)},
+               "seven_day": {"pct": 8.0, "resets_at": _iso_at(reset7_2)}}
+        collect(h, {"1": one, "2": two}, {"1", "2"})
+        h.make_live("b@example.com", 2)
+        assert h.switcher.current_account_number() == "2"
+        (h.switcher.backup_dir / "autoswitch_state.json").write_text(
+            json.dumps({"lastSwitchAt": h.clock.now})
+        )
+        h.clock.advance(SWITCH_GRACE_S + 60)
+        ids = h.switcher.usage_identities()
+        before = h.switcher.usage_history.series(ids)["2"]
+        write(h, pct5=72.0, pct7=31.0, reset5=reset5_1, reset7=reset7_1)
+        result = ing.ingest()
+        assert not result.adopted and result.rejected == {"window-mismatch": 1}
+        assert entry(h, "2").last_good["five_hour"]["pct"] == 5.0
+        assert h.switcher.usage_history.series(ids)["2"] == before
+        # Account 2's own chat is taken.
+        h.clock.advance(1)
+        write(h, pct5=9.0, pct7=8.0, reset5=reset5_2, reset7=reset7_2)
+        assert ing.ingest().adopted == {"2": h.clock.now}
+        assert entry(h, "2").last_good["five_hour"]["pct"] == 9.0
 
     def test_rota_run_session_feeds_its_own_slot(self, h):
         from claude_rotater.session import session_dir_for
