@@ -1414,6 +1414,154 @@ class TestRun:
         assert exc.value.env["ANTHROPIC_API_KEY"] == "sk-ant-key"
 
 
+@pytest.fixture
+def work_profile(tmp_path: Path, temp_home: Path, monkeypatch) -> Path:
+    """The operator's own non-default profile, exported as CLAUDE_CONFIG_DIR.
+
+    Holds customizations, history and an MCP server that differ from the
+    default ~/.claude, so a test can tell which one a session mirrored.
+    """
+    work = tmp_path / "work"
+    work.mkdir()
+    (work / "settings.json").write_text('{"profile": "work"}')
+    (work / "CLAUDE.md").write_text("# work memory")
+    (work / "projects" / "-w").mkdir(parents=True)
+    (work / "projects" / "-w" / "w.jsonl").write_text("work\n")
+    (work / "history.jsonl").write_text('{"p": "work"}\n')
+    (work / ".claude.json").write_text(
+        json.dumps({"mcpServers": {"local": LOCAL_MCP}})
+    )
+    default = temp_home / ".claude"
+    (default / "settings.json").write_text('{"profile": "default"}')
+    (default / "CLAUDE.md").write_text("# default memory")
+    (temp_home / ".claude.json").write_text(
+        json.dumps({"mcpServers": {"github": GITHUB_MCP}})
+    )
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(work))
+    return work
+
+
+class TestBaseProfile:
+    """CLAUDE_CONFIG_DIR naming the operator's own profile is the session base."""
+
+    def test_unset_is_default(self, manager, temp_home, monkeypatch):
+        monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
+        assert manager.base_config_home() == temp_home / ".claude"
+
+    def test_operator_profile_is_base(self, manager, work_profile):
+        assert manager.base_config_home() == work_profile
+
+    def test_session_dir_is_not_base(self, manager, temp_home, monkeypatch):
+        inner = session_dir_for(manager.switcher.backup_dir, "1", "a@b.com")
+        inner.mkdir(parents=True)
+        monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(inner))
+        assert manager.base_config_home() == temp_home / ".claude"
+
+    @pytest.mark.skipif(sys.platform == "win32", reason="symlinks")
+    def test_symlinked_session_dir_is_not_base(
+        self, manager, temp_home, tmp_path, monkeypatch
+    ):
+        inner = session_dir_for(manager.switcher.backup_dir, "1", "a@b.com")
+        inner.mkdir(parents=True)
+        link = tmp_path / "alias"
+        link.symlink_to(inner)
+        monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(link))
+        assert manager.base_config_home() == temp_home / ".claude"
+
+    def test_run_launches_session_without_warning(
+        self,
+        manager,
+        work_profile,
+        capture_exec,
+        auth_status_tracks_seed,
+        refresh_rotates,
+        capsys,
+    ):
+        with pytest.raises(_ExecCalled) as exc:
+            manager.run("2", [])
+
+        session_dir = session_dir_for(
+            manager.switcher.backup_dir, ACCOUNT_NUM, ACCOUNT_EMAIL
+        )
+        assert exc.value.env["CLAUDE_CONFIG_DIR"] == str(session_dir)
+        assert "overriding it for this launch" not in capsys.readouterr().out
+        # The session mirrors the work profile, not ~/.claude.
+        assert (session_dir / "settings.json").read_text() == '{"profile": "work"}'
+        assert (session_dir / "CLAUDE.md").read_text() == "# work memory"
+        config = _session_config(session_dir)
+        assert config["mcpServers"] == {"local": LOCAL_MCP}
+
+    def test_run_fast_paths_the_profiles_own_login(
+        self,
+        manager,
+        work_profile,
+        capture_exec,
+        auth_status_tracks_seed,
+        refresh_rotates,
+        capsys,
+    ):
+        """The fast path reads the work profile's login and keeps its env.
+
+        The probe/refresh fakes keep a regression (falling through to a
+        session bootstrap) hermetic instead of reaching the network.
+        """
+        (work_profile / ".claude.json").write_text(
+            json.dumps(
+                {
+                    "oauthAccount": {
+                        "emailAddress": ACCOUNT_EMAIL,
+                        "accountUuid": "uuid-2",
+                        "organizationUuid": ORG_UUID,
+                    }
+                }
+            )
+        )
+        with pytest.raises(_ExecCalled) as exc:
+            manager.run("2", [])
+
+        assert exc.value.env["CLAUDE_CONFIG_DIR"] == str(work_profile)
+        assert "already the active default login" in capsys.readouterr().out
+
+    def test_nested_run_ignores_the_session_it_runs_in(
+        self, manager, work_profile, monkeypatch, temp_home
+    ):
+        """A session dir in CLAUDE_CONFIG_DIR still sources ~/.claude."""
+        inner = session_dir_for(manager.switcher.backup_dir, "1", "a@b.com")
+        inner.mkdir(parents=True)
+        (inner / "settings.json").write_text('{"profile": "session"}')
+        (inner / ".claude.json").write_text(json.dumps({"mcpServers": {}}))
+        monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(inner))
+        session_dir = session_dir_for(
+            manager.switcher.backup_dir, ACCOUNT_NUM, ACCOUNT_EMAIL
+        )
+        session_dir.mkdir(parents=True)
+        (session_dir / ".claude.json").write_text("{}")
+
+        manager._sync_sharing(session_dir, share=True)
+
+        assert (session_dir / "settings.json").read_text() == (
+            '{"profile": "default"}'
+        )
+        assert _session_config(session_dir)["mcpServers"] == {"github": GITHUB_MCP}
+
+    @pytest.mark.skipif(sys.platform == "win32", reason="history is POSIX-only")
+    def test_share_history_sources_the_work_profile(self, manager, work_profile):
+        session_dir = session_dir_for(
+            manager.switcher.backup_dir, ACCOUNT_NUM, ACCOUNT_EMAIL
+        )
+        session_dir.mkdir(parents=True)
+
+        manager._sync_sharing(session_dir, share=True, share_history=True)
+
+        assert (session_dir / "projects").readlink() == work_profile / "projects"
+        assert (session_dir / "history.jsonl").readlink() == (
+            work_profile / "history.jsonl"
+        )
+        assert (session_dir / "settings.json").readlink() == (
+            work_profile / "settings.json"
+        )
+
+
 class TestExec:
     """The _exec() terminal handoff dispatches per-platform (runs on any host)."""
 
