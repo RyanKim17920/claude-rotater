@@ -549,8 +549,10 @@ class TestDecisionFromEvent:
         e = NoSwitchEvent(reason="cooldown")
         assert decision_from_event(e).line == "no switch: cooldown"
 
-    def test_stay_uses_detail(self):
-        e = NoSwitchEvent(reason="stay", detail="stay: resets soonest (1h), 5% headroom")
+    @pytest.mark.parametrize("reason", ["stay", "manual-hold"])
+    def test_self_explained_stay_is_its_own_line(self, reason):
+        e = NoSwitchEvent(reason=reason, detail="stay: resets soonest (1h), 5% headroom")
+        assert e.human() == e.detail
         assert decision_from_event(e).line == e.detail
         assert decision_from_event(e).to_json()["action"] == "stay"
 

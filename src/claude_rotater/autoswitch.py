@@ -434,6 +434,8 @@ class NoSwitchEvent(AutoSwitchEvent):
         return {"reason": self.reason, "detail": self.detail}
 
     def human(self) -> str:
+        if self.reason in _SELF_EXPLAINED:
+            return self.detail  # already a whole "stay: ..." line
         return f"no switch: {self.reason}" + (f" ({self.detail})" if self.detail else "")
 
 
@@ -568,8 +570,7 @@ def decision_from_event(event: AutoSwitchEvent) -> Decision | None:
             target=None if target is None else str(target),
         )
     if isinstance(event, NoSwitchEvent):
-        line = event.detail if event.reason in _SELF_EXPLAINED else event.human()
-        return Decision(action="stay", line=line, ts=event.ts)
+        return Decision(action="stay", line=event.human(), ts=event.ts)
     if isinstance(event, AllExhaustedEvent):
         return Decision(action="stay", line=event.human(), ts=event.ts)
     return None
