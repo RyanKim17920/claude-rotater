@@ -157,3 +157,29 @@ class OutputModal(ModalScreen[None]):
 
     def action_dismiss_modal(self) -> None:
         self.dismiss(None)
+
+
+class KeysModal(ModalScreen[None]):
+    """The keys the action bar leaves out, one per line. Any listed key
+    still works straight from the main page; this only reminds."""
+
+    BINDINGS = [Binding("escape,question_mark,q,enter", "dismiss_modal", "Close", show=False)]
+
+    def __init__(self, keys: tuple[tuple[str, str], ...]) -> None:
+        super().__init__()
+        self._keys = keys
+
+    def compose(self) -> ComposeResult:
+        body = Text()
+        for i, (key, words) in enumerate(self._keys):
+            if i:
+                body.append("\n")
+            body.append(f"{key:<8}", style="bold")
+            body.append(words)
+        with Vertical(classes="modal-box"):
+            yield Label("More keys", classes="modal-title")
+            yield Static(body, classes="modal-body", id="keys-body")
+            yield Static("esc / ? close", classes="modal-hint")
+
+    def action_dismiss_modal(self) -> None:
+        self.dismiss(None)
