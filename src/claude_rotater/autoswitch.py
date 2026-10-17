@@ -49,7 +49,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, ClassVar
 
-from claude_rotater import expiring_first, oauth, poll_policy
+from claude_rotater import expiring_first, oauth, poll_policy, preempt
 from claude_rotater.estimator import estimate_window
 from claude_rotater.exceptions import ClaudeSwitchError
 from claude_rotater.json_output import (
@@ -395,7 +395,7 @@ class PollEvent(AutoSwitchEvent):
 @dataclass(frozen=True)
 class SwitchEvent(AutoSwitchEvent):
     kind: ClassVar[str] = "switch"
-    # "proactive" | "at-limit" | "failover" | "consume-first" |
+    # "proactive" | "at-limit" | "pre-empt" | "failover" | "consume-first" |
     # "expiring-first" | "repair" ("repair": the active account re-activated
     # from its own backup).
     trigger: str
@@ -551,8 +551,11 @@ RELOGIN_REASON = "relogin-needed"
 REPAIR_FAILED_REASON = "repair-failed"
 # The hourly switch budget is spent: automatic switching is paused.
 PAUSED_REASON = "auto-paused"
+# A pre-emptive switch is due and no account could take the work: the user
+# is about to hit a limit and should know before it happens.
+NO_HEADROOM_REASON = "no-headroom"
 # Reasons a UI should surface loudly (header note, prompt line).
-ALERT_REASONS = (RELOGIN_REASON, REPAIR_FAILED_REASON, PAUSED_REASON)
+ALERT_REASONS = (RELOGIN_REASON, REPAIR_FAILED_REASON, PAUSED_REASON, NO_HEADROOM_REASON)
 # NoSwitchEvent reasons whose ``detail`` is already a full "stay: ..." line.
 _SELF_EXPLAINED = (STAY_REASON, "manual-hold", *ALERT_REASONS)
 
@@ -608,6 +611,12 @@ def decision_from_event(event: AutoSwitchEvent) -> Decision | None:
 # Proactive triggers: the ones the cooldown holds. at-limit and failover are
 # escapes and never wait.
 _COOLDOWN_TRIGGERS = ("proactive", "consume-first", "expiring-first")
+# The active account will be over its switch point by its next reading (see
+# preempt.py). A limit move like at-limit: no cooldown, no manual hold; it
+# still counts against the hourly budget and needs a target with headroom.
+PREEMPT_TRIGGER = "pre-empt"
+# Triggers logged as warnings: the account on duty was (about to be) unusable.
+_LIMIT_TRIGGERS = ("failover", "at-limit", PREEMPT_TRIGGER)
 
 
 class TickOutcome(enum.Enum):
@@ -1201,11 +1210,30 @@ class AutoSwitchEngine:
 
         active_headroom = headroom.get(current)
         failover_reason = ""
+        projection: preempt.Projection | None = None
         if active_headroom is not None:
             self._unhealthy_ticks = 0
             self._idle_hold_since = None
             utilization = 100.0 - active_headroom
-            if utilization < settings.threshold:
+            if (
+                preempt.switch_point(settings.threshold) - ESCALATION_MARGIN_PCT
+                <= utilization
+                < settings.threshold
+            ):
+                # Only near the line: no turn spans the escalation band, and
+                # further down the history read is not worth a tick's cost.
+                projection = self._preempt_projection(
+                    current, entries.get(current), usage.get(current), state
+                )
+                if projection is not None and not projection.reaches(
+                    preempt.switch_point(settings.threshold)
+                ):
+                    projection = None
+            if projection is not None:
+                # Every strategy: the next reading would come too late.
+                trigger = PREEMPT_TRIGGER
+                failover_reason = projection.reason()
+            elif utilization < settings.threshold:
                 if settings.strategy not in ("consume-first", "expiring-first"):
                     self._emit(
                         NoSwitchEvent(
@@ -1324,7 +1352,9 @@ class AutoSwitchEngine:
         oauth_candidates = [
             n for n in candidates if self.switcher.account_kind_for(n) != "api_key"
         ]
-        if trigger == "failover":
+        if trigger in ("failover", PREEMPT_TRIGGER):
+            # A pre-empt is a prediction, not an outage: it never trades the
+            # account on duty for one whose state is unknown either.
             # Escaping a dead login onto an account we cannot currently read
             # trades a known problem for an unknown one: its trusted-but-stale
             # row (a 429 keeps the last reading "trusted") is no evidence it
@@ -1334,8 +1364,8 @@ class AutoSwitchEngine:
             ]
             if unreadable:
                 _logger.info(
-                    "Failover skips account(s) %s: their latest usage fetch "
-                    "failed", ", ".join(unreadable),
+                    "%s skips account(s) %s: their latest usage fetch failed",
+                    trigger.capitalize(), ", ".join(unreadable),
                 )
             oauth_candidates = [n for n in oauth_candidates if n not in unreadable]
         # The no-return bar itself lives in `_rank` below: it is a statement
@@ -1370,6 +1400,8 @@ class AutoSwitchEngine:
                 )
             )
             return TickOutcome.NO_ACTION
+        if trigger == PREEMPT_TRIGGER and not oauth_candidates:
+            return self._no_headroom(current)
         if not oauth_candidates and not api_key_candidates:
             # Won't change until the user adds/recovers an account — no point
             # re-polling at full cadence.
@@ -1468,6 +1500,9 @@ class AutoSwitchEngine:
             active_headroom=active_headroom,
             settings=settings,
             now=decided_now,
+            landing_rise=(
+                projection.projected_pct - projection.pct if projection else 0.0
+            ),
         )
 
         if trigger == "consume-first" and ordered:
@@ -1514,7 +1549,14 @@ class AutoSwitchEngine:
             # account above the threshold the recovery ranking stays in charge.
             ordered = self._expiring_first_order(current, ordered, usage)
 
-        if not ordered and api_key_candidates and trigger != "consume-first":
+        if not ordered and trigger == PREEMPT_TRIGGER:
+            return self._no_headroom(current)
+
+        if (
+            not ordered
+            and api_key_candidates
+            and trigger not in ("consume-first", PREEMPT_TRIGGER)
+        ):
             # Last resort when we must move: metered API-key accounts
             # (unmeasurable headroom). Never for a below-threshold consume-first
             # nudge — those API-key accounts have no weekly window to consume.
@@ -2075,8 +2117,12 @@ class AutoSwitchEngine:
         active_headroom: float | None,
         settings: AutoSwitchSettings,
         now: float,
+        landing_rise: float = 0.0,
     ) -> tuple[list[str], bool, float | None]:
         """Filter and rank OAuth candidates for this tick's trigger.
+
+        ``landing_rise`` is a pre-empt's projected rise by the next reading:
+        the burn is the user's, so it follows them onto the target.
 
         Returns ``(ordered, any_known, active_reset_ts)``. Pure — no emits,
         no state writes — so the consume-first two-phase commit can run it
@@ -2145,6 +2191,10 @@ class AutoSwitchEngine:
                 continue  # itself at its limit — never a target
             if num == no_return:
                 continue  # the account we just left; see _no_return_account
+            if trigger == PREEMPT_TRIGGER and (
+                100.0 - h + landing_rise >= preempt.switch_point(settings.threshold)
+            ):
+                continue  # would itself be pre-empted on landing
             reset_ts = (
                 _seven_day_reset_ts(usage.get(num), now) if consume_first else None
             )
@@ -2301,6 +2351,79 @@ class AutoSwitchEngine:
             five_hour_pct=five_pct,
             five_hour_reset=five_reset,
         )
+
+    def _no_headroom(self, current: str) -> TickOutcome:
+        """A pre-empt with nowhere to go: stay and keep working on what is
+        left, but say so now, while the user can still act, not after the
+        limit hits. The line stays the same tick to tick so a UI says it
+        once."""
+        self._emit(
+            NoSwitchEvent(
+                reason=NO_HEADROOM_REASON,
+                detail=(
+                    f"stay: no account with headroom; #{current} is about to "
+                    "hit its limit"
+                ),
+            )
+        )
+        return TickOutcome.BLOCKED
+
+    def _preempt_projection(
+        self, current: str, entry, value: dict | str | None, state: dict
+    ) -> preempt.Projection | None:
+        """The active account projected to its next expected reading, from
+        its own history since the last switch. None when history cannot say;
+        advisory, so it never breaks a tick."""
+        now = self.clock()
+        usage = value if isinstance(value, dict) else None
+        live = {
+            label: (pct, _parse_reset_ts(resets_at))
+            for label, pct, resets_at in oauth.relevant_windows(usage, self._models)
+        }
+        since = state.get("lastSwitchAt")
+        if isinstance(since, bool) or not isinstance(since, (int, float)):
+            since = None
+        try:
+            identity = self.switcher.account_identity(current)
+            ident = (identity.get("email", ""), identity.get("organizationUuid", ""))
+            series = self.switcher.usage_history.series({current: ident}).get(current, {})
+            if not series:
+                return None
+            times = sorted({p.t for points in series.values() for p in points})
+            horizon = preempt.next_reading_in(
+                times,
+                now=now,
+                since=since,
+                poll_in_s=self._active_poll_in(entry, usage, now),
+                feed_stale_s=self.switcher._poll_cadence().feed_stale_s,
+            )
+            return preempt.project(
+                series, live, models=self._models, now=now, since=since,
+                horizon_s=horizon,
+            )
+        except Exception as e:
+            _logger.debug("pre-empt projection unavailable: %r", e)
+            return None
+
+    def _active_poll_in(self, entry, usage: dict | None, now: float) -> float:
+        """Seconds until the engine's next poll of the active account: its
+        plan (after any gate), capped at the escalation refresh near the
+        threshold; floored at one tick."""
+        due = None if entry is None else entry.next_poll_at
+        if due is None:
+            wait = poll_policy.MIN_INTERVAL_S
+        else:
+            for gate in (entry.backoff_until, entry.held_until, entry.claim_until):
+                if gate is not None:
+                    due = max(due, gate)
+            wait = due - now
+        utilization = binding_pct(usage, self._models)
+        if (
+            utilization is None
+            or utilization >= self.settings.threshold - ESCALATION_MARGIN_PCT
+        ):
+            wait = min(wait, poll_policy.MIN_INTERVAL_S)
+        return max(wait, MIN_TICK_S)
 
     def _burn_rate(self, current: str, now: float) -> float | None:
         """How fast the user is spending weekly quota, in 7d points per hour,
@@ -2632,7 +2755,7 @@ class AutoSwitchEngine:
             atomic_write_json(self.state_path, state)
 
         _logger.log(
-            logging.WARNING if trigger in ("failover", "at-limit") else logging.INFO,
+            logging.WARNING if trigger in _LIMIT_TRIGGERS else logging.INFO,
             "Auto-switch (%s): account %s -> %s; %s",
             trigger,
             state["lastSwitchFrom"],

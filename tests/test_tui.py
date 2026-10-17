@@ -2464,6 +2464,21 @@ class TestEngineHosting:
             assert line in painted(app, "#status")
             assert said == [line]  # said once, not per tick
 
+    async def test_no_headroom_warns_on_the_prompt_once(self, tmp_path, fake_engine):
+        line = "stay: no account with headroom; #1 is about to hit its limit"
+        app = make_app(three_accounts(tmp_path))
+        async with app.run_test(size=(160, 30)) as pilot:
+            await settle(pilot)
+            engine = fake_engine.instances[0]
+            said = []
+            real_say = app.say
+            app.say = lambda text, *a, **k: (said.append(text), real_say(text, *a, **k))
+            for _ in range(3):  # the engine repeats it every tick
+                await emit(engine, NoSwitchEvent(reason="no-headroom", detail=line))
+            await settle(pilot)
+            assert "no account with headroom" in painted(app, "#status")
+            assert said == [line]
+
     async def test_relogin_stop_shows_in_the_header(self, tmp_path, fake_engine):
         line = ("stop: account 1's live login belongs to another account and its "
                 "own stored login has no refresh token; re-login needed (press l).")

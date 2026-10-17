@@ -18,7 +18,11 @@ Windows.
   By default it spends the account whose weekly quota expires soonest and
   keeps a 5-hour backup when resets are close (`autoswitch.strategy`:
   `expiring-first`, `best` or `consume-first`). Below the threshold it moves
-  only for a large gain confirmed by two readings. It fails over only when
+  only for a large gain confirmed by two readings. It moves early when the
+  active account would be over the threshold (or the limit) by its next
+  reading, judged from that account's own burn and its largest recent jump
+  per reading; such a move skips the cooldown but not the hourly cap, and
+  with nowhere to go rota says "no account with headroom". It fails over only when
   the active login is dead (never on unknown usage such as a 429), restores
   the marked account's own login if another account's login appears in its
   place (or stops and asks for a re-login), and pauses after
