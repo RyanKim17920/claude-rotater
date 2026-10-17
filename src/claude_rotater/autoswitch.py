@@ -22,12 +22,13 @@ whose refresh token is dead gets quarantined instead of activated. When the
 active account's own usage becomes unreadable for ``unhealthy_ticks``
 consecutive ticks, the engine fails over to any healthy candidate.
 
-The ``expiring-first`` strategy (the default) also moves BELOW the threshold:
-it keeps the user on the account whose weekly quota expires soonest, and
-balances 5-hour windows between accounts whose weekly resets are similar —
-see ``expiring_first.py``. Its proactive moves wait out the cooldown and,
-after a manual switch, ``manual_hold_minutes``; at the threshold it only
-re-orders the targets the usual gates admit. Every verdict, any strategy,
+The ``pace`` strategy (the default) also moves BELOW the threshold: it
+spreads usage across accounts while every account's weekly quota is safe,
+and concentrates on an account whose quota would otherwise expire unused —
+see ``pace_strategy.py``; ``expiring-first`` (``expiring_first.py``) spends
+the soonest-expiring account first. Their proactive moves wait out the
+cooldown and, after a manual switch, ``manual_hold_minutes``; at the
+threshold they only re-order the targets the usual gates admit. Every verdict, any strategy,
 is kept as one line in ``AutoSwitchEngine.last_decision``.
 
 Cooldown and quarantine persist in ``<backup_root>/autoswitch_state.json``

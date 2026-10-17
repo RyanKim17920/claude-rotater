@@ -112,7 +112,7 @@ class TestLoadSettings:
         settings_path(tmp_path).write_text(
             json.dumps({"autoswitch": {"strategy": "chaos"}})
         )
-        assert load_settings(tmp_path).strategy == "expiring-first"
+        assert load_settings(tmp_path).strategy == "pace"
 
     def test_consume_first_is_a_valid_strategy(self, tmp_path: Path):
         settings_path(tmp_path).write_text(

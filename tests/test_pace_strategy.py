@@ -3,6 +3,8 @@ other strategies, and (further down) its engine wiring."""
 
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from claude_rotater import pace_strategy as ps
@@ -438,6 +440,7 @@ from claude_rotater.settings import (  # noqa: E402
     SETTING_SPECS,
     load_settings,
     set_setting,
+    settings_path,
 )
 from tests.test_expiring_first import (  # noqa: E402
     confirmed,
@@ -623,9 +626,19 @@ class TestEngine:
 
 
 class TestSettings:
-    def test_pace_is_a_strategy_choice(self, tmp_path):
-        set_setting(tmp_path, "autoswitch.strategy", "pace")
+    def test_default_for_new_installs(self, tmp_path):
         assert load_settings(tmp_path).strategy == "pace"
+
+    def test_data_dir_without_the_key_moves_to_pace(self, tmp_path):
+        """Both of the owner's profiles never set a strategy: they follow
+        the default, so upgrading moves them from expiring-first to pace."""
+        settings_path(tmp_path).write_text(json.dumps({"autoswitch": {"threshold": 80}}))
+        assert load_settings(tmp_path).strategy == "pace"
+
+    @pytest.mark.parametrize("kept", ["expiring-first", "best", "consume-first"])
+    def test_an_explicit_choice_is_kept(self, tmp_path, kept):
+        set_setting(tmp_path, "autoswitch.strategy", kept)
+        assert load_settings(tmp_path).strategy == kept
 
     def test_margin_spec(self, tmp_path):
         spec = SETTING_SPECS["autoswitch.paceMargin"]

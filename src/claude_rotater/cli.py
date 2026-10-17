@@ -247,7 +247,9 @@ Defaults live in settings.json in the backup root; flags override them.
         choices=STRATEGY_CHOICES,
         default=None,
         help=(
-            "Target selection: 'expiring-first' (default: spend the account "
+            "Target selection: 'pace' (default: spread usage while every "
+            "account's weekly quota is safe, concentrate on one whose quota "
+            "would otherwise expire), 'expiring-first' (spend the account "
             "whose weekly quota expires soonest, balancing 5h windows when "
             "resets are similar), 'best' (most quota left, at the threshold "
             "only) or 'consume-first' (strictly the soonest weekly reset)"

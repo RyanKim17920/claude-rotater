@@ -15,10 +15,15 @@ Windows.
   behind `h`. Estimates are marked by `~`, a lighter tint or a dotted line
   and coloured by outcome: green under the threshold, yellow close, red over.
 - Automatic switching while the TUI is open, or headless with `rota auto`.
-  By default it spends the account whose weekly quota expires soonest and
-  keeps a 5-hour backup when resets are close (`autoswitch.strategy`:
-  `expiring-first`, `best` or `consume-first`). Below the threshold it moves
-  only for a large gain confirmed by two readings. It moves early when the
+  By default (`pace`) it spreads usage while every account's weekly quota is
+  safe, moving only when the 5-hour window gets tight and keeping a fresh
+  5-hour backup, and concentrates on an account once the pace its weekly
+  headroom needs before its reset leads the rest by `autoswitch.paceMargin`
+  (1.5x), unless your own burn would use it up anyway. Every verdict reads
+  like `switch → #2: #2 resets in 9h with 40% left (needs 4.4%/h) …`. Other
+  strategies: `expiring-first`, `best` or `consume-first`
+  (`autoswitch.strategy`). Below the threshold a move is confirmed by two
+  readings. It moves early when the
   active account would be over the threshold (or the limit) by its next
   reading, judged from that account's own burn and its largest recent jump
   per reading; such a move skips the cooldown but not the hourly cap, and

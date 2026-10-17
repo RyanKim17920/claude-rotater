@@ -607,16 +607,9 @@ class TestDecisionFromEvent:
 
 
 class TestSettings:
-    def test_default_for_new_installs(self, tmp_path):
+    def test_still_selectable(self, tmp_path):
+        set_setting(tmp_path, "autoswitch.strategy", "expiring-first")
         assert load_settings(tmp_path).strategy == "expiring-first"
-
-    def test_data_dir_without_the_key_follows_the_new_default(self, tmp_path):
-        settings_path(tmp_path).write_text(json.dumps({"autoswitch": {"threshold": 80}}))
-        assert load_settings(tmp_path).strategy == "expiring-first"
-
-    def test_explicit_best_is_kept(self, tmp_path):
-        set_setting(tmp_path, "autoswitch.strategy", "best")
-        assert load_settings(tmp_path).strategy == "best"
 
     @pytest.mark.parametrize(
         "key, default, lo, hi",
@@ -642,5 +635,5 @@ class TestSettings:
 
     def test_strategy_choices_lead_with_the_default(self):
         spec = SETTING_SPECS["autoswitch.strategy"]
-        assert spec.choices[0] == AutoSwitchSettings().strategy == "expiring-first"
+        assert spec.choices[0] == AutoSwitchSettings().strategy == "pace"
         assert set(spec.choices) == {"expiring-first", "pace", "best", "consume-first"}

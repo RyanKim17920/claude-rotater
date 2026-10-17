@@ -56,7 +56,7 @@ class AutoSwitchSettings:
     # or "consume-first" (soonest weekly reset, strictly). A data dir that
     # never set the key follows this default; an explicit value in
     # settings.json is kept.
-    strategy: str = "expiring-first"
+    strategy: str = "pace"
     include_api_key_accounts: bool = False
     unhealthy_ticks: int = 3
     # Comma-separated model display name(s) (e.g. "Fable" or "Fable,Opus"),
@@ -213,7 +213,7 @@ def _cadence_specs() -> tuple[SettingSpec, ...]:
 
 # Auto-switch strategies, the default first. cli.py's --strategy reads this
 # too, so the flag and the setting accept the same names.
-STRATEGY_CHOICES: tuple[str, ...] = ("expiring-first", "pace", "best", "consume-first")
+STRATEGY_CHOICES: tuple[str, ...] = ("pace", "expiring-first", "best", "consume-first")
 
 # settings.json uses camelCase (matching the repo's other JSON artifacts);
 # dataclass fields stay snake_case.

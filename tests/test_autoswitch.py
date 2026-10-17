@@ -106,9 +106,9 @@ class EngineHarness:
             self.switcher.platform = Platform.LINUX
             self.switcher._setup_directories()
             self.switcher._init_sequence_file()
-        # The engine suite predates expiring-first becoming the default and
-        # pins the threshold policy it was written against; expiring-first
-        # has its own suite (test_expiring_first.py).
+        # The engine suite predates the below-threshold strategies becoming
+        # the default and pins the threshold policy it was written against;
+        # pace and expiring-first have their own suites.
         settings_kwargs.setdefault("strategy", "best")
         self.settings = AutoSwitchSettings(**settings_kwargs)
         self.events: list = []
