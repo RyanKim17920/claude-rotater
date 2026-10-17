@@ -46,7 +46,7 @@ from textual.containers import Horizontal
 from textual.screen import Screen
 from textual.widgets import Button, ListItem, ListView, RichLog, Static
 
-from claude_rotater import oauth
+from claude_rotater import oauth, profiles
 from claude_rotater.autoswitch import AutoSwitchEvent, pct_label
 from claude_rotater.estimator import (
     WINDOW_LEN_S,
@@ -205,14 +205,18 @@ def status_text(
     palette: Palette = Palette.DARK,
     feed: str | None = None,
     over_threshold: bool = False,
+    profile: str | None = None,
 ) -> Text:
-    """`` rota   auto on   ● feed live   switch held: cooldown 4m      ~ = estimate``.
+    """`` rota · work   auto on   ● feed live   switch held: cooldown 4m      ~ = estimate``.
 
     Only the engine state, the feed state and, when a switch is blocked,
     why; the estimate legend sits at the right edge. The note goes first
     when the width runs short, then the legend."""
     head = Text(no_wrap=True, overflow="ellipsis")
     head.append(brand_chip(palette))
+    if profile:  # a named profile, so it is obvious which one is open
+        head.append(" · ", style=palette.muted)
+        head.append(profile, style=f"bold {palette.accent}")
     head.append("  auto ", style=palette.muted)
     if status.running:
         head.append("on", style=f"bold {palette.accent}")
@@ -1108,6 +1112,7 @@ class MainScreen(Screen):
             palette=self.palette,
             feed=self.app.feed_state or None,
             over_threshold=threshold is not None and any(p >= threshold for p in pcts),
+            profile=profiles.active_name(),
         )
 
     def row_text(self, number: str, width: int) -> Text:

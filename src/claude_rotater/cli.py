@@ -497,6 +497,55 @@ def _switch(switcher: ClaudeAccountSwitcher, args: argparse.Namespace) -> dict |
     return payload
 
 
+def _profile_command(argv: list[str]) -> None:
+    """Handle `rota profile list|add|remove`: the registry of profiles that
+    rota picks by the current directory (see claude_rotater.profiles)."""
+    from claude_rotater import profiles
+
+    parser = argparse.ArgumentParser(
+        prog=f"{_prog_name()} profile",
+        description=(
+            "Profiles rota opens by itself when started inside one of their "
+            "directories. ROTA_HOME, when set, always wins."
+        ),
+    )
+    sub = parser.add_subparsers(dest="action", required=True)
+    sub.add_parser("list", help="show the registered profiles")
+    p_add = sub.add_parser(
+        "add",
+        help="register a profile (data and config dirs default to $ROTA_HOME "
+        "and $CLAUDE_CONFIG_DIR)",
+    )
+    p_add.add_argument("name")
+    p_add.add_argument("--root", action="append", required=True, metavar="DIR",
+                       help="a directory (and its subdirectories) that opens this profile")
+    p_add.add_argument("--data-dir", default=os.environ.get(paths.DATA_HOME_ENV))
+    p_add.add_argument("--config-dir", default=os.environ.get("CLAUDE_CONFIG_DIR"),
+                       help="exactly as Claude Code is started with it")
+    p_rm = sub.add_parser("remove", help="unregister a profile")
+    p_rm.add_argument("name")
+    args = parser.parse_args(argv)
+
+    def show(p) -> None:
+        print(f"{p.name}: data {p.data_dir}, config {p.claude_config_dir}, "
+              f"roots {', '.join(p.roots)}")
+
+    try:
+        if args.action == "list":
+            for p in profiles.load():
+                show(p)
+        elif args.action == "add":
+            if not args.data_dir or not args.config_dir:
+                parser.error("set --data-dir and --config-dir (or ROTA_HOME and CLAUDE_CONFIG_DIR)")
+            show(profiles.add(args.name, args.data_dir, args.config_dir, args.root))
+        elif not profiles.remove(args.name):
+            error(f"Error: no profile named {args.name}")
+            sys.exit(1)
+    except profiles.ProfileError as e:
+        error(f"Error: {e}")
+        sys.exit(1)
+
+
 def main() -> None:
     """Main entry point for the CLI."""
     force_utf8_output()
@@ -509,6 +558,12 @@ def main() -> None:
         from claude_rotater.feed import main as feed_main
 
         sys.exit(feed_main(argv[1:]))
+    if argv and argv[0] == "profile":
+        _profile_command(argv[1:])
+        return
+    from claude_rotater import profiles
+
+    profiles.apply()  # before anything resolves the data or config dir
     try:
         from claude_rotater.appearance import cli_should_probe, cli_theme
         # `run` execs a child that takes over the terminal, and `--json`
