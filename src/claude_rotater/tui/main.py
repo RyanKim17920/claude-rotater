@@ -24,7 +24,7 @@ Layout, top to bottom, as tall as the terminal allows:
   ``h`` swaps in the long-term view (past 5h peaks, the 7d curve across
   weeks);
 - a 3-line log of recent non-routine engine events (hidden until the first);
-- the action bar: the everyday keys and ``?`` for the rest.
+- the action bar: the five everyday keys and ``? more`` for the full list.
 
 One convention for estimates everywhere: measured values are plain, anything
 extrapolated is told apart by its look (``~`` prefix, a lighter tint in a
@@ -920,6 +920,16 @@ def account_title(acc: AccountSnapshot, palette: Palette, suffix: str = "") -> T
     return text
 
 
+def history_title(acc: AccountSnapshot, palette: Palette) -> Text:
+    """``history  me@x.com      h/esc back``: which view, whose, the way out."""
+    text = Text(no_wrap=True, overflow="ellipsis")
+    text.append("history", style=f"bold {palette.accent}")
+    text.append("  ")
+    text.append(account_title(acc, palette))
+    text.append("   h/esc back", style=palette.muted)
+    return text
+
+
 def _side_by_side(left: list[Text], right: list[Text], col_w: int) -> list[Text]:
     out = []
     for i in range(max(len(left), len(right))):
@@ -984,7 +994,7 @@ def long_term_lines(
     and the 7d usage curve over up to 30 days (as far back as history goes)."""
     if acc is None or height <= 0:
         return []
-    lines = [account_title(acc, palette, "history · h for the charts")] if title else []
+    lines = [history_title(acc, palette)] if title else []
     if long_term is None:
         lines.append(Text("loading history…", style=palette.muted))
         return lines[:height]
@@ -1103,24 +1113,43 @@ class ActionButton(Button):
 
 
 ACTIONS: tuple[tuple[str, str, str, str], ...] = (
-    # (button id, key glyph, word, screen action): the everyday keys only
+    # (button id, key glyph, word, screen action): the five everyday keys
     ("act-switch", "⏎", "switch", "switch_selected"),
-    ("act-login", "l", "login", "login_selected"),
-    ("act-config", "c", "config", "app.open_config"),
+    ("act-add", "a", "add", "app.add"),
     ("act-history", "h", "history", "toggle_long"),
+    ("act-config", "c", "config", "app.open_config"),
+    ("act-quit", "q", "quit", "app.quit"),
     ("act-help", "?", "more", "help"),
 )
 
-# The rest, listed by ``?``; every key works directly from the main page.
-MORE_KEYS: tuple[tuple[str, str], ...] = (
-    ("a", "add the current Claude Code login"),
-    ("t", "add a setup-token or API key"),
-    ("d", "disable / enable the highlighted account"),
-    ("x", "remove the highlighted account"),
-    ("s", "set up the statusline feed"),
-    ("f", "refresh usage now"),
-    ("ctrl+t", "theme"),
-    ("q", "quit"),
+# Every key, listed by ``?`` in two columns; each works from the main page.
+KEY_COLUMNS: tuple[tuple[tuple[str, tuple[tuple[str, str], ...]], ...], ...] = (
+    (
+        ("accounts", (
+            ("↑↓ jk", "move"),
+            ("enter", "switch to it"),
+            ("a", "add an account"),
+            ("l", "log in (browser)"),
+            ("t", "paste a token"),
+            ("d", "turn off / on"),
+            ("x", "remove"),
+        )),
+    ),
+    (
+        ("view", (
+            ("h", "history (esc back)"),
+            ("f", "refresh now"),
+            ("ctrl+t", "theme"),
+        )),
+        ("setup", (
+            ("c", "config"),
+            ("s", "statusline feed"),
+        )),
+        ("app", (
+            ("?", "this list"),
+            ("q", "quit"),
+        )),
+    ),
 )
 
 
@@ -1134,7 +1163,7 @@ class MainScreen(Screen):
 
     BINDINGS = [
         Binding("l", "login_selected", "Log in", show=False),
-        Binding("a", "app.add_current", "Add login", show=False),
+        Binding("a", "app.add", "Add", show=False),
         Binding("t", "app.add_token", "Add token", show=False),
         Binding("d", "toggle_selected", "Disable/enable", show=False),
         Binding("x,delete", "remove_selected", "Remove", show=False),
@@ -1144,6 +1173,7 @@ class MainScreen(Screen):
         Binding("f", "app.refresh_full", "Refresh", show=False),
         Binding("question_mark", "help", "More keys", show=False),
         Binding("q", "app.quit", "Quit", show=False),
+        Binding("escape", "leave_history", "Back", show=False),
         Binding("j", "cursor_down", show=False),
         Binding("k", "cursor_up", show=False),
     ]
@@ -1283,11 +1313,7 @@ class MainScreen(Screen):
         if snap is None:
             return Text("loading…", style=self.palette.muted)
         if not snap.accounts:
-            return Text(
-                "No managed accounts yet. Press a to add your current Claude Code "
-                "login, or t to add a setup-token / API key.",
-                style=self.palette.muted,
-            )
+            return Text("No managed accounts yet. Press a to add one.", style=self.palette.muted)
         number = self.selected_number
         acc = self.account(number)
         budget = self.detail_budget()
@@ -1389,8 +1415,12 @@ class MainScreen(Screen):
     def action_toggle_long(self) -> None:
         self.app.toggle_long_view()
 
+    def action_leave_history(self) -> None:
+        if self.app.long_view:
+            self.app.toggle_long_view()
+
     def action_help(self) -> None:
-        self.app.push_screen(KeysModal(MORE_KEYS))
+        self.app.push_screen(KeysModal(KEY_COLUMNS))
 
     def action_switch_selected(self) -> None:
         number = self.selected_number

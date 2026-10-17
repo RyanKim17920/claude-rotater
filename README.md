@@ -45,8 +45,9 @@ rota run <num|email> [-- ...]  # run Claude Code as an account, this terminal on
 rota auto                      # headless auto-switch loop (see rota auto -h)
 ```
 
-Add accounts in the TUI: `a` stores the account Claude Code is logged in with
-now, `l` logs another one in. Do not use `/logout` to change accounts; it can
+Add accounts in the TUI: `a` asks how (log in with the browser, use the
+account Claude Code is logged in with now, or paste a token); `l` and `t`
+jump straight to logging in and pasting a token. Do not use `/logout` to change accounts; it can
 revoke the stored refresh token.
 
 ### Keys
@@ -54,15 +55,16 @@ revoke the stored refresh token.
 | Key | Action |
 |-----|--------|
 | `enter` | switch to the highlighted account |
+| `a` | add an account: log in, use the current login, or paste a token |
 | `l` | log an account in (or re-log one marked *re-login needed*) |
-| `a` / `t` | add the current login / add a setup-token or API key |
-| `d` | disable or enable an account for rotation |
+| `t` | add a setup-token or API key |
+| `d` | turn an account off or on for rotation |
 | `x` | remove an account |
 | `f` | refresh usage now |
-| `h` | history: past 5h peaks and the 7d curve across weeks |
-| `?` | the keys not on the action bar |
+| `h` / `esc` | history: past 5h peaks and the 7d curve across weeks, and back |
+| `?` | every key, grouped |
 | `s` | set up or remove the statusline feed |
-| `c` | settings (`↑`/`↓` select, `←`/`→` change, `enter` exact value, `esc` back) |
+| `c` | settings (`↑`/`↓` select, `←`/`→` change, digits or `enter` exact value, `esc` back) |
 | `ctrl+t` | theme |
 | `q` | quit |
 

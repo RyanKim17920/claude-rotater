@@ -98,7 +98,7 @@ Screen {
 
 /* -- modals ----------------------------------------------------------------- */
 
-ConfirmModal, AddTokenModal, OutputModal, KeysModal {
+ConfirmModal, AddTokenModal, OutputModal, KeysModal, AddModal {
     align: center middle;
     background: $background 60%;
 }
@@ -115,6 +115,18 @@ ConfirmModal, AddTokenModal, OutputModal, KeysModal {
 
 .modal-box-wide {
     width: 90;
+}
+
+/* The key list and the add chooser size to their content, so they fit a
+   60x20 terminal whole. */
+#keys-box, #add-box {
+    width: auto;
+    max-width: 100%;
+    max-height: 100%;
+}
+
+#keys-box > *, #add-box > * {
+    width: auto;
 }
 
 .modal-title {

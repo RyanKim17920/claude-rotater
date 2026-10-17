@@ -54,7 +54,7 @@ from claude_rotater.tui.main import (
     LongTerm,
     MainScreen,
 )
-from claude_rotater.tui.modals import AddTokenModal, ConfirmModal, OutputModal, TokenForm
+from claude_rotater.tui.modals import AddModal, AddTokenModal, ConfirmModal, OutputModal, TokenForm
 from claude_rotater.tui.theme import ROTA_DARK, ROTA_LIGHT
 from claude_rotater.usage_history import Point
 
@@ -638,25 +638,26 @@ class RotaApp(App):
                 partial(self.switcher.remove_account, number, assume_yes=True),
             )
 
-    def action_add_current(self) -> None:
-        self.push_screen(
-            ConfirmModal(
-                "Back up the current Claude Code login as a managed account?\n\n"
-                "If this account is already managed, its stored credentials "
-                "are refreshed in place.",
-                title="Add account",
-                yes_label="Add",
-            ),
-            self._on_add_confirm,
-        )
+    def action_add(self) -> None:
+        """``a``: choose how to add an account (log in, current login, token)."""
+        self.push_screen(AddModal(), self._on_add_choice)
 
-    def _on_add_confirm(self, confirmed: bool | None) -> None:
-        if confirmed:
-            self._start_action(
-                "Add current login",
-                partial(self.switcher.add_account),
-                show_output=True,
-            )
+    def _on_add_choice(self, choice: str | None) -> None:
+        if choice == "login":
+            self.start_login()
+        elif choice == "current":
+            self._add_current()  # picked by name in the chooser: no second question
+        elif choice == "token":
+            self.action_add_token()
+
+    def _add_current(self) -> None:
+        """Back up the current Claude Code login as a managed account; an
+        account already managed has its stored credentials refreshed."""
+        self._start_action(
+            "Add current login",
+            partial(self.switcher.add_account),
+            show_output=True,
+        )
 
     LOGIN_BANNER = (
         "\nrota: logging in {who} in a separate profile.\n"
@@ -671,6 +672,8 @@ class RotaApp(App):
         if self.busy:
             self.notify("Another action is still running", severity="warning")
             return
+        # Seen at once, and still on screen when the app comes back.
+        self.notify(f"Logging in {email or 'an account'}…", title="Log in", timeout=4)
         stage = self._login_factory(self.switcher.backup_dir)
         try:
             with self.suspend():

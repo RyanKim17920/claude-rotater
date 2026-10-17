@@ -159,27 +159,113 @@ class OutputModal(ModalScreen[None]):
         self.dismiss(None)
 
 
+KeyGroup = tuple[str, tuple[tuple[str, str], ...]]  # (heading, ((key, words), ...))
+_KEY_W = 7  # "ctrl+t "
+_COL_GAP = 3
+
+
+def keys_text(columns: tuple[tuple[KeyGroup, ...], ...]) -> Text:
+    """Key groups laid out in side-by-side columns: a dim heading per group,
+    then one ``key  words`` line per key."""
+    rendered: list[list[Text]] = []
+    for groups in columns:
+        lines: list[Text] = []
+        for heading, keys in groups:
+            if lines:
+                lines.append(Text())
+            lines.append(Text(heading, style="dim"))
+            for key, words in keys:
+                line = Text()
+                line.append(f"{key:<{_KEY_W}}", style="bold")
+                line.append(words)
+                lines.append(line)
+        rendered.append(lines)
+    widths = [max((line.cell_len for line in col), default=0) for col in rendered]
+    body = Text()
+    for i in range(max((len(col) for col in rendered), default=0)):
+        if i:
+            body.append("\n")
+        for c, col in enumerate(rendered):
+            cell = col[i].copy() if i < len(col) else Text()
+            if c < len(rendered) - 1:
+                cell.pad_right(widths[c] - cell.cell_len + _COL_GAP)
+            body.append(cell)
+    body.rstrip()
+    return body
+
+
 class KeysModal(ModalScreen[None]):
-    """The keys the action bar leaves out, one per line. Any listed key
-    still works straight from the main page; this only reminds."""
+    """Every key the main page takes, grouped. Any listed key works straight
+    from the main page; this only reminds. The groups sit in columns so the
+    whole list fits a 60x20 terminal."""
 
     BINDINGS = [Binding("escape,question_mark,q,enter", "dismiss_modal", "Close", show=False)]
 
-    def __init__(self, keys: tuple[tuple[str, str], ...]) -> None:
+    def __init__(self, columns: tuple[tuple[KeyGroup, ...], ...]) -> None:
         super().__init__()
-        self._keys = keys
+        self._columns = columns
 
     def compose(self) -> ComposeResult:
-        body = Text()
-        for i, (key, words) in enumerate(self._keys):
-            if i:
-                body.append("\n")
-            body.append(f"{key:<8}", style="bold")
-            body.append(words)
-        with Vertical(classes="modal-box"):
-            yield Label("More keys", classes="modal-title")
-            yield Static(body, classes="modal-body", id="keys-body")
+        with Vertical(classes="modal-box", id="keys-box"):
+            yield Label("Keys", classes="modal-title")
+            yield Static(keys_text(self._columns), classes="modal-body", id="keys-body")
             yield Static("esc / ? close", classes="modal-hint")
 
     def action_dismiss_modal(self) -> None:
+        self.dismiss(None)
+
+
+ADD_CHOICES: tuple[tuple[str, str, str], ...] = (
+    # (key, words, result)
+    ("l", "log in with the browser", "login"),
+    ("a", "use the current Claude Code login", "current"),
+    ("t", "paste a setup-token or API key", "token"),
+)
+
+
+class AddModal(ModalScreen["str | None"]):
+    """The three ways to add an account. Dismisses with ``"login"``,
+    ``"current"`` or ``"token"`` (or None on esc): a key picks one at once,
+    ↑/↓ and enter work too."""
+
+    BINDINGS = [
+        Binding("escape", "cancel", "Cancel", show=False),
+        Binding("up,k", "move(-1)", show=False),
+        Binding("down,j", "move(1)", show=False),
+        Binding("enter", "pick_current", show=False),
+        *(Binding(key, f"pick('{result}')", show=False) for key, _w, result in ADD_CHOICES),
+    ]
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.cursor = 0
+
+    def compose(self) -> ComposeResult:
+        with Vertical(classes="modal-box", id="add-box"):
+            yield Label("Add an account", classes="modal-title")
+            yield Static(self._choices(), id="add-choices")
+            yield Static("key or ↑↓ enter  ·  esc cancel", classes="modal-hint")
+
+    def _choices(self) -> Text:
+        text = Text()
+        for i, (key, words, _r) in enumerate(ADD_CHOICES):
+            if i:
+                text.append("\n")
+            mark = "›" if i == self.cursor else " "
+            text.append(f"{mark} ", style="bold")
+            text.append(f"{key}  ", style="bold")
+            text.append(words, style="bold" if i == self.cursor else "")
+        return text
+
+    def action_move(self, delta: int) -> None:
+        self.cursor = (self.cursor + delta) % len(ADD_CHOICES)
+        self.query_one("#add-choices", Static).update(self._choices())
+
+    def action_pick_current(self) -> None:
+        self.dismiss(ADD_CHOICES[self.cursor][2])
+
+    def action_pick(self, result: str) -> None:
+        self.dismiss(result)
+
+    def action_cancel(self) -> None:
         self.dismiss(None)

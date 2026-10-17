@@ -1328,8 +1328,8 @@ class TestMainPage:
             assert "estimate" not in status and "~" not in status  # no legend: titles say it
             assert "90%" not in status
             labels = [str(b.label) for b in app.screen.query(Button)]
-            assert len(labels) == 5
-            for word in ("switch", "login", "config", "history", "more"):
+            assert len(labels) == 6  # the five everyday keys and "? more"
+            for word in ("switch", "add", "history", "config", "quit", "more"):
                 assert any(word in label for label in labels)
             # chips never steal the keyboard from the list
             assert all(not b.can_focus for b in app.screen.query(Button))
@@ -1436,20 +1436,31 @@ class TestMainPage:
             await pilot.pause()
             assert rows["3"].styles.background.a > 0  # hover tints too
 
-    async def test_question_mark_lists_the_other_keys(self, tmp_path):
+    @pytest.mark.parametrize("size", [(60, 20), (120, 40)])
+    async def test_question_mark_lists_every_key_grouped(self, tmp_path, size):
+        import re
+
         from claude_rotater.tui.main import MainScreen
         from claude_rotater.tui.modals import KeysModal
 
         app = make_app(three_accounts(tmp_path))
-        async with app.run_test(size=(120, 40)) as pilot:
+        async with app.run_test(size=size) as pilot:
             await settle(pilot)
             await pilot.press("question_mark")
             await pilot.pause()
             assert isinstance(app.screen, KeysModal)
             body = app.screen.query_one("#keys-body").render().plain
-            for key, word in (("a", "add"), ("t", "token"), ("d", "disable"), ("x", "remove"),
-                              ("s", "statusline"), ("q", "quit")):
-                assert any(line.startswith(key) and word in line for line in body.splitlines()), key
+            for key, word in (("enter", "switch"), ("a", "add"), ("l", "log in"), ("t", "paste a token"),
+                              ("d", "turn off"), ("x", "remove"), ("c", "config"), ("h", "history"),
+                              ("s", "statusline"), ("f", "refresh"), ("q", "quit"), ("ctrl+t", "theme"),
+                              ("?", "this list")):
+                assert re.search(rf"(^|   ){re.escape(key)} +{word}", body, re.M), key
+            for heading in ("accounts", "view", "setup"):
+                assert heading in body
+            # the whole list fits the terminal, box and all
+            box = app.screen.query_one("#keys-box")
+            assert box.region.right <= size[0] and box.region.bottom <= size[1]
+            assert app.screen.query_one("#keys-body").region.height == len(body.splitlines())
             await pilot.press("escape")
             await pilot.pause()
             assert isinstance(app.screen, MainScreen)
@@ -1662,19 +1673,38 @@ class TestMainPage:
 
             assert [r.number for r in app.screen.query(AccountRow)] == ["1", "3"]
 
-    async def test_a_adds_current_login_after_confirm(self, tmp_path):
-        from claude_rotater.tui.modals import ConfirmModal, OutputModal
+    async def test_a_opens_the_add_chooser_and_adds_the_current_login(self, tmp_path):
+        from claude_rotater.tui.modals import AddModal, OutputModal
 
         app = make_app(three_accounts(tmp_path))
         async with app.run_test(size=(120, 40)) as pilot:
             await settle(pilot)
             await pilot.press("a")
             await pilot.pause()
-            assert isinstance(app.screen, ConfirmModal)
-            await pilot.press("y")
+            assert isinstance(app.screen, AddModal)
+            text = app.screen.query_one("#add-choices").render().plain
+            for words in ("log in with the browser", "current Claude Code login", "token"):
+                assert words in text
+            await pilot.press("escape")
+            await pilot.pause()
+            assert not isinstance(app.screen, AddModal) and fake_calls(app) == []
+            await pilot.press("a", "a")  # picked by name: no second question
             await settle(pilot)
             assert ("add", None, False) in fake_calls(app)
             assert isinstance(app.screen, OutputModal)
+
+    async def test_add_chooser_by_arrows_and_the_footer_chip(self, tmp_path):
+        from claude_rotater.tui.modals import AddModal, AddTokenModal
+
+        app = make_app(three_accounts(tmp_path))
+        async with app.run_test(size=(120, 40)) as pilot:
+            await settle(pilot)
+            await pilot.click("#act-add")
+            await pilot.pause()
+            assert isinstance(app.screen, AddModal)
+            await pilot.press("down", "down", "enter")  # the third choice: paste a token
+            await pilot.pause()
+            assert isinstance(app.screen, AddTokenModal)
 
     async def test_t_adds_token(self, tmp_path):
         from textual.widgets import Input
@@ -1792,13 +1822,24 @@ class TestLoginAction:
             await settle(pilot)
             assert FakeStage.instances[0].events[0] == ("authenticate", "dead@y.com")
 
-    async def test_login_button(self, tmp_path, monkeypatch):
+    async def test_login_from_the_add_chooser(self, tmp_path, monkeypatch):
         app, _ = login_app(three_accounts(tmp_path), monkeypatch)
         async with app.run_test(size=(120, 40)) as pilot:
             await settle(pilot)
-            await pilot.click("#act-login")
+            await pilot.click("#act-add")
+            await pilot.pause()
+            await pilot.press("l")
             await settle(pilot)
             assert FakeStage.instances and ("login_import",) in fake_calls(app)
+
+    async def test_l_says_it_is_logging_in_at_once(self, tmp_path, monkeypatch):
+        app, _ = login_app(three_accounts(tmp_path), monkeypatch, suspend_ok=False)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await settle(pilot)
+            await pilot.press("l")
+            await settle(pilot)
+            messages = [n.message for n in app._notifications]
+            assert any("Logging in" in m for m in messages), messages
 
     @pytest.mark.parametrize("cancelled", [True, False], ids=["cancel", "failure"])
     async def test_cancel_or_failure_cleans_up_and_imports_nothing(self, tmp_path, monkeypatch, cancelled):
@@ -2567,6 +2608,24 @@ class TestLongTermView:
             assert not app.long_view
             detail = painted(app, "#detail")
             assert "5h peaks" not in detail and "~limit in 2h" in detail
+
+    async def test_history_title_and_esc_back(self, tmp_path):
+        fake = three_accounts(tmp_path)
+        with_history(fake, long_history(time.time()))
+        app = make_app(fake)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await settle(pilot)
+            await pilot.press("h")
+            await settle(pilot)
+            title = painted(app, "#detail").splitlines()[0]
+            assert title.startswith("history  me@x.com") and title.rstrip().endswith("h/esc back")
+            assert "for the charts" not in title
+            await pilot.press("escape")
+            await settle(pilot)
+            assert not app.long_view
+            await pilot.press("escape")  # on the charts esc does nothing
+            await settle(pilot)
+            assert not app.long_view
 
     async def test_history_button(self, tmp_path):
         fake = three_accounts(tmp_path)
