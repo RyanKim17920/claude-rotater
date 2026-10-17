@@ -150,6 +150,13 @@ def test_switching_while_claude_rewrites_its_login(sandbox: Sandbox, profile):
         for target in targets:
             result = sandbox.rota("switch", target, config_dir=config_dir)
             assert result.returncode == 0, explain(result) + writer.diagnostics()
+            if target == "1" and "alice" not in latest_tokens(writer):
+                # Rounds are ~1s apart and a switch takes less, so alice's
+                # short turns can all fall between rounds: wait for one
+                # round on her login (the next switch still races the
+                # following round), or the backup check below has nothing
+                # of hers to check.
+                writer.wait_for_writes(1)
         writer.wait_for_writes(2)  # rounds on the final login too
 
     assert_coherent(sandbox, config_dir, writer, BOB)
