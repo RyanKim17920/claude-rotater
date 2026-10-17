@@ -462,6 +462,7 @@ def window_cell(
 
 
 PROJECTION_HATCH = "░"
+PROJECTION_DIVIDER = "│"  # "now": the measured fill ends, the hatch begins
 
 
 def projection_bar(
@@ -473,9 +474,10 @@ def projection_bar(
     palette: Palette,
     stale: bool = False,
 ) -> Text:
-    """``███▌░░░▕``: the measured pct as a solid fill, then a dim hatch out to
-    ``projected`` (the estimate at the reset), turning the warning colour
-    where it runs past the threshold; the threshold tick where nothing covers it."""
+    """``███▌│░░▕``: the measured pct as a solid fill, a divider where the
+    measurement ends, then a dim hatch out to ``projected`` (the estimate at
+    the reset), turning the warning colour where it runs past the threshold;
+    the threshold tick (``▕``, warning colour) where nothing covers it."""
     text = Text(no_wrap=True)
     if width <= 0:
         return text
@@ -496,6 +498,8 @@ def projection_bar(
             text.append(BAR_FULL, style=fill)
         elif i == full and part:
             text.append(BAR_EIGHTHS[part], style=fill)
+        elif i == measured_end and proj_end - measured_end >= 2:  # one cell stays hatch
+            text.append(PROJECTION_DIVIDER, style=f"{palette.foreground} {track}")
         elif i < proj_end:
             over = crosses and tick_at is not None and i >= tick_at
             color = palette.sev_warn if over else palette.foreground

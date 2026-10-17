@@ -885,12 +885,13 @@ class TestProjectionBar:
 
     def test_measured_fill_then_hatch_then_tick(self):
         bar = self._bar(30.0, 60.0)
-        assert bar.plain == "███░░░  ▕ "
-        assert not is_dim(bar, "███") and is_dim(bar, "░░░")
+        assert bar.plain == "███│░░  ▕ "  # the divider marks now, the tick the threshold
+        assert not is_dim(bar, "███") and is_dim(bar, "░░") and not is_dim(bar, "│")
+        assert not any(SEV_WARN in st for st in styles_of(bar, "│"))
 
     def test_crossing_the_threshold_turns_the_overflow_warning(self):
         bar = self._bar(50.0, 100.0)
-        assert bar.plain == "█████░░░░░"
+        assert bar.plain == "█████│░░░░"
         over = [str(sp.style) for sp in bar.spans if sp.start == 9]
         under = [str(sp.style) for sp in bar.spans if sp.start == 5]
         assert any(SEV_WARN in st and "dim" in st for st in over)
@@ -899,6 +900,9 @@ class TestProjectionBar:
     def test_no_projection_is_measured_only(self):
         assert self._bar(30.0, None).plain == "███     ▕ "
         assert self._bar(30.0, 20.0).plain == "███     ▕ "  # never hatches backwards
+
+    def test_divider_follows_a_partial_cell(self):
+        assert self._bar(35.0, 70.0).plain.startswith("███▌│░░")
 
     def test_partial_cell_is_an_eighth_block(self):
         assert self._bar(35.0, None).plain.startswith("███▌")
