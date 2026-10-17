@@ -46,7 +46,7 @@ from claude_rotater.poll_policy import load_cadence
 from claude_rotater.snapshot_source import account_identity
 from claude_rotater.switcher import ClaudeAccountSwitcher
 from claude_rotater.tui.config import ConfigScreen
-from claude_rotater.tui.data import ActionResult, SnapshotSource, format_duration, run_action
+from claude_rotater.tui.data import ActionResult, SnapshotSource, compact_duration, run_action
 from claude_rotater.tui.main import (
     LONG_5H_SPAN_S,
     LONG_7D_SPAN_S,
@@ -505,11 +505,11 @@ class RotaApp(App):
         if self.snapshot is not None:
             age = max(0.0, now - self.snapshot.taken_at)
             if age >= self.SNAPSHOT_AGE_NOTE_S:
-                parts.append(f"snapshot {format_duration(age)} ago")
+                parts.append(f"snapshot {compact_duration(age)} ago")
         if self._normal_refreshing and self._normal_started_at is not None:
             elapsed = now - self._normal_started_at
             if elapsed >= self.POLL_INTERVAL_S:
-                parts.append(f"refreshing {format_duration(elapsed)}")
+                parts.append(f"refreshing {compact_duration(elapsed)}")
         self.refresh_status = " · ".join(parts)
 
     def request_refresh(self, *, full: bool = False) -> None:

@@ -173,7 +173,7 @@ def format_duration(seconds: float) -> str:
 
 
 def compact_duration(seconds: float) -> str:
-    """Table-width duration, no spaces: "<1m", "45m", "1h59m", "2d23h".
+    """Table-width duration, no spaces: "<1m", "45m", "1h59m", "2d", "2d23h".
 
     At most 6 cells ("23h59m"), so a column of them lines up."""
     s = max(0, int(seconds))
@@ -185,7 +185,7 @@ def compact_duration(seconds: float) -> str:
         h, m = divmod(s // 60, 60)
         return f"{h}h{m:02d}m"
     d, h = divmod(s // 3600, 24)
-    return f"{d}d{h}h"
+    return f"{d}d{h}h" if h else f"{d}d"
 
 
 def format_age(age_s: float | None) -> str | None:

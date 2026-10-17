@@ -142,28 +142,21 @@ def outcome_color(projected: float | None, threshold: float | None, palette: Pal
 
 
 def rough_duration(seconds: float) -> str:
-    """An estimated duration at the precision it deserves: ``40m``, ``15h``, ``3d``."""
+    """An estimated duration at the precision it deserves: ``40m``, ``15h``,
+    ``2d3h`` (never ``47h``)."""
     s = max(0.0, seconds)
     if s < 90 * 60:
         return f"{max(5, round(s / 300) * 5)}m"
-    if s < 48 * 3600:
-        return f"{round(s / 3600)}h"
-    return f"{round(s / 86400)}d"
+    hours = round(s / 3600)
+    if hours < 24:
+        return f"{hours}h"
+    return data.compact_duration(hours * 3600)
 
 
 def countdown_text(seconds: float) -> str:
-    """A measured countdown to a reset, at most 5 cells: ``40m``, ``1h20m``, ``23h``, ``2d``."""
-    s = max(0, int(seconds))
-    if s < 60:
-        return "<1m"
-    if s < 3600:
-        return f"{s // 60}m"
-    if s < 10 * 3600:
-        h, m = divmod(s // 60, 60)
-        return f"{h}h{m:02d}m"
-    if s < 48 * 3600:
-        return f"{s // 3600}h"
-    return f"{s // 86400}d"
+    """A measured countdown, the one duration format of the page:
+    ``47m``, ``3h20m``, ``2d3h`` (:func:`data.compact_duration`)."""
+    return data.compact_duration(seconds)
 
 
 # ---------------------------------------------------------------------------
@@ -215,7 +208,7 @@ def switch_note(status: AutoStatus, *, now: float, over_threshold: bool) -> str:
         if not over_threshold or status.last_switch_at is None:
             return ""
         remaining = status.last_switch_at + status.cooldown_s - now
-        return f"switch held: cooldown {data.format_duration(remaining)}" if remaining > 0 else ""
+        return f"switch held: cooldown {data.compact_duration(remaining)}" if remaining > 0 else ""
     return status.last_outcome if reason in BLOCKED_REASONS else ""
 
 
@@ -262,7 +255,7 @@ CURSOR_MARK = "›"
 PRIMARY_WINDOWS = ("5h", "7d")
 _PREFIX_W = 3  # "›● ": cursor, on duty, space
 _GAP = 2  # between table columns
-_REL_W = 5  # "1h20m" (countdown_text)
+_REL_W = 6  # "23h59m" (countdown_text)
 _RESET_GLYPH = "↻"
 _MAX_TAG_W = 16  # "login ends 5h03m"
 _MIN_NAME_W = 8

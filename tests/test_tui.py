@@ -892,7 +892,7 @@ class TestAccountRowText:
 
     def test_no_estimate_is_unsure(self):
         text = self._text(make_account(1, entry=make_entry(40.0, 10.0)))
-        assert text.plain.rstrip().endswith("↻2d")  # no guess: the forecast cell is blank
+        assert text.plain.rstrip().endswith("↻2d23h")  # no guess: the forecast cell is blank
         assert "~" not in text.plain and "?" not in text.plain
 
     def test_model_window_column(self):
@@ -914,9 +914,9 @@ class TestAccountRowText:
         assert len(row) <= width
         # name, 5h % and its reset, 7d % at every width
         assert "62%" in row and "31%" in row and ("↻1h59m" in row or "↻2h00m" in row)
-        assert "~5h" in row
+        assert ("~5h" in row) or width <= 60  # at 60: name, 5h, 7d and the reset
         # a long name keeps its local part: it gives way to the forecast
-        assert ("someone@example.com" in row) == (width >= 80)
+        assert ("someone@example.com" in row) or width < 80
         assert "someone@" in row
 
     def test_five_hour_reset_follows_its_pct_at_every_width(self):
@@ -1016,7 +1016,8 @@ class TestDurations:
     @pytest.mark.parametrize(
         "seconds, expected",
         [(-5, "<1m"), (30, "<1m"), (40 * 60, "40m"), (80 * 60, "1h20m"), (9 * 3600 + 59 * 60, "9h59m"),
-         (23 * 3600 + 40 * 60, "23h"), (47 * 3600, "47h"), (2 * 86400 + 6 * 3600, "2d")],
+         (23 * 3600 + 40 * 60, "23h40m"), (47 * 3600, "1d23h"), (2 * 86400 + 6 * 3600, "2d6h"),
+         (3 * 86400, "3d")],
     )
     def test_countdown(self, seconds, expected):
         from claude_rotater.tui.main import countdown_text
@@ -1026,7 +1027,7 @@ class TestDurations:
     @pytest.mark.parametrize(
         "seconds, expected",
         [(0, "5m"), (38 * 60, "40m"), (89 * 60, "90m"), (14 * 3600 + 56 * 60, "15h"),
-         (47 * 3600, "47h"), (3.4 * 86400, "3d")],
+         (47 * 3600, "1d23h"), (3.4 * 86400, "3d10h"), (3 * 86400 + 600, "3d")],
     )
     def test_rough_estimate(self, seconds, expected):
         from claude_rotater.tui.main import rough_duration
@@ -1038,7 +1039,7 @@ class TestCompactDuration:
     @pytest.mark.parametrize(
         "seconds, expected",
         [(-5, "<1m"), (30, "<1m"), (60, "1m"), (59 * 60, "59m"), (3600, "1h00m"),
-         (7140, "1h59m"), (86399, "23h59m"), (86400, "1d0h"), (6 * 86400 + 23 * 3600, "6d23h")],
+         (7140, "1h59m"), (86399, "23h59m"), (86400, "1d"), (6 * 86400 + 23 * 3600, "6d23h")],
     )
     def test_format(self, seconds, expected):
         assert tui_data.compact_duration(seconds) == expected

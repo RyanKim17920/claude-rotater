@@ -122,36 +122,44 @@ class TestLinePlot:
         _pts, est = burn_5h()
         lines = line_plot(est, now=NOW, threshold=90, width=40, height=8)
         assert [line.plain for line in lines] == [
-            "100┤┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄·····┄┄┄┄┄┄┄┄",
+            "100┤┄ switch 90% ┄┄┄┄┄┄┄┄┄┄·····┄┄┄┄┄┄┄┄",
             "   │              │   ·····            ┊",
             "   │            ⢀⡠⠄···                 ┊",
             "   │        ⣀⠤⠒⠊⠁ │                    ┊",
             "   │   ⢀⠤⠔⠊⠉      │                    ┊",
             "   │              │                    ┊",
             "  0┤              │                    ┊",
-            "    20:13        now               01:13",
+            "    20:13        now         reset 01:13",
         ]
 
     def test_golden_flat_week_without_reset(self, utc):
         est = flat_est()
         lines = line_plot(est, now=NOW, threshold=80, width=30, height=5, lookback_s=6 * 3600)
         assert [line.plain for line in lines] == [
-            "100┤┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄",
+            "100┤┄ switch 80% ┄┄┄┄┄┄┄┄┄┄┄┄┄",
             "   │                      │   ",
             "   │⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒⠂···",
             "  0┤                      │   ",
-            "    Tue 16:13        Tue 23:13",
+            "    16:13                23:13",
         ]
 
-    def test_week_axis_names_dates_not_a_repeated_weekday(self, utc):
+    def test_week_axis_starts_on_a_date_and_ends_on_the_reset(self, utc):
         """A 7d window starts and resets on the same weekday and clock, so
-        its axis reads "Tue 07 … Tue 14 23:13", never "Tue 23:13" twice."""
-        est = WindowEstimate("7d", 30.0, NOW, NOW + 7 * 3600, None, "none", (Point(NOW, 30.0, NOW + 7 * 3600),))
+        its start is a date ("Nov 08") and its end says it is the reset,
+        once: "reset Wed 01:13", never the weekday and clock twice."""
+        x1 = NOW + 27 * 3600
+        est = WindowEstimate("7d", 30.0, NOW, x1, None, "none", (Point(NOW, 30.0, x1),))
         axis = line_plot(est, now=NOW, threshold=None, width=60, height=6)[-1].plain.split()
-        x1 = NOW + 7 * 3600
         x0 = x1 - 7 * 86400
-        assert axis[:2] == [time.strftime("%a", time.gmtime(x0)), time.strftime("%d", time.gmtime(x0))]
-        assert axis[-3:] == time.strftime("%a %d %H:%M", time.gmtime(x1)).split()
+        assert axis[:2] == time.strftime("%b %d", time.gmtime(x0)).split()
+        assert axis[-3:] == ["reset", *time.strftime("%a %H:%M", time.gmtime(x1)).split()]
+
+    def test_clock_label_formats(self, utc):
+        from claude_rotater.tui.plot import clock_label
+
+        assert clock_label(NOW + 5 * 3600, NOW) == time.strftime("%H:%M", time.gmtime(NOW + 5 * 3600))
+        assert clock_label(NOW + 3 * 86400, NOW) == time.strftime("%a %H:%M", time.gmtime(NOW + 3 * 86400))
+        assert clock_label(NOW - 9 * 86400, NOW) == time.strftime("%b %d", time.gmtime(NOW - 9 * 86400))
 
     def test_now_line_splits_measured_from_projection(self, utc):
         _pts, est = burn_5h()
@@ -214,7 +222,7 @@ class TestLinePlot:
         lines = line_plot(est, now=NOW, threshold=50, width=30, height=9)
         dashed = [i for i, line in enumerate(lines) if THRESHOLD_GLYPH in line.plain]
         assert len(dashed) == 1
-        assert lines[dashed[0]].plain.startswith(" 50┤")
+        assert lines[dashed[0]].plain.startswith("   ┤┄ switch 50% ┄")  # named in place
 
     def test_no_threshold_no_dashes(self, utc):
         est = flat_est(10.0, resets_at=NOW + 3600)

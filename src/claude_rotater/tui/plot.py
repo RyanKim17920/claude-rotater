@@ -220,21 +220,26 @@ def line_plot(
         canvas, threshold=threshold, reset_col=reset_col, palette=palette, now_col=now_col,
         projection_color=projection_color,
     )
-    left_fmt, right_fmt = _clock_fmts(window_len, x1 - x0)
-    lines.append(_time_axis(cols, x0, x1, now, left_fmt, palette, right_fmt=right_fmt))
+    right = clock_label(x1, now)
+    if est.resets_at is not None:
+        right = f"reset {right}"
+    # A weekly window starts on the weekday and clock it resets on: its
+    # start is a date, so the two ends never read alike.
+    left = clock_label(x0, now) if x1 - x0 <= 86400 else datetime.fromtimestamp(x0).strftime("%b %d")
+    lines.append(_time_axis(cols, x0, x1, now, left, right, palette))
     return lines
 
 
-def _clock_fmts(window_len_s: float, span_s: float) -> tuple[str, str]:
-    """(left, right) axis label formats for one usage window: clocks for 5h,
-    weekday and clock for a short look into a weekly window; across days,
-    dates ("Sat 10" … "Sat 17 19:00"), since a weekly window starts and
-    resets on the same weekday and clock. The right edge is the reset."""
-    if window_len_s <= 86400:
-        return "%H:%M", "%H:%M"
-    if span_s <= 86400:
-        return "%a %H:%M", "%a %H:%M"
-    return "%a %d", "%a %d %H:%M"
+def clock_label(t: float, now: float) -> str:
+    """One clock format for every chart: ``19:00`` within half a day of
+    now (a 5h reset past midnight is still just a clock), ``Mon 19:00``
+    within the week, ``Oct 05`` further off."""
+    when = datetime.fromtimestamp(t)
+    if abs(t - now) < 12 * 3600:
+        return when.strftime("%H:%M")
+    if abs(t - now) < 6 * 86400:
+        return when.strftime("%a %H:%M")
+    return when.strftime("%b %d")
 
 
 def _span_fmt(span_s: float) -> str:
@@ -242,14 +247,39 @@ def _span_fmt(span_s: float) -> str:
     return "%H:%M" if span_s <= 86400 else "%b %d"
 
 
-def _y_label(r: int, rows: int, thr_row: int | None, threshold: float | None) -> str:
+def _y_label(r: int, rows: int) -> str:
+    """The y-axis says 100 and 0; the threshold row names itself in place."""
     if r == 0:
         return "100"
     if r == rows - 1:
         return "0"
-    if r == thr_row and threshold is not None:
-        return f"{threshold:.0f}"
     return ""
+
+
+def threshold_label(threshold: float) -> str:
+    """``switch 90%``: what crossing the dashed row does."""
+    return f"switch {threshold:g}%"
+
+
+def _cells_text(cells: list[tuple[str, str | None]], gutter: str, palette: Palette) -> Text:
+    line = Text(no_wrap=True)
+    line.append(gutter, style=palette.muted)
+    for glyph, style in cells:
+        line.append(glyph, style=style or "")
+    return line
+
+
+def _label_threshold(cells: list[tuple[str, str | None]], label: str, palette: Palette) -> None:
+    """Write ``label`` over the threshold dashes, at the left end if the
+    dashes there are free, else the right end; nowhere if neither is."""
+    n = len(label) + 2  # a dash of air on each side
+    for start in (1, len(cells) - n - 1):
+        if start < 0 or start + n > len(cells):
+            continue
+        if all(glyph == THRESHOLD_GLYPH for glyph, _st in cells[start : start + n]):
+            for i, ch in enumerate(f" {label} "):
+                cells[start + i] = (ch, palette.sev_warn)
+            return
 
 
 def _threshold_row(threshold: float | None, dot_h: int) -> int | None:
@@ -268,43 +298,48 @@ def _grid_rows(
     now_col: int | None = None,
     projection_color: str | None = None,
 ) -> list[Text]:
-    """The plot body: y-axis gutter, braille cells, threshold row, reset column."""
+    """The plot body: y-axis gutter, braille cells, threshold row (named
+    ``switch 90%`` in place), reset column."""
     rows, cols = canvas.rows, canvas.cols
     thr_row = _threshold_row(threshold, canvas.dot_h)
     lines: list[Text] = []
     for r in range(rows):
-        line = Text(no_wrap=True)
-        label = _y_label(r, rows, thr_row, threshold)
-        line.append(f"{label:>{GUTTER - 1}}{'┤' if label else '│'}", style=palette.muted)
         # Color by height: a cell's severity is its row's midpoint pct, so the
         # curve warms as it climbs instead of taking one flat color.
         row_pct = 100.0 * (rows - r - 0.5) / rows
         color = palette.severity(row_pct)
+        cells: list[tuple[str, str | None]] = []
         for c in range(cols):
             solid, dotted = canvas.solid[r][c], canvas.dotted[r][c]
             if solid:
-                line.append(chr(_BRAILLE_BASE | solid | dotted), style=color)
+                cells.append((chr(_BRAILLE_BASE | solid | dotted), color))
             elif dotted:
-                line.append(PROJECTION_GLYPH, style=projection_color or color)
+                cells.append((PROJECTION_GLYPH, projection_color or color))
             elif r == thr_row:
-                line.append(THRESHOLD_GLYPH, style=f"{palette.sev_warn} dim")
+                cells.append((THRESHOLD_GLYPH, f"{palette.sev_warn} dim"))
             elif c == reset_col:
-                line.append(RESET_GLYPH, style=palette.muted)
+                cells.append((RESET_GLYPH, palette.muted))
             elif c == now_col:
-                line.append(NOW_GLYPH, style=f"{palette.muted} dim")
+                cells.append((NOW_GLYPH, f"{palette.muted} dim"))
             else:
-                line.append(" ")
-        lines.append(line)
+                cells.append((" ", None))
+        if r == thr_row and threshold is not None:
+            _label_threshold(cells, threshold_label(threshold), palette)
+        lines.append(_cells_text(cells, _gutter(r, rows, thr_row), palette))
     return lines
 
 
+def _gutter(r: int, rows: int, thr_row: int | None) -> str:
+    label = _y_label(r, rows)
+    tick = "┤" if label or r == thr_row else "│"
+    return f"{label:>{GUTTER - 1}}{tick}"
+
+
 def _time_axis(
-    cols: int, x0: float, x1: float, now: float | None, fmt: str, palette: Palette,
-    *, right_fmt: str | None = None,
+    cols: int, x0: float, x1: float, now: float | None, left: str, right: str, palette: Palette,
 ) -> Text:
     axis = [" "] * cols
-    _place(axis, 0, datetime.fromtimestamp(x0).strftime(fmt))
-    right = datetime.fromtimestamp(x1).strftime(right_fmt or fmt)
+    _place(axis, 0, left)
     _place(axis, cols - len(right), right)
     if now is not None and x0 <= now <= x1:
         dot = round((now - x0) / (x1 - x0) * (cols * 2 - 1))
@@ -347,8 +382,15 @@ def history_plot(
     if len(pts) == 1:
         canvas.set(dx(pts[0].t), dy(pts[0].pct))
     lines = _grid_rows(canvas, threshold=threshold, reset_col=None, palette=palette)
-    lines.append(_time_axis(cols, x0, x1, None, _span_fmt(x1 - x0), palette))
+    lines.append(_span_axis(cols, x0, x1, palette))
     return lines
+
+
+def _span_axis(cols: int, x0: float, x1: float, palette: Palette) -> Text:
+    """The time axis of a multi-window span: ``Oct 05`` at both ends."""
+    fmt = _span_fmt(x1 - x0)
+    left, right = (datetime.fromtimestamp(t).strftime(fmt) for t in (x0, x1))
+    return _time_axis(cols, x0, x1, None, left, right, palette)
 
 
 COLUMN_GLYPHS = " ▁▂▃▄▅▆▇█"
@@ -462,20 +504,20 @@ def peak_columns(
         thr_row = rows - 1 - min(rows - 1, int(thr_eighths // 8))
     lines: list[Text] = []
     for r in range(rows):
-        line = Text(no_wrap=True)
-        label = _y_label(r, rows, thr_row, threshold)
-        line.append(f"{label:>{GUTTER - 1}}{'┤' if label else '│'}", style=palette.muted)
         floor = (rows - 1 - r) * 8  # eighths below this row
+        cells: list[tuple[str, str | None]] = []
         for c in range(cols):
             fill = heights[c] - floor
             if fill > 0:
-                line.append(COLUMN_GLYPHS[min(8, fill)], style=colors[c] or palette.muted)
+                cells.append((COLUMN_GLYPHS[min(8, fill)], colors[c] or palette.muted))
             elif r == thr_row:
-                line.append(THRESHOLD_GLYPH, style=f"{palette.sev_warn} dim")
+                cells.append((THRESHOLD_GLYPH, f"{palette.sev_warn} dim"))
             else:
-                line.append(" ")
-        lines.append(line)
-    lines.append(_time_axis(cols, x0, x1, None, _span_fmt(x1 - x0), palette))
+                cells.append((" ", None))
+        if r == thr_row and threshold is not None:
+            _label_threshold(cells, threshold_label(threshold), palette)
+        lines.append(_cells_text(cells, _gutter(r, rows, thr_row), palette))
+    lines.append(_span_axis(cols, x0, x1, palette))
     return lines
 
 
