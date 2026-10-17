@@ -295,6 +295,61 @@ class TestMain:
         assert self.run(raw())[0] == 0
         assert not root.exists()
 
+    def test_route_sends_a_profiles_records_to_its_data_dir(self, backup, tmp_path):
+        """Profiles that share one statusline command (a symlinked
+        settings.json) each get their own records: a session of the routed
+        config dir lands in that route's data dir, any other session in the
+        default backup root."""
+        work_config = tmp_path / "work config"
+        work_data = tmp_path / "work data"
+        work_data.mkdir()
+        argv = ["--route", str(work_config), str(work_data)]
+        work = raw(transcript_path=f"{work_config}/projects/-repo/s.jsonl")
+        assert self.run(work, argv)[0] == 0
+        assert self.run(raw(), argv)[0] == 0  # a /home/u/.claude session
+        assert [r["config_dir"] for r in self.lines(work_data)] == [str(work_config)]
+        assert [r["config_dir"] for r in self.lines(backup)] == ["/home/u/.claude"]
+
+    def test_route_matches_through_symlinks_and_the_last_route_wins(self, backup, tmp_path):
+        real = tmp_path / "real"
+        (real / "projects" / "-repo").mkdir(parents=True)
+        link = tmp_path / "link"
+        link.symlink_to(real)
+        old, new = tmp_path / "old", tmp_path / "new"
+        old.mkdir()
+        new.mkdir()
+        argv = ["--route", str(link), str(old), "--route", str(link), str(new)]
+        self.run(raw(transcript_path=f"{real}/projects/-repo/s.jsonl"), argv)
+        assert len(self.lines(new)) == 1
+        assert self.lines(old) == [] and self.lines(backup) == []
+
+    def test_route_to_a_missing_data_dir_writes_nothing(self, backup, tmp_path):
+        gone = tmp_path / "gone"
+        argv = ["--route", "/home/u/.claude", str(gone)]
+        assert self.run(raw(), argv)[0] == 0
+        assert not gone.exists() and self.lines(backup) == []
+
+    def test_route_keeps_tee_and_line_working(self, backup, tmp_path):
+        data = raw()
+        rc, out = self.run(data, ["--route", "/elsewhere", str(tmp_path), "--tee"])
+        assert out == data and len(self.lines(backup)) == 1
+        rc, out = self.run(data, ["--route", "/elsewhere", str(tmp_path), "--line"])
+        assert out.decode().strip() == "Opus · 5h 42% · 7d 12%"
+
+    @pytest.mark.parametrize(
+        "argv, expected",
+        [
+            ([], []),
+            (["--route"], []),
+            (["--route", "a"], []),
+            (["--route", "a", "b"], [("a", "b")]),
+            (["--tee", "--route", "a", "b", "--route", "c", "d", "--line"],
+             [("a", "b"), ("c", "d")]),
+        ],
+    )
+    def test_parse_routes(self, argv, expected):
+        assert feed.parse_routes(argv) == expected
+
     def test_write_failure_is_swallowed(self, backup, monkeypatch):
         def boom(*a, **k):
             raise OSError("disk full")

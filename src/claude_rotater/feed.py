@@ -25,6 +25,12 @@ the statusline: stdlib-only imports (``claude_rotater.paths`` is ~15 ms), one
 comes from ``paths.get_backup_root()``, looked up at call time, so a wrapper
 that patches it (a second profile with its own backup dir) is honored.
 
+Profiles can share one statusline command (a ``settings.json`` symlinked
+between config dirs is common), so the command can't name one data dir for
+every session. ``--route CONFIG_DIR DATA_DIR`` (repeatable) sends records
+whose session config dir is ``CONFIG_DIR`` to ``DATA_DIR`` instead; the last
+matching route wins, and an unrouted record goes to the backup root above.
+
 Record shape (keys with no value are omitted)::
 
     {"t": 1760000000.123,                 # when rota feed ran (epoch s)
@@ -348,14 +354,47 @@ def read_new(path: str, cursor: FeedCursor | None) -> tuple[list[dict], FeedCurs
 
 # -- command --------------------------------------------------------------------
 
-_USAGE = """usage: rota feed [--tee | --line]
+_USAGE = """usage: rota feed [--tee | --line] [--route CONFIG_DIR DATA_DIR]...
 
 Record the usage Claude Code reports to its statusline. Reads the statusline
 JSON on stdin and appends a compact record to the feed the auto-switcher
 watches; never fails (exit 0). --tee also copies stdin to stdout so it can sit
 in the middle of a pipe; --line prints a short usage line, a statusline of
-its own. See the README section on live usage.
+its own. --route sends records from sessions of CONFIG_DIR to the rota data
+dir DATA_DIR (for profiles that share one statusline). See the README section
+on live usage.
 """
+
+
+def parse_routes(argv: list[str]) -> list[tuple[str, str]]:
+    """The ``--route CONFIG_DIR DATA_DIR`` pairs in ``argv``, in order. A
+    trailing ``--route`` without both values is ignored."""
+    routes: list[tuple[str, str]] = []
+    i = 0
+    while i < len(argv):
+        if argv[i] == "--route" and i + 2 < len(argv):
+            routes.append((argv[i + 1], argv[i + 2]))
+            i += 3
+            continue
+        i += 1
+    return routes
+
+
+def _same_dir(a: str, b: str) -> bool:
+    try:
+        return os.path.realpath(os.path.expanduser(a)) == os.path.realpath(os.path.expanduser(b))
+    except (OSError, ValueError):
+        return False
+
+
+def route_for(config_dir: object, routes: list[tuple[str, str]]) -> str | None:
+    """The data dir the last route for ``config_dir`` names, else None."""
+    if not isinstance(config_dir, str) or not config_dir:
+        return None
+    for source, target in reversed(routes):
+        if source and target and _same_dir(source, config_dir):
+            return os.path.abspath(os.path.expanduser(target))
+    return None
 
 
 def status_line(record: dict | None, raw: bytes) -> str:
@@ -420,9 +459,11 @@ def main(argv: list[str], stdin=None, stdout=None, *, now: float | None = None) 
         record = parse_payload(data, time.time() if now is None else now)
         if record is None:
             return 0
-        from claude_rotater import paths
+        backup_root = route_for(record.get("config_dir"), parse_routes(argv))
+        if backup_root is None:
+            from claude_rotater import paths
 
-        backup_root = paths.get_backup_root()
+            backup_root = paths.get_backup_root()
         if not os.path.isdir(backup_root):
             return 0  # rota is not set up for this profile: nothing to feed
         append_record(feed_path(backup_root), record)
