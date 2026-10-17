@@ -61,6 +61,7 @@ from claude_rotater.models import (
     SwitchTransaction,
     get_timestamp,
     normalize_alias,
+    org_tag,
 )
 from claude_rotater.printer import (
     abbreviate_path,
@@ -2613,7 +2614,7 @@ class ClaudeAccountSwitcher:
     @staticmethod
     def _get_display_tag(email: str, org_name: str, org_uuid: str) -> str:
         """Return display tag for an account's org context."""
-        return org_name if org_name else "personal"
+        return org_tag(email, org_name)
 
     def _find_account_by_alias(self, alias: str) -> str | None:
         """Return the account number whose alias matches (case-insensitive), if any.

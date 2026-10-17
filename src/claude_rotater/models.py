@@ -24,6 +24,20 @@ if TYPE_CHECKING:
 _ALIAS_RE = re.compile(r"^[a-z0-9_.-]+$")
 
 
+def org_tag(email: str, org_name: str) -> str:
+    """Org tag for display: the org name, or "personal".
+
+    A personal Claude account still comes with an organization, named
+    "<email>'s Organization". Showing that name beside the email only says
+    the email twice, so it reads as "personal" too.
+    """
+    if not org_name:
+        return "personal"
+    if email and org_name.casefold() == f"{email}'s organization".casefold():
+        return "personal"
+    return org_name
+
+
 def normalize_alias(name: str) -> str:
     """Lowercase and validate a proposed alias; raise ValueError if invalid.
 
@@ -93,8 +107,7 @@ class AccountInfo:
     @property
     def display_label(self) -> str:
         """Display label: 'email [OrgName]' or 'email [personal]'."""
-        tag = self.organization_name if self.organization_name else "personal"
-        return f"{self.email} [{tag}]"
+        return f"{self.email} [{org_tag(self.email, self.organization_name)}]"
 
     @classmethod
     def from_dict(cls, number: int, data: dict) -> AccountInfo:
@@ -144,8 +157,8 @@ class AccountSnapshot:
 
     @property
     def display_tag(self) -> str:
-        """Org tag for display: the org name, or 'personal'."""
-        return self.org_name if self.org_name else "personal"
+        """Org tag for display: the org name, or 'personal' (see :func:`org_tag`)."""
+        return org_tag(self.email, self.org_name)
 
 
 @dataclass(frozen=True)

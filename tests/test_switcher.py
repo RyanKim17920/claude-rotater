@@ -11904,3 +11904,26 @@ class TestSessionShellGuardCoversEveryMutator:
         assert s._get_sequence_data()["sequence"] == [1, 2], (
             "the roster was mutated from inside a session shell"
         )
+
+
+class TestOrgTag:
+    """A personal account's org is named "<email>'s Organization": the tag
+    says "personal" instead of repeating the email."""
+
+    @pytest.mark.parametrize(
+        "email, org, expected",
+        [
+            ("me@x.com", "", "personal"),
+            ("me@x.com", "me@x.com's Organization", "personal"),
+            ("Me@X.com", "me@x.com's organization", "personal"),
+            ("me@x.com", "Acme Corp", "Acme Corp"),
+            ("me@x.com", "you@x.com's Organization", "you@x.com's Organization"),
+        ],
+    )
+    def test_tag(self, email, org, expected):
+        from claude_rotater.models import AccountInfo, org_tag
+
+        assert org_tag(email, org) == expected
+        assert ClaudeAccountSwitcher._get_display_tag(email, org, "uuid") == expected
+        info = AccountInfo(email, "u", "uuid", org, "", 1)
+        assert info.display_label == f"{email} [{expected}]"
