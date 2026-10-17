@@ -31,6 +31,11 @@ cooldown and, after a manual switch, ``manual_hold_minutes``; at the
 threshold they only re-order the targets the usual gates admit. Every verdict, any strategy,
 is kept as one line in ``AutoSwitchEngine.last_decision``.
 
+Manual mode (``settings.mode == "manual"``) hands the choice to the user:
+no strategy or threshold move at all. With ``manual_limit_guard`` on, the
+hard limit (100%) stands in for the threshold, so only at-limit, a pre-empt
+of the limit and a dead-login failover still move; with it off, nothing does.
+
 Cooldown and quarantine persist in ``<backup_root>/autoswitch_state.json``
 (so cron-driven ``rota auto --once`` ticks behave across processes), mutated
 read-modify-write under a dedicated file lock.
@@ -555,10 +560,13 @@ PAUSED_REASON = "auto-paused"
 # A pre-emptive switch is due and no account could take the work: the user
 # is about to hit a limit and should know before it happens.
 NO_HEADROOM_REASON = "no-headroom"
+# Manual mode (``autoswitch.mode``): the user picks the account; the detail
+# is a full "stay: ..." line saying what, if anything, rota still guards.
+MANUAL_REASON = "manual"
 # Reasons a UI should surface loudly (header note, prompt line).
 ALERT_REASONS = (RELOGIN_REASON, REPAIR_FAILED_REASON, PAUSED_REASON, NO_HEADROOM_REASON)
 # NoSwitchEvent reasons whose ``detail`` is already a full "stay: ..." line.
-_SELF_EXPLAINED = (STAY_REASON, "manual-hold", *ALERT_REASONS)
+_SELF_EXPLAINED = (STAY_REASON, "manual-hold", MANUAL_REASON, *ALERT_REASONS)
 
 
 @dataclass(frozen=True)
@@ -1196,6 +1204,17 @@ class AutoSwitchEngine:
         if not self._model_check_done:
             self._check_model_names(quarantined, usage)
 
+        manual = settings.mode == "manual"
+        if manual and not settings.manual_limit_guard:
+            self._emit(NoSwitchEvent(
+                reason=MANUAL_REASON,
+                detail="stay: you pick the account; rota never switches on its own",
+            ))
+            return TickOutcome.NO_ACTION
+        # The line a trigger is judged against: the threshold, or in manual
+        # mode (limit guard on) the hard limit itself.
+        line = 100.0 if manual else settings.threshold
+
         paused_until = self._paused_until(state)
         if paused_until is not None:
             return self._emit_paused(state, paused_until)
@@ -1220,9 +1239,9 @@ class AutoSwitchEngine:
             self._idle_hold_since = None
             utilization = 100.0 - active_headroom
             if (
-                preempt.switch_point(settings.threshold) - ESCALATION_MARGIN_PCT
+                preempt.switch_point(line) - ESCALATION_MARGIN_PCT
                 <= utilization
-                < settings.threshold
+                < line
             ):
                 # Only near the line: no turn spans the escalation band, and
                 # further down the history read is not worth a tick's cost.
@@ -1230,13 +1249,19 @@ class AutoSwitchEngine:
                     current, entries.get(current), usage.get(current), state
                 )
                 if projection is not None and not projection.reaches(
-                    preempt.switch_point(settings.threshold)
+                    preempt.switch_point(line)
                 ):
                     projection = None
             if projection is not None:
                 # Every strategy: the next reading would come too late.
                 trigger = PREEMPT_TRIGGER
                 failover_reason = projection.reason()
+            elif utilization < line and manual:
+                self._emit(NoSwitchEvent(
+                    reason=MANUAL_REASON,
+                    detail="stay: you pick the account; the guard moves only at a hard limit",
+                ))
+                return TickOutcome.NO_ACTION
             elif utilization < settings.threshold:
                 if settings.strategy not in ("consume-first", *_POLICY_STRATEGIES):
                     self._emit(

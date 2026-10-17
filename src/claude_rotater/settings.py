@@ -80,6 +80,12 @@ class AutoSwitchSettings:
     # switches (repairs included) in a trailing hour per data dir. One more
     # pauses the engine until the hour clears and says so in the TUI.
     max_switches_per_hour: int = 4
+    # "auto": the strategy moves accounts on its own. "manual": you pick the
+    # account (enter on a row) and rota never moves for strategy reasons;
+    # with ``manual_limit_guard`` on it still moves off an account that is
+    # at (or about to hit) its hard limit, or whose login is dead.
+    mode: str = "auto"
+    manual_limit_guard: bool = True
 
 
 @dataclass(frozen=True)
@@ -215,6 +221,9 @@ def _cadence_specs() -> tuple[SettingSpec, ...]:
 # too, so the flag and the setting accept the same names.
 STRATEGY_CHOICES: tuple[str, ...] = ("pace", "expiring-first", "best", "consume-first")
 
+# Who decides when to switch: rota ("auto", the default) or you ("manual").
+MODE_CHOICES: tuple[str, ...] = ("auto", "manual")
+
 # settings.json uses camelCase (matching the repo's other JSON artifacts);
 # dataclass fields stay snake_case.
 SETTING_SPECS: dict[str, SettingSpec] = {
@@ -284,6 +293,18 @@ SETTING_SPECS: dict[str, SettingSpec] = {
             "autoswitch", "model", "model", "string",
             help="Also switch on these models' weekly limits (e.g. Fable, Fable,Opus, or all)",
             group="autoswitch", label="Model limits",
+        ),
+        SettingSpec(
+            "autoswitch", "mode", "mode", "choice", choices=MODE_CHOICES,
+            help="auto: rota switches on its own; manual: you pick, and rota "
+            "only steps in at a hard limit when the limit guard is on (m)",
+            group="autoswitch", label="Mode",
+        ),
+        SettingSpec(
+            "autoswitch", "manualLimitGuard", "manual_limit_guard", "bool",
+            help="In manual mode, still switch off an account at its hard "
+            "limit (or about to hit it) or with a dead login",
+            group="autoswitch", label="Manual limit guard",
         ),
         *_cadence_specs(),
         SettingSpec(
