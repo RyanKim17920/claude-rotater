@@ -7,7 +7,9 @@ the clock, the store, or the app. That keeps the drawing exactly testable
 The line plot draws one usage window on a braille canvas (2x4 dots per
 cell): the measured series as a solid line, the estimator's projection as a
 dotted line from the last measurement up to the reset (or 100%), the
-auto-switch threshold as a dashed row, and the reset as a marker column.
+auto-switch threshold as a dashed row, the reset as a marker column, and a
+dim vertical line at "now", where the measured line ends and the projection
+begins.
 """
 
 from __future__ import annotations
@@ -25,6 +27,7 @@ from claude_rotater.usage_history import Point
 SPARK_GLYPHS = "▁▂▃▄▅▆▇█"
 THRESHOLD_GLYPH = "┄"
 RESET_GLYPH = "┊"
+NOW_GLYPH = "│"  # where measurement ends and the projection starts
 GUTTER = 4  # "100┤" — y-axis label plus its tick
 MIN_PLOT_WIDTH = 20
 MIN_PLOT_HEIGHT = 3  # total lines, including the time-axis row
@@ -201,7 +204,8 @@ def line_plot(
     if est.resets_at is not None and x0 <= est.resets_at <= x1:
         reset_col = dx(est.resets_at) // 2
 
-    lines = _grid_rows(canvas, threshold=threshold, reset_col=reset_col, palette=palette)
+    now_col = dx(now) // 2 if x0 <= now <= x1 else None
+    lines = _grid_rows(canvas, threshold=threshold, reset_col=reset_col, palette=palette, now_col=now_col)
     left_fmt, right_fmt = _clock_fmts(window_len, x1 - x0)
     lines.append(_time_axis(cols, x0, x1, now, left_fmt, palette, right_fmt=right_fmt))
     return lines
@@ -247,6 +251,7 @@ def _grid_rows(
     threshold: float | None,
     reset_col: int | None,
     palette: Palette,
+    now_col: int | None = None,
 ) -> list[Text]:
     """The plot body: y-axis gutter, braille cells, threshold row, reset column."""
     rows, cols = canvas.rows, canvas.cols
@@ -269,6 +274,8 @@ def _grid_rows(
                 line.append(THRESHOLD_GLYPH, style=f"{palette.sev_warn} dim")
             elif c == reset_col:
                 line.append(RESET_GLYPH, style=palette.muted)
+            elif c == now_col:
+                line.append(NOW_GLYPH, style=f"{palette.muted} dim")
             else:
                 line.append(" ")
         lines.append(line)

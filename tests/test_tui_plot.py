@@ -9,6 +9,7 @@ import pytest
 
 from claude_rotater.estimator import WindowEstimate, estimate_account
 from claude_rotater.tui.plot import (
+    NOW_GLYPH,
     GUTTER,
     RESET_GLYPH,
     SPARK_GLYPHS,
@@ -121,12 +122,12 @@ class TestLinePlot:
         lines = line_plot(est, now=NOW, threshold=90, width=40, height=8)
         assert [line.plain for line in lines] == [
             "100┤┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄⡀⠄⠄⠂⠁┄┄┄┄┄┄┄┄",
-            "   │                  ⡀⠄⠂⠂⠁            ┊",
+            "   │              │   ⡀⠄⠂⠂⠁            ┊",
             "   │            ⢀⡠⠄⠂⠁⠁                 ┊",
-            "   │        ⣀⠤⠒⠊⠁                      ┊",
-            "   │   ⢀⠤⠔⠊⠉                           ┊",
-            "   │                                   ┊",
-            "  0┤                                   ┊",
+            "   │        ⣀⠤⠒⠊⠁ │                    ┊",
+            "   │   ⢀⠤⠔⠊⠉      │                    ┊",
+            "   │              │                    ┊",
+            "  0┤              │                    ┊",
             "    20:13        now               01:13",
         ]
 
@@ -135,9 +136,9 @@ class TestLinePlot:
         lines = line_plot(est, now=NOW, threshold=80, width=30, height=5, lookback_s=6 * 3600)
         assert [line.plain for line in lines] == [
             "100┤┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄",
-            "   │                          ",
+            "   │                      │   ",
             "   │⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒⠂⠂⠂⠂",
-            "  0┤                          ",
+            "  0┤                      │   ",
             "    Tue 16:13        Tue 23:13",
         ]
 
@@ -150,6 +151,18 @@ class TestLinePlot:
         x0 = x1 - 7 * 86400
         assert axis[:2] == [time.strftime("%a", time.gmtime(x0)), time.strftime("%d", time.gmtime(x0))]
         assert axis[-3:] == time.strftime("%a %d %H:%M", time.gmtime(x1)).split()
+
+    def test_now_line_splits_measured_from_projection(self, utc):
+        _pts, est = burn_5h()
+        lines = line_plot(est, now=NOW, threshold=90, width=40, height=8)
+        body = lines[:-1]
+        col = next(c for c, ch in enumerate(body[-2].plain) if ch == NOW_GLYPH and c > GUTTER)
+        assert lines[-1].plain[col - 1 : col + 2] == "now"
+        solid = [c for line in body for sp in line.spans if "dim" not in str(sp.style)
+                 for c in range(sp.start, sp.end) if dots(line.plain[c])]
+        dotted = [c for line in body for sp in line.spans if "dim" in str(sp.style)
+                  for c in range(sp.start, sp.end) if dots(line.plain[c])]
+        assert max(solid) <= col <= min(dotted)
 
     def test_empty_series_draws_axes_only(self, utc):
         est = WindowEstimate("5h", 0.0, NOW, NOW + 3600, None, "none", ())
@@ -185,8 +198,8 @@ class TestLinePlot:
         pts = [Point(NOW - 600, 30.0, NOW + 3600), Point(NOW, 31.0, NOW + 3600)]
         est = WindowEstimate("5h", 31.0, NOW, NOW + 3600, None, "none", tuple(pts))
         lines = line_plot(est, now=NOW, threshold=None, width=40, height=8)
-        dim = [s for line in lines for s in line.spans if "dim" in str(s.style)]
-        assert dim == []
+        dim = {line.plain[s.start:s.end] for line in lines for s in line.spans if "dim" in str(s.style)}
+        assert dim == {NOW_GLYPH}  # only the now line: no dotted projection
 
     def test_threshold_row_is_dashed(self, utc):
         est = flat_est(10.0, resets_at=NOW + 3600)
