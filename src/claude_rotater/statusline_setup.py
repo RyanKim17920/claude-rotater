@@ -16,6 +16,13 @@ on every refresh. :func:`install` makes that payload reach ``rota feed``:
 - With none, a minimal one is installed: ``rota feed --line``, which records
   the payload and prints a short usage line.
 
+A profile whose data dir is not ``~/.rota`` is reached with ``--route
+<config dir> <data dir>`` on the feed command, never a ``ROTA_HOME=`` for
+the whole command: profiles often share one settings.json (symlinked from a
+second config dir), so one command serves several profiles, and each
+install adds its own route to it. ``rota feed`` sends a session's record by
+the session's config dir; an unrouted one goes to ``~/.rota``.
+
 Writes are careful with a file that belongs to the user: settings.json is
 copied into rota's data dir first, rewritten atomically (temp file and
 rename beside the resolved target, so a symlinked settings.json keeps its
@@ -94,19 +101,28 @@ def _backup_root(backup_dir: Path | None) -> Path:
     return paths.get_backup_root()
 
 
+def _norm(path: Path | str) -> str:
+    return os.path.normpath(os.path.abspath(os.path.expanduser(os.fspath(path))))
+
+
+def _route_args(config_home: Path, root: Path) -> str:
+    return f" --route {shlex.quote(_norm(config_home))} {shlex.quote(_norm(root))}"
+
+
 def feed_command(backup_dir: Path | None = None) -> str:
     """The shell words that run ``rota feed`` for this install and data dir.
 
-    A data dir other than ``~/.rota`` is named with ``ROTA_HOME=``, since
-    Claude Code runs the statusline without rota's environment."""
+    A data dir other than ``~/.rota`` gets a ``--route`` from this profile's
+    config dir, since Claude Code runs the statusline without rota's
+    environment (see the module docstring)."""
     from claude_rotater import paths
 
     exe = shutil.which("rota")
     words = [exe] if exe else [sys.executable, "-m", "claude_rotater"]
     command = " ".join(shlex.quote(w) for w in words) + " feed"
-    root = os.path.normpath(os.path.abspath(_backup_root(backup_dir)))
-    if root != os.path.normpath(os.path.abspath(paths.get_default_backup_root())):
-        command = f"ROTA_HOME={shlex.quote(root)} {command}"
+    root = _backup_root(backup_dir)
+    if _norm(root) != _norm(paths.get_default_backup_root()):
+        command += _route_args(settings_path().parent, root)
     return command
 
 
@@ -135,15 +151,73 @@ def _is_default(command: str) -> bool:
     return command.endswith(_DEFAULT_TAIL)
 
 
+def _split_feed(command: str) -> tuple[str, str, str] | None:
+    """``(head, feed words, tail)`` of a command rota wrote, else None."""
+    if unwrap(command) is not None:
+        mid = command.find(_WRAP_MID, len(_WRAP_HEAD))
+        return _WRAP_HEAD, command[len(_WRAP_HEAD) : mid], command[mid:]
+    if _is_default(command):
+        return "", command[: -len(_DEFAULT_TAIL)], _DEFAULT_TAIL
+    return None
+
+
+def _words(text: str) -> list[str]:
+    try:
+        return shlex.split(text)
+    except ValueError:
+        return []
+
+
+def _routes(command: str) -> list[tuple[str, str]]:
+    from claude_rotater import feed
+
+    split = _split_feed(command)
+    return feed.parse_routes(_words(split[1] if split else command))
+
+
+_ASSIGNMENT_RE = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)=(.*)$", re.S)
+
+
+def _join(words: list[str]) -> str:
+    """Shell words back into a command; ``NAME=value`` stays an assignment."""
+    out = []
+    for word in words:
+        match = _ASSIGNMENT_RE.match(word)
+        out.append(f"{match[1]}={shlex.quote(match[2])}" if match else shlex.quote(word))
+    return " ".join(out)
+
+
+def _without_routes(feed_words: str, config_home: Path) -> str:
+    """``feed_words`` with every ``--route`` for ``config_home`` removed."""
+    from claude_rotater import feed
+
+    words, kept, i = _words(feed_words), [], 0
+    while i < len(words):
+        if words[i] == "--route" and i + 2 < len(words):
+            if not feed.route_for(str(config_home), [(words[i + 1], words[i + 2])]):
+                kept += words[i : i + 3]
+            i += 3
+            continue
+        kept.append(words[i])
+        i += 1
+    return _join(kept)
+
+
 _ROTA_HOME_RE = re.compile(r"""(?:^|[\s;&|({])ROTA_HOME=('[^']*'|"[^"]*"|[^\s;&|)]+)""")
 
 
-def feed_target(command: str) -> Path:
-    """The data dir ``rota feed`` in ``command`` writes to: the ``ROTA_HOME=``
-    the command sets (as :func:`feed_command` writes it), else ``~/.rota``.
-    rota never exports ``ROTA_HOME`` to Claude Code, so nothing else sets it."""
-    from claude_rotater import paths
+def feed_target(command: str, config_home: Path | str | None = None) -> Path:
+    """The data dir ``rota feed`` in ``command`` writes a session of
+    ``config_home`` to: the last ``--route`` for that config dir, else the
+    ``ROTA_HOME=`` the command sets (older installs wrote one), else
+    ``~/.rota``. rota never exports ``ROTA_HOME`` to Claude Code, so nothing
+    else sets it."""
+    from claude_rotater import feed, paths
 
+    if config_home is not None:
+        routed = feed.route_for(os.fspath(config_home), _routes(command))
+        if routed is not None:
+            return Path(routed)
     match = _ROTA_HOME_RE.search(command)
     if match is None:
         return paths.get_default_backup_root()
@@ -290,16 +364,23 @@ def status(backup_dir: Path | None = None, *, now: float | None = None) -> Statu
     if install == INSTALLED:
         from claude_rotater import feed, poll_policy
 
+        root = _backup_root(backup_dir)
         try:
-            root = _backup_root(backup_dir)
             last_feed_at = os.stat(feed.feed_path(root)).st_mtime
         except OSError:
             last_feed_at = None
         current = time.time() if now is None else now
         fresh = last_feed_at is not None and current - last_feed_at <= poll_policy.FEED_STALE_S
         state = "live" if fresh else "stale"
-        if not fresh and command and not os.path.isdir(feed_target(command)):
-            state = "unset"  # `rota feed` exits 0 and records nothing
+        if not fresh and command:
+            target = feed_target(command, path.parent)
+            if _split_feed(command) is not None and _norm(target) != _norm(root):
+                # A statusline rota set up for another profile that shares
+                # this settings.json: it feeds that profile, not this one.
+                # install() adds this profile's route.
+                install, state = FOREIGN, "unset"
+            elif not os.path.isdir(target):
+                state = "unset"  # `rota feed` exits 0 and records nothing
     return StatuslineStatus(install, state, path, command, last_feed_at)
 
 
@@ -309,7 +390,16 @@ def install(backup_dir: Path | None = None) -> StatuslineStatus:
     path = settings_path()
     settings, raw = _read(path)
     command = _command_of(settings)
-    if _classify(command) != INSTALLED:
+    root = _backup_root(backup_dir)
+    split = _split_feed(command) if command else None
+    if split is not None:
+        if _norm(feed_target(command, path.parent)) != _norm(root):
+            # Shared with another profile: add this one's route to it.
+            head, words, tail = split
+            words += _route_args(path.parent, root)
+            settings["statusLine"] = {**settings["statusLine"], "command": head + words + tail}
+            _write(path, settings, raw, backup_dir)
+    elif _classify(command) != INSTALLED:
         line = settings.get("statusLine")
         if command:
             settings["statusLine"] = {**line, "command": wrap(command, feed_command(backup_dir))}
@@ -323,14 +413,37 @@ def install(backup_dir: Path | None = None) -> StatuslineStatus:
     return status(backup_dir)
 
 
+def _feeds_others(command: str, config_home: Path) -> bool:
+    """Whether ``command`` has a route for ``config_home`` and still feeds
+    some other profile without it: another config dir's route, or the data
+    dir an unrouted session goes to, if that exists (rota there is in use)."""
+    from claude_rotater import feed
+
+    routes = _routes(command)
+    mine = [feed.route_for(str(config_home), [route]) is not None for route in routes]
+    if not any(mine):
+        return False
+    return not all(mine) or os.path.isdir(feed_target(command))
+
+
 def uninstall(backup_dir: Path | None = None) -> StatuslineStatus:
     """Undo :func:`install`: restore the wrapped command exactly, or remove
-    the default statusline. A statusline rota did not install is left alone.
+    the default statusline. A statusline rota did not install is left alone,
+    and one that still feeds another profile only loses this profile's route.
     Raises :class:`StatuslineSetupError` on failure."""
     path = settings_path()
     settings, raw = _read(path)
     command = _command_of(settings)
-    if command is not None:
+    split = _split_feed(command) if command is not None else None
+    if split is not None and _feeds_others(command, path.parent):
+        # Other profiles still feed through it: drop only this one's route.
+        head, words, tail = split
+        settings["statusLine"] = {
+            **settings["statusLine"],
+            "command": head + _without_routes(words, path.parent) + tail,
+        }
+        _write(path, settings, raw, backup_dir)
+    elif command is not None:
         original = unwrap(command)
         if original is not None:
             settings["statusLine"] = {**settings["statusLine"], "command": original}

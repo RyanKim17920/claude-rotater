@@ -170,9 +170,11 @@ class TestInstallDefault:
         assert oct(path.stat().st_mode & 0o777) == "0o600"
         assert not (data / ss.BACKUP_DIRNAME).exists()  # nothing to back up
 
-    def test_feed_command_embeds_rota_home(self, env):
-        assert f"ROTA_HOME={env[1]}" in ss.feed_command()
-        assert ss.feed_command().endswith(" feed")
+    def test_feed_command_routes_this_profile_to_its_data_dir(self, env):
+        path, data = env
+        command = ss.feed_command()
+        assert "ROTA_HOME" not in command
+        assert command.endswith(f" feed --route {path.parent} {data}")
 
     def test_default_line_prints_usage(self, env, tmp_path):
         command = ss.default_command(feed=f"{sys.executable} -m claude_rotater feed")
@@ -270,14 +272,24 @@ class TestFeedNotSetUp:
     """`rota feed` exits 0 and records nothing when the data dir it feeds is
     missing; status() reports that as "unset" instead of a quiet "stale"."""
 
-    def test_missing_target_dir_is_unset(self, env, tmp_path):
+    def test_missing_target_dir_is_unset(self, env):
         path, data = env
-        gone = tmp_path / "no-such-profile"
         write_settings(path, {"statusLine": {"type": "command",
-                                             "command": f"ROTA_HOME={gone} rota feed --line # rota-statusline"}})
-        assert ss.status(data).state == "unset"
-        gone.mkdir()
+                                             "command": f"ROTA_HOME={data} rota feed --line # rota-statusline"}})
         assert ss.status(data).state == "stale"
+        data.rmdir()
+        assert ss.status(data).state == "unset"
+
+    def test_feeding_another_data_dir_is_not_set_up_here(self, env, tmp_path):
+        """An older install's ROTA_HOME for some other data dir feeds that
+        profile, whether or not the dir exists: not set up for this one."""
+        path, data = env
+        other = tmp_path / "other-profile"
+        write_settings(path, {"statusLine": {"type": "command",
+                                             "command": f"ROTA_HOME={other} rota feed --line # rota-statusline"}})
+        assert (ss.status(data).install, ss.status(data).state) == (ss.FOREIGN, "unset")
+        other.mkdir()
+        assert (ss.status(data).install, ss.status(data).state) == (ss.FOREIGN, "unset")
 
     def test_live_feed_wins_over_the_dir_check(self, env, tmp_path):
         path, data = env
@@ -308,7 +320,9 @@ class TestFeedNotSetUp:
     def test_installed_command_round_trips(self, env):
         _path, data = env
         st = ss.install(data)
-        assert ss.feed_target(st.command) == data
+        assert ss.feed_target(st.command, path_parent := _path.parent) == data
+        assert ss.feed_target(st.command) != data  # other profiles fall through
+        assert ss.feed_target(st.command, path_parent / "x") != data
         assert st.state == "stale"
 
     def test_install_feeds_the_given_data_dir_without_rota_home(self, env, tmp_path, monkeypatch):
@@ -317,10 +331,135 @@ class TestFeedNotSetUp:
         other = tmp_path / "other"
         other.mkdir()
         st = ss.install(other)
-        assert f"ROTA_HOME={other}" in st.command and ss.feed_target(st.command) == other
+        assert "ROTA_HOME" not in st.command
+        assert ss.feed_target(st.command, st.settings_path.parent) == other
 
     def test_default_data_dir_needs_no_rota_home(self, env, monkeypatch):
         from claude_rotater import paths
 
         monkeypatch.delenv("ROTA_HOME")
-        assert "ROTA_HOME" not in ss.feed_command(paths.get_default_backup_root())
+        command = ss.feed_command(paths.get_default_backup_root())
+        assert "ROTA_HOME" not in command and "--route" not in command
+
+
+class TestSharedSettings:
+    """Two profiles, one settings.json: the second config dir's settings.json
+    is a symlink to the first's, as dotfile setups often do. Each profile's
+    install must feed its own data dir, in either order."""
+
+    STATUSLINE = "cat >/dev/null; echo line"
+
+    @pytest.fixture
+    def profiles(self, tmp_path, monkeypatch):
+        from claude_rotater import paths
+
+        personal = tmp_path / "personal-config"
+        work = tmp_path / "work config"  # a space, as real paths can have
+        personal.mkdir()
+        work.mkdir()
+        write_settings(personal / "settings.json",
+                       {"statusLine": {"type": "command", "command": self.STATUSLINE}})
+        (work / "settings.json").symlink_to(personal / "settings.json")
+        default_data = paths.get_default_backup_root()
+        default_data.mkdir(parents=True, exist_ok=True)
+        work_data = tmp_path / "work data"
+        work_data.mkdir()
+
+        def use(profile: str) -> Path:
+            if profile == "personal":
+                monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(personal))
+                monkeypatch.delenv("ROTA_HOME", raising=False)
+                return default_data
+            monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(work))
+            monkeypatch.setenv("ROTA_HOME", str(work_data))
+            return work_data
+
+        return use, personal, work
+
+    @staticmethod
+    def command(personal: Path) -> str:
+        return json.loads((personal / "settings.json").read_text())["statusLine"]["command"]
+
+    @pytest.mark.parametrize("order", [("personal", "work"), ("work", "personal")])
+    def test_each_install_feeds_its_own_profile(self, profiles, order):
+        use, personal, work = profiles
+        for profile in order:
+            ss.install(use(profile))
+        for profile in order:
+            st = ss.status(use(profile))
+            assert (st.install, st.state) == (ss.INSTALLED, "stale"), profile
+        command = self.command(personal)
+        assert ss.feed_target(command, work) == use("work")
+        assert ss.feed_target(command, personal) == use("personal")
+        assert command.count("--route") == 1
+        assert ss.unwrap(command) == self.STATUSLINE
+        assert (work / "settings.json").is_symlink()
+
+    def test_set_up_in_one_profile_reads_as_not_set_up_in_the_other(self, profiles):
+        """The reported bug: set up in one profile, the other profile's TUI
+        said "installed" while every one of its records went elsewhere, and
+        `s` there changed nothing."""
+        use, personal, work = profiles
+        ss.install(use("personal"))
+        st = ss.status(use("work"))
+        assert (st.install, st.state) == (ss.FOREIGN, "unset")
+        assert ss.install(use("work")).installed
+        assert ss.status(use("personal")).installed
+
+    def test_install_again_is_a_no_op(self, profiles):
+        use, personal, _work = profiles
+        ss.install(use("personal"))
+        ss.install(use("work"))
+        before = self.command(personal)
+        ss.install(use("work"))
+        ss.install(use("personal"))
+        assert self.command(personal) == before
+
+    def test_records_reach_each_profiles_feed_through_the_installed_command(self, profiles):
+        """Run the installed wrapper through /bin/sh as Claude Code does,
+        without ROTA_HOME or CLAUDE_CONFIG_DIR, as a plain `claude` session
+        started by a shell wrapper has neither of rota's variables."""
+        use, personal, work = profiles
+        ss.install(use("personal"))
+        ss.install(use("work"))
+        command = self.command(personal)
+        child = {k: v for k, v in os.environ.items() if k not in ("ROTA_HOME", "CLAUDE_CONFIG_DIR")}
+        child["HOME"] = str(Path.home())
+        for config in (work, personal):
+            payload = json.dumps({
+                "transcript_path": f"{config}/projects/-repo/s.jsonl",
+                "rate_limits": {"five_hour": {"used_percentage": 5}},
+            })
+            out = subprocess.run(["/bin/sh", "-c", command], input=payload.encode(),
+                                 capture_output=True, timeout=30, env=child)
+            assert out.stdout == b"line\n"
+        for config, data in ((work, use("work")), (personal, use("personal"))):
+            path = feed.feed_path(data)
+            for _ in range(200):  # the feed side runs in the background
+                if os.path.exists(path):
+                    break
+                subprocess.run(["sleep", "0.05"])
+            assert [json.loads(line)["config_dir"] for line in open(path)] == [str(config)]
+
+    def test_uninstall_in_one_profile_keeps_the_other_fed(self, profiles):
+        use, personal, _work = profiles
+        ss.install(use("personal"))
+        ss.install(use("work"))
+        assert ss.uninstall(use("work")).install == ss.FOREIGN  # feeds personal only
+        assert ss.status(use("personal")).installed
+        assert "--route" not in self.command(personal)
+
+    def test_uninstall_restores_the_original_when_nothing_else_is_fed(self, profiles):
+        """Only the work profile uses rota (no default data dir): its route
+        was the wrapper's only use, so the original statusline comes back."""
+        use, personal, _work = profiles
+        use("personal").rmdir()
+        ss.install(use("work"))
+        ss.uninstall(use("work"))
+        assert self.command(personal) == self.STATUSLINE
+
+    def test_uninstall_of_the_unrouted_profile_restores_the_original(self, profiles):
+        use, personal, _work = profiles
+        ss.install(use("personal"))
+        ss.uninstall(use("personal"))
+        assert self.command(personal) == self.STATUSLINE
