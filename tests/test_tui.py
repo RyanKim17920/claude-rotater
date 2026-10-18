@@ -1710,6 +1710,33 @@ class TestMainPage:
             await pilot.pause()
             assert "· —" in painted(app, "#detail")  # account 1: no projection
 
+    async def test_cursor_on_duty_follows_a_switch_it_did_not_make(self, tmp_path):
+        """An engine switch (or another rota's) moves the account on duty
+        under the page: a cursor that sat on it follows, so the charts
+        show the account now in use."""
+        fake = three_accounts(tmp_path)
+        app = make_app(fake)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await settle(pilot)
+            assert app.screen.selected_number == "1"
+            fake.switch_to("2")  # not through the page
+            app._tick()
+            await settle(pilot)
+            assert app.screen.selected_number == "2"
+            assert "work@y.com" in painted(app, "#detail").splitlines()[0]
+
+    async def test_cursor_moved_elsewhere_stays_on_a_switch(self, tmp_path):
+        fake = three_accounts(tmp_path)
+        app = make_app(fake)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await settle(pilot)
+            await pilot.press("down", "down")  # the user looks at #3
+            assert app.screen.selected_number == "3"
+            fake.switch_to("2")
+            app._tick()
+            await settle(pilot)
+            assert app.screen.selected_number == "3"
+
     async def test_highlight_moves_detail(self, tmp_path):
         fake = three_accounts(tmp_path)
         with_history(fake, burn_history(time.time()))

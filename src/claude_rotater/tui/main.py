@@ -1376,6 +1376,7 @@ class MainScreen(Screen):
     def on_mount(self) -> None:
         self.query_one("#accounts", ListView).focus()
         self._content_key: tuple | None = None
+        self._active_seen: str | None = None  # the account on duty last painted
         self.keys_shown = False  # ``?``: the key list in place of the charts
         self._set_hint()
         self.watch(self.app, "snapshot", self._on_snapshot)
@@ -1579,12 +1580,20 @@ class MainScreen(Screen):
         listview = self.query_one("#accounts", ListView)
         numbers = [acc.number for acc in snap.accounts]
         current = [row.number for row in listview.query(AccountRow)]
+        was_active, self._active_seen = self._active_seen, snap.active_number
+        keep = self.selected_number or snap.active_number
+        if was_active is not None and keep == was_active:
+            # The cursor rode the account on duty: it follows the switch
+            # (engine or manual), so the charts show the account now in use.
+            # A cursor the user moved elsewhere stays put.
+            keep = snap.active_number
         if numbers != current:
-            keep = self.selected_number or snap.active_number
             await listview.clear()
             await listview.extend(AccountRow(n) for n in numbers)
             if numbers:
                 listview.index = numbers.index(keep) if keep in numbers else 0
+        elif keep in numbers and keep != self.selected_number:
+            listview.index = numbers.index(keep)
         self.repaint()
 
     def on_resize(self, _event) -> None:
