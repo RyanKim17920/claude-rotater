@@ -56,7 +56,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, ClassVar
 
 from claude_rotater import expiring_first, oauth, pace_strategy, poll_policy, preempt
-from claude_rotater.estimator import estimate_window
+from claude_rotater.estimator import WindowEstimate, carried_burn, estimate_window
 from claude_rotater.exceptions import ClaudeSwitchError
 from claude_rotater.json_output import (
     SCHEMA_VERSION,
@@ -2413,9 +2413,7 @@ class AutoSwitchEngine:
         if isinstance(since, bool) or not isinstance(since, (int, float)):
             since = None
         try:
-            identity = self.switcher.account_identity(current)
-            ident = (identity.get("email", ""), identity.get("organizationUuid", ""))
-            series = self.switcher.usage_history.series({current: ident}).get(current, {})
+            series, carried = self._duty_history(current, since)
             if not series:
                 return None
             times = sorted({p.t for points in series.values() for p in points})
@@ -2428,7 +2426,7 @@ class AutoSwitchEngine:
             )
             return preempt.project(
                 series, live, models=self._models, now=now, since=since,
-                horizon_s=horizon,
+                horizon_s=horizon, carried=carried,
             )
         except Exception as e:
             _logger.debug("pre-empt projection unavailable: %r", e)
@@ -2454,17 +2452,34 @@ class AutoSwitchEngine:
             wait = min(wait, poll_policy.MIN_INTERVAL_S)
         return max(wait, MIN_TICK_S)
 
+    def _duty_history(
+        self, current: str, since: float | None
+    ) -> tuple[dict[str, list], dict[str, WindowEstimate]]:
+        """The account on duty's history, and the user's burn up to the last
+        switch read off every other account's (``carried_burn``): what the
+        estimator needs to read the account on duty the way the TUI does."""
+        identities = self.switcher.usage_identities()
+        series = self.switcher.usage_history.series(identities)
+        carried = carried_burn(
+            (s for num, s in series.items() if num != current), since=since
+        )
+        return series.get(current, {}), carried
+
     def _burn_rate(self, current: str, now: float) -> float | None:
-        """How fast the user is spending weekly quota, in 7d points per hour,
-        from the active account's usage history. None when history cannot
-        say (too few samples, unreadable file): the policy then counts every
-        account's whole headroom as usable."""
+        """How fast the user is spending weekly quota, in 7d points per hour:
+        the active account's own burn since the last switch, else the burn
+        the previous duty showed up to it (it is the user's, not the
+        account's). None when history cannot say (too few samples,
+        unreadable file): the policy then counts every account's whole
+        headroom as usable."""
+        from claude_rotater.feed_ingest import read_last_switch_at
+
         try:
-            identity = self.switcher.account_identity(current)
-            ident = (identity.get("email", ""), identity.get("organizationUuid", ""))
-            series = self.switcher.usage_history.series({current: ident})
+            since = read_last_switch_at(self.switcher.backup_dir)
+            series, carried = self._duty_history(current, since)
             est = estimate_window(
-                series.get(current, {}).get("7d", []), window="7d", now=now
+                series.get("7d", []), window="7d", now=now, since=since,
+                on_duty=True, carried=carried.get("7d"),
             )
         except Exception as e:  # history is advisory; never break a tick
             _logger.debug("burn-rate estimate unavailable: %r", e)

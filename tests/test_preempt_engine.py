@@ -224,3 +224,33 @@ class TestFeedReadingSwitchesInTheSameTick:
                 assert engine.tick() is TickOutcome.SWITCHED
         assert switches(h)[-1].trigger == "proactive"
         assert oauth  # imported for the patch target
+
+
+class TestDutyBurn:
+    """The engine reads the account on duty the way the TUI does: the
+    user's burn carries over a fresh switch, never an idle past."""
+
+    def record(self, h, slot, readings):
+        email = h.switcher.account_email(slot)
+        now = h.clock.now
+        for ago, pct7 in readings:
+            u = usage(h, 10.0, pct7)
+            h.switcher.usage_history.record({slot: u}, {slot: (email, "")}, now - ago)
+
+    def test_pace_burn_carries_over_a_fresh_switch(self, temp_home):
+        h = make(temp_home)
+        # #2 burned 7d at 2%/h until a switch a minute ago; #1 is now on duty
+        # with only flat readings of its own.
+        self.record(h, "2", [(60 + i * 600, 50.0 - i * 0.333) for i in range(12)])
+        self.record(h, "1", [(60 + i * 600, 20.0) for i in range(12)] + [(0, 20.0)])
+        h.engine._mutate_state(lambda st: st.update(lastSwitchAt=h.clock.now - 60))
+        assert h.engine._burn_rate("1", h.clock.now) == pytest.approx(2.0, rel=0.05)
+
+    def test_pace_burn_ignores_the_new_duty_s_idle_past(self, temp_home):
+        h = make(temp_home)
+        # #1 rose 3%/h hours ago (used elsewhere), then a switch to it and
+        # an hour of flat readings: the user is not burning it.
+        self.record(h, "1", [(4 * 3600 + i * 600, 40.0 - i * 0.5) for i in range(12)])
+        self.record(h, "1", [(i * 600, 40.0) for i in range(7)])
+        h.engine._mutate_state(lambda st: st.update(lastSwitchAt=h.clock.now - 3700))
+        assert h.engine._burn_rate("1", h.clock.now) == pytest.approx(0.0, abs=1e-6)

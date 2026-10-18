@@ -29,7 +29,7 @@ import statistics
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 
-from claude_rotater.estimator import estimate_window, is_relevant_window
+from claude_rotater.estimator import WindowEstimate, estimate_window, is_relevant_window
 from claude_rotater.usage_history import Point
 
 # Readings older than this say nothing about the current cadence.
@@ -108,6 +108,7 @@ def project(
     now: float,
     since: float | None,
     horizon_s: float,
+    carried: Mapping[str, WindowEstimate] | None = None,
 ) -> Projection | None:
     """The relevant window projected highest at ``now + horizon_s``, or None
     when no window has enough history to say anything.
@@ -115,12 +116,17 @@ def project(
     ``series`` is this account's ``{label: [Point]}`` history; ``live_pcts``
     its decision reading ``{label: (pct, resets_at_epoch | None)}``, which may
     be newer than the history. A window that resets before the next reading
-    is skipped: it will be emptier then, not fuller."""
+    is skipped: it will be emptier then, not fuller. ``carried`` is the
+    user's burn up to the last switch (``estimator.carried_burn``), taken
+    while the account has too few readings of its own since."""
     best: Projection | None = None
     for label, points in series.items():
         if not is_relevant_window(label, models) or not points:
             continue
-        est = estimate_window(points, window=label, now=now, since=since)
+        est = estimate_window(
+            points, window=label, now=now, since=since, on_duty=True,
+            carried=(carried or {}).get(label),
+        )
         if est is None or not est.points:
             continue
         live_pct, live_reset = live_pcts.get(label, (None, None))
