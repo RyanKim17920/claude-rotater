@@ -91,7 +91,7 @@ from claude_rotater.paths import (
 from claude_rotater.legacy_import import import_legacy_data
 from claude_rotater.process_detection import get_running_instances
 from claude_rotater import poll_policy, process_detection
-from claude_rotater.estimator import estimate_account
+from claude_rotater.estimator import estimate_fleet
 from claude_rotater.usage_history import UsageHistory
 from claude_rotater.settings import (
     load_accounts_settings,
@@ -4749,19 +4749,23 @@ class ClaudeAccountSwitcher:
             num for num, rec in records.items()
             if rec.sentinel is None and rec.error is None
         ]
-        series: dict[str, dict] = {}
-        last_switch_at: float | None = None
+        estimates: dict = {}
         if identities and successes:
             from claude_rotater.feed_ingest import read_last_switch_at
 
-            # The burn before the last switch was the previous duty's.
-            last_switch_at = read_last_switch_at(self.backup_dir)
+            # The burn before the last switch was the previous duty's, and it
+            # carries over to the account on duty: every account's history,
+            # not just this pass's (estimate_fleet).
+            active = next((num for num, info in info_by_num.items() if info[4]), None)
             try:
-                series = self.usage_history.series(
-                    {num: identities[num] for num in successes if num in identities}
+                series = self.usage_history.series(identities)
+                estimates = estimate_fleet(
+                    {num: series.get(num, {}) for num in identities},
+                    active=active, models=models, threshold=threshold, now=now,
+                    since=read_last_switch_at(self.backup_dir),
                 )
             except Exception as e:
-                self._logger.warning(f"Usage history read failed: {e!r}")
+                self._logger.warning(f"Usage estimate failed: {e!r}")
         plans: dict[str, tuple[float | None, float | None]] = {}
         for num in successes:
             rec = records[num]
@@ -4770,17 +4774,14 @@ class ClaudeAccountSwitcher:
             estimate = None
             attempts: list[float] = []
             if identities and num in identities:
+                estimate = estimates.get(num)
                 try:
-                    estimate = estimate_account(
-                        series.get(num, {}), models=models,
-                        threshold=threshold, now=now, since=last_switch_at,
-                    )
                     attempts = self.usage_history.attempts(
                         num, identities[num], now - poll_policy.TRAILING_HOUR_S
                     )
                 except Exception as e:
-                    self._logger.warning(f"Usage estimate failed for {num}: {e!r}")
-                    estimate, attempts = None, []
+                    self._logger.warning(f"Usage attempts read failed for {num}: {e!r}")
+                    attempts = []
             plans[num] = poll_policy.plan_after_fetch(
                 prev_interval_s=before.poll_interval_s if before else None,
                 prev_usage=before.last_good if before else None,

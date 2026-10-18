@@ -1699,7 +1699,9 @@ class TestMainPage:
             one, two = app.estimates["1"], app.estimates["2"]
             assert all(w.rate_pct_per_h is None for w in one.windows.values())
             assert two.windows["5h"].rate_pct_per_h == pytest.approx(40.0, rel=0.05)
-            assert two.windows["7d"].rate_pct_per_h == pytest.approx(0.0, abs=1e-6)
+            # Its 7d has one reading since the switch: the user's weekly
+            # burn carries over from the previous duty (account 1's 0.4%/h).
+            assert two.windows["7d"].rate_pct_per_h == pytest.approx(0.4, rel=0.05)
             assert "~" not in row_plain(app, "1")  # its burn left with the duty
             assert "~5h limit in" in row_plain(app, "2"), row_plain(app, "2")
             title = painted(app, "#detail").splitlines()[1]

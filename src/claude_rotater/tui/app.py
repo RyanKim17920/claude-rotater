@@ -38,7 +38,7 @@ from claude_rotater.autoswitch import (
     AutoSwitchEvent,
     SwitchEvent,
 )
-from claude_rotater.estimator import AccountEstimate, estimate_account
+from claude_rotater.estimator import AccountEstimate, estimate_fleet
 from claude_rotater import statusline_setup
 from claude_rotater.exceptions import ClaudeSwitchError, LoginError
 from claude_rotater.instance import EngineLock, warn_if_not_owner
@@ -450,9 +450,10 @@ class RotaApp(App):
         or the account on duty changed.
 
         Each account is estimated from its own history, its slope cut at
-        ``last_switch_at`` (the burn before a switch was the previous duty's,
-        see :mod:`claude_rotater.estimator`), so a switch re-estimates every
-        row even when no fetch has landed yet.
+        ``last_switch_at``: the account on duty carries the user's burn, an
+        idle one only its recent outside use (see
+        :func:`claude_rotater.estimator.estimate_fleet`), so a switch
+        re-estimates every row even when no fetch has landed yet.
 
         Worker thread only. None means "unchanged, keep the cached ones".
         History is best effort: any failure degrades to no estimates.
@@ -475,13 +476,11 @@ class RotaApp(App):
         threshold = self.settings.threshold
         try:
             series = history.series(identities)
-            estimates = {
-                num: estimate_account(
-                    series.get(num, {}), models=self.models, threshold=threshold,
-                    now=now, since=last_switch_at,
-                )
-                for num in identities
-            }
+            estimates = estimate_fleet(
+                {num: series.get(num, {}) for num in identities},
+                active=stamps["active"], models=self.models, threshold=threshold,
+                now=now, since=last_switch_at,
+            )
             long_term = (
                 self._long_term_for(history, identities, now) if self.long_view else None
             )
