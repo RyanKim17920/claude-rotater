@@ -73,6 +73,7 @@ from claude_rotater.autoswitch import (
     pct_label,
 )
 from claude_rotater.estimator import (
+    MIN_ETA_RATE_PCT_PER_H,
     WINDOW_LEN_S,
     AccountEstimate,
     WindowEstimate,
@@ -755,6 +756,23 @@ def forecast(
     return Forecast("ok", "ok", "ok", False)
 
 
+ELSEWHERE = "used elsewhere"
+
+
+def used_elsewhere(acc: AccountSnapshot, est: AccountEstimate | None) -> bool:
+    """Whether an account not on duty here is rising anyway: another
+    machine or claude.ai is using it. The estimator reads an idle account
+    from its recent readings only, so any trusted burn on one is that."""
+    if acc.is_active or est is None:
+        return False
+    return any(
+        w.confidence in _TRUSTED
+        and w.rate_pct_per_h is not None
+        and w.rate_pct_per_h > MIN_ETA_RATE_PCT_PER_H
+        for w in est.windows.values()
+    )
+
+
 def forecast_text(fc: Forecast | None, width: int, *, long: bool, palette: Palette) -> Text:
     if fc is None:
         return Text()
@@ -798,6 +816,8 @@ def summary_line(
     fc = forecast(acc, est, threshold=threshold, now=now, models=models)
     if fc is not None:
         parts.append(fc.text)
+    if used_elsewhere(acc, est):
+        parts.append(ELSEWHERE)
     return " · ".join(parts)
 
 
@@ -1011,7 +1031,7 @@ def chart_lines(
     if not blocks or height < chart_min_rows(width, len(blocks)):
         return []
     title = Text(f"{CURSOR_MARK} ", style=f"bold {palette.accent}", no_wrap=True)
-    title.append(account_title(acc, palette))
+    title.append(account_title(acc, palette, ELSEWHERE if used_elsewhere(acc, est) else ""))
     return [title, *_arrange(blocks, width=width, height=height - 1)]
 
 

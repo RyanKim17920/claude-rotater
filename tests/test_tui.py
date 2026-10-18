@@ -1710,6 +1710,51 @@ class TestMainPage:
             await pilot.pause()
             assert "· —" in painted(app, "#detail")  # account 1: no projection
 
+    @pytest.mark.parametrize("elsewhere", [True, False])
+    async def test_idle_account_projects_only_its_recent_outside_use(self, tmp_path, elsewhere):
+        """The owner's screen an hour after a switch #2 -> #1: #1 on duty
+        and flat (5h 0%, 7d 89%); #2 burned 4%/h of 7d while on duty here.
+        Since the switch #2 either rose 1%/h (used on another machine) or
+        stayed flat. Its on-duty burn never projects; outside use does, and
+        says so."""
+        now = time.time()
+        switch_at = now - 3600
+        week = now + 3 * 86400
+        after_rate = 1.0 if elsewhere else 0.0
+        fake = FakeSwitcher(
+            [
+                make_account(1, active=True, entry=make_entry(0.0, 89.0), email="me@x.com"),
+                make_account(2, entry=make_entry(13.0, 32.0 + after_rate), email="work@y.com"),
+            ],
+            tmp_path,
+        )
+        with_history(fake, {
+            "1": {"7d": linear_points(now=now, start_pct=89.0, rate_pct_per_h=0.0,
+                                      span_s=3 * 3600, step_s=600, resets_at=week)},
+            "2": {"7d": linear_points(now=switch_at, start_pct=24.0, rate_pct_per_h=4.0,
+                                      span_s=2 * 3600, step_s=600, resets_at=week)
+                  + linear_points(now=now, start_pct=32.0, rate_pct_per_h=after_rate,
+                                  span_s=3600, step_s=600, resets_at=week)[1:]},
+        })
+        (tmp_path / "autoswitch_state.json").write_text(json.dumps({"lastSwitchAt": switch_at}))
+        app = make_app(fake)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await settle(pilot)
+            assert row_plain(app, "1").endswith("ok"), row_plain(app, "1")
+            rate = app.estimates["2"].windows["7d"].rate_pct_per_h
+            assert rate == pytest.approx(after_rate, abs=0.05)  # never the 4%/h
+            await pilot.press("down")
+            await pilot.pause()
+            head = painted(app, "#detail").splitlines()[0]
+            if elsewhere:
+                assert "~7d limit in" in row_plain(app, "2"), row_plain(app, "2")
+                assert "used elsewhere" in head
+                assert app.screen.summary("2").endswith("used elsewhere")
+            else:
+                assert "~" not in row_plain(app, "2")
+                assert row_plain(app, "2").endswith("ok"), row_plain(app, "2")
+                assert "used elsewhere" not in head
+
     async def test_cursor_on_duty_follows_a_switch_it_did_not_make(self, tmp_path):
         """An engine switch (or another rota's) moves the account on duty
         under the page: a cursor that sat on it follows, so the charts
