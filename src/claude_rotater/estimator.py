@@ -20,12 +20,26 @@ pass the last switch as ``since``: only measurements from then on set the
 slope, and until there are enough of them the rate is unknown, except for
 an account that was flat before the switch too (an idle account stays
 idle).
+
+Callers that know which account is on duty say so (``on_duty``), and the
+two kinds of account are then read differently:
+
+- An idle account burns only when something outside this machine uses it
+  (another machine, claude.ai). Its slope comes from its recent readings
+  alone (:data:`IDLE_PARAMS`, the last hour of polls), never from the burn
+  it showed while it was on duty here, and never from a window average.
+  Flat recent readings project flat.
+- The account on duty carries the user's burn. Right after a switch it has
+  too few readings of its own, so it takes the burn the previous duty showed
+  up to the switch (:func:`carried_burn`): that is the user's consumption,
+  not the account's. Percentages are taken as comparable across accounts
+  (same plan size); nothing here can tell otherwise.
 """
 
 from __future__ import annotations
 
 import math
-from collections.abc import Sequence
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from typing import Literal
 
@@ -44,6 +58,9 @@ class WindowParams:
 
 PARAMS_5H = WindowParams(lookback_s=90 * 60, half_life_s=30 * 60, high_span_s=30 * 60)
 PARAMS_WEEK = WindowParams(lookback_s=24 * 3600, half_life_s=6 * 3600, high_span_s=3 * 3600)
+# An idle account's burn is outside use, read from its last hour of readings
+# only (idle accounts are polled every ~10 minutes, so ~6 points).
+IDLE_PARAMS = WindowParams(lookback_s=60 * 60, half_life_s=20 * 60, high_span_s=30 * 60)
 MIN_SPAN_S = 240.0  # below this two points are noise (integer pct quantization)
 RESET_DROP_PCT = 2.0  # a pct drop larger than this between points means the window reset
 RESET_MATCH_S = 120.0  # resets_at jitter tolerated within one window
@@ -157,7 +174,13 @@ def _fit_of(seg: list[Point], now: float, params: WindowParams) -> tuple[float, 
 
 
 def estimate_window(
-    points: Sequence[Point], *, window: str, now: float, since: float | None = None
+    points: Sequence[Point],
+    *,
+    window: str,
+    now: float,
+    since: float | None = None,
+    on_duty: bool | None = None,
+    carried: "WindowEstimate | None" = None,
 ) -> WindowEstimate | None:
     """Estimate one window from its measured points (any order). None when
     there are no points.
@@ -165,7 +188,12 @@ def estimate_window(
     ``since`` is the last account switch (see the module docstring): only
     points from then on set the slope. A segment the switch leaves too short
     keeps the whole segment's fit only when that fit is flat; otherwise the
-    rate is unknown."""
+    rate is unknown.
+
+    ``on_duty`` False reads an idle account (recent readings only, no window
+    average); True the account on duty, which takes ``carried`` (the user's
+    burn up to the switch) while the switch leaves it too few readings of
+    its own. None (unknown) treats every account alike."""
     if not points:
         return None
     pts = sorted(points, key=lambda p: p.t)
@@ -176,7 +204,7 @@ def estimate_window(
             window=window, last_pct=0.0, last_t=newest.t, resets_at=newest.resets_at,
             rate_pct_per_h=None, confidence="none", points=(),
         )
-    params = window_params(window)
+    params = IDLE_PARAMS if on_duty is False else window_params(window)
     seg = _segment(pts, newest, now - params.lookback_s)
     fit = _fit_of(seg, now, params)
     switched = since is not None and since > seg[0].t
@@ -185,6 +213,14 @@ def estimate_window(
         after_fit = _fit_of(after, now, params) if after else None
         if after_fit is not None:
             seg, fit = after, after_fit
+        elif on_duty and carried is not None and carried.rate_pct_per_h is not None:
+            # Too soon after the switch to read this account's own slope:
+            # the user's burn carries over from the previous duty.
+            return WindowEstimate(
+                window=window, last_pct=newest.pct, last_t=newest.t,
+                resets_at=newest.resets_at, rate_pct_per_h=carried.rate_pct_per_h,
+                confidence=carried.confidence, points=tuple(after or [newest]),
+            )
         elif fit is not None and _clamp_rate(fit[0]) > MIN_ETA_RATE_PCT_PER_H:
             fit = None  # the slope before the switch was someone else's burn
     span = seg[-1].t - seg[0].t
@@ -200,7 +236,7 @@ def estimate_window(
             confidence = "medium"
         else:
             confidence = "low"
-    elif newest.resets_at is not None:
+    elif newest.resets_at is not None and on_duty is not False:
         # Average burn since the window opened (meaningless across a switch
         # inside the window: part of it was another account's duty).
         opened = newest.resets_at - window_len_s(window)
@@ -250,14 +286,19 @@ def estimate_account(
     threshold: float,
     now: float,
     since: float | None = None,
+    on_duty: bool | None = None,
+    carried: dict[str, WindowEstimate] | None = None,
 ) -> AccountEstimate:
-    """Every relevant window's estimate; ``since`` is the last account switch
-    (see :func:`estimate_window`)."""
+    """Every relevant window's estimate; ``since`` is the last account
+    switch, ``on_duty`` and ``carried`` as in :func:`estimate_window`."""
     windows: dict[str, WindowEstimate] = {}
     for label, points in series.items():
         if not is_relevant_window(label, models):
             continue
-        est = estimate_window(points, window=label, now=now, since=since)
+        est = estimate_window(
+            points, window=label, now=now, since=since, on_duty=on_duty,
+            carried=(carried or {}).get(label),
+        )
         if est is not None:
             windows[label] = est
     if not windows:
@@ -275,3 +316,55 @@ def estimate_account(
         eta_limit_s=_min_or_none([w.eta_s(100.0, now) for w in windows.values()]),
         confidence=binding.confidence,
     )
+
+
+def carried_burn(
+    others: Iterable[dict[str, list[Point]]], *, since: float | None
+) -> dict[str, WindowEstimate]:
+    """Per window, the user's burn up to the last switch: the steepest fit
+    any other account shows over its readings up to ``since``, each fitted
+    as of the switch. The account on duty before the switch is the one that
+    was climbing; an idle one was flat (or, rarely, used elsewhere at the
+    same time, which only makes the carried burn err on the cautious side).
+
+    Not stored anywhere: it is read off history, so it holds for engine and
+    manual switches alike, and for switches made by another process."""
+    if since is None:
+        return {}
+    best: dict[str, WindowEstimate] = {}
+    for series in others:
+        for label, points in series.items():
+            before = [p for p in points if p.t <= since]
+            est = estimate_window(before, window=label, now=since) if before else None
+            if est is None or est.rate_pct_per_h is None:
+                continue
+            held = best.get(label)
+            if held is None or est.rate_pct_per_h > (held.rate_pct_per_h or 0.0):
+                best[label] = est
+    return best
+
+
+def estimate_fleet(
+    series: dict[str, dict[str, list[Point]]],
+    *,
+    active: str | None,
+    models: tuple[str, ...],
+    threshold: float,
+    now: float,
+    since: float | None = None,
+) -> dict[str, AccountEstimate]:
+    """Every account's estimate, ``series`` by slot: the account on duty
+    (``active``) with the user's burn carried over a fresh switch, every
+    other account from its own recent readings (see the module docstring).
+    The one entry point the TUI, the poll planner and the engine share."""
+    carried = carried_burn(
+        (s for num, s in series.items() if num != active), since=since
+    ) if active is not None else {}
+    return {
+        num: estimate_account(
+            s, models=models, threshold=threshold, now=now, since=since,
+            on_duty=None if active is None else num == active,
+            carried=carried if num == active else None,
+        )
+        for num, s in series.items()
+    }

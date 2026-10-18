@@ -295,6 +295,107 @@ class TestSinceSwitch:
         assert a.eta_threshold_s is None
 
 
+class TestOnDuty:
+    """Only the account in use here carries the user's burn; an idle one
+    burns only from what its recent readings show (use elsewhere)."""
+
+    SWITCH = NOW - 1800
+    WEEK_RESET = NOW + 3 * 86400
+
+    def week(self, rate, *, start, n, step_s=600.0, end_t=NOW):
+        return line(rate, start_pct=start, n=n, step_s=step_s, end_t=end_t,
+                    resets_at=self.WEEK_RESET)
+
+    def test_idle_flat_recent_readings_project_flat(self):
+        # Burned 2%/h on duty here until four hours ago, flat polls since:
+        # an unknown on-duty flag would still fit the old burn into a 24 h
+        # lookback, an idle account reads its last hour only.
+        old = self.week(2.0, start=30.0, n=12, end_t=NOW - 4 * 3600)
+        flat = [Point(NOW - 3 * 3600 + i * 600, old[-1].pct, self.WEEK_RESET) for i in range(19)]
+        legacy = estimate_window(old + flat, window="7d", now=NOW)
+        assert legacy.rate_pct_per_h > 0.1
+        w = estimate_window(old + flat, window="7d", now=NOW, on_duty=False)
+        assert w.rate_pct_per_h == pytest.approx(0.0, abs=1e-9)
+        assert w.eta_s(90.0, NOW) is None
+
+    def test_idle_rising_in_recent_polls_projects_that_rise(self):
+        flat = [Point(NOW - 3 * 3600 + i * 600, 30.0, self.WEEK_RESET) for i in range(12)]
+        rising = self.week(3.0, start=30.0, n=7)  # used on another machine
+        w = estimate_window(flat + rising, window="7d", now=NOW, on_duty=False)
+        assert w.rate_pct_per_h == pytest.approx(3.0, rel=0.05)
+        assert w.confidence in ("medium", "high")
+
+    def test_idle_ignores_its_on_duty_slope_after_switching_away(self):
+        burning = line(30.0, start_pct=40.0, n=8, step_s=300, end_t=self.SWITCH)
+        w = estimate_window(burning, window="5h", now=NOW, since=self.SWITCH, on_duty=False)
+        assert w.rate_pct_per_h is None and w.projected_pct(NOW) is None
+
+    def test_idle_gets_no_window_average(self):
+        lone = [Point(NOW, 40.0, NOW + 3 * 3600)]
+        assert estimate_window(lone, window="5h", now=NOW, on_duty=False).rate_pct_per_h is None
+
+    def test_on_duty_takes_the_carried_burn_right_after_a_switch(self):
+        flat = [Point(self.SWITCH - 3000 + i * 600, 10.0, RESET) for i in range(5)]
+        carried = estimate_window(
+            line(30.0, start_pct=40.0, n=8, step_s=300, end_t=self.SWITCH),
+            window="5h", now=self.SWITCH,
+        )
+        w = estimate_window(flat, window="5h", now=NOW, since=self.SWITCH,
+                            on_duty=True, carried=carried)
+        assert w.rate_pct_per_h == pytest.approx(30.0)
+        assert w.confidence == carried.confidence
+        assert w.last_pct == 10.0
+
+    def test_on_duty_own_slope_wins_once_it_has_one(self):
+        flat = [Point(self.SWITCH - 3000 + i * 600, 10.0, RESET) for i in range(5)]
+        rising = line(6.0, start_pct=10.0, n=6, step_s=300, end_t=NOW)
+        carried = estimate_window(
+            line(30.0, start_pct=40.0, n=8, step_s=300, end_t=self.SWITCH),
+            window="5h", now=self.SWITCH,
+        )
+        w = estimate_window(flat + rising, window="5h", now=NOW, since=self.SWITCH,
+                            on_duty=True, carried=carried)
+        assert w.rate_pct_per_h == pytest.approx(6.0)
+
+    def test_carried_burn_is_the_previous_duty_up_to_the_switch(self):
+        duty = {"5h": line(30.0, start_pct=40.0, n=8, step_s=300, end_t=self.SWITCH)}
+        idle = {"5h": [Point(self.SWITCH - 3000 + i * 600, 5.0, RESET) for i in range(5)]}
+        carried = est.carried_burn([idle, duty], since=self.SWITCH)
+        assert carried["5h"].rate_pct_per_h == pytest.approx(30.0)
+        assert est.carried_burn([idle, duty], since=None) == {}
+
+    def test_screenshot_state(self):
+        """The owner's screen an hour after a pace switch #2 -> #1: #1 on
+        duty, flat all along (5h 0%, 7d 89%); #2 burned while on duty here,
+        then kept rising from use elsewhere. #1 is flat ("ok"), #2's
+        projection is its recent outside use, not its on-duty burn."""
+        week2 = NOW + 6 * 86400
+        week1 = NOW + 11 * 3600
+        sw = NOW - 3600
+        two = {
+            # On duty here: 7d +2%/h until the switch, then +0.5%/h elsewhere.
+            "7d": [Point(sw - 3600 + i * 600, 20.0 + i * 0.33, week2) for i in range(7)]
+                  + [Point(sw + 600 + i * 600, 22.0 + i * 0.083, week2) for i in range(6)],
+        }
+        one = {"7d": [Point(sw - 3600 + i * 600, 89.0, week1) for i in range(13)]}
+        fleet = est.estimate_fleet({"1": one, "2": two}, active="1", models=(),
+                                   threshold=99.9, now=NOW, since=sw)
+        r1 = fleet["1"].windows["7d"].rate_pct_per_h
+        r2 = fleet["2"].windows["7d"].rate_pct_per_h
+        assert r1 == pytest.approx(0.0, abs=1e-6)  # its own flat hour wins
+        assert r2 == pytest.approx(0.5, rel=0.1)  # outside use, not 2%/h
+
+    def test_fresh_switch_carries_the_burn_to_the_new_duty(self):
+        sw = NOW - 60
+        one = {"5h": line(30.0, start_pct=40.0, n=12, step_s=300, end_t=sw)}
+        two = {"5h": [Point(sw - 3000 + i * 600, 10.0, RESET) for i in range(5)]
+                     + [Point(NOW, 10.0, RESET)]}
+        fleet = est.estimate_fleet({"1": one, "2": two}, active="2", models=(),
+                                   threshold=99.9, now=NOW, since=sw)
+        assert fleet["2"].windows["5h"].rate_pct_per_h == pytest.approx(30.0)
+        assert fleet["1"].windows["5h"].rate_pct_per_h is None  # idle, nothing since
+
+
 class TestAccount:
     def test_missing_series(self):
         a = estimate_account({}, models=(), threshold=90.0, now=NOW)
