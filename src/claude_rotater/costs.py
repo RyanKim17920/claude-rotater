@@ -387,7 +387,7 @@ def slice_transcripts(
                         buffers.setdefault(out_dir / f"{slot}.jsonl", []).append(data)
                         buffered += len(data)
                         result.records += 1
-                        if buffered > 8 * 1024 * 1024:
+                        if buffered > 1024 * 1024:
                             flush()
             except OSError as e:
                 _logger.warning(f"costs: cannot read a transcript: {e!r}")
