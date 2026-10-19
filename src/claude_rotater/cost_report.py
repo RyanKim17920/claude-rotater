@@ -29,6 +29,7 @@ from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
+from typing import Protocol
 
 from claude_rotater import costs
 
@@ -151,7 +152,7 @@ class Estimate:
     n: int  # windows behind it
 
 
-class _Window:  # what estimate_per_pct needs from usage_history.WindowSummary
+class _Window(Protocol):  # what estimate_per_pct reads of a usage_history.WindowSummary
     resets_at: float
     peak_pct: float
 

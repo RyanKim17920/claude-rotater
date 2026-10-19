@@ -36,7 +36,7 @@ import tempfile
 import time
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 from claude_rotater.settings import atomic_write_json
@@ -463,13 +463,8 @@ def save_cache(backup_dir: Path, cache: CostCache) -> None:
 
 def day_start(t: float, days_back: int = 0) -> float:
     """Local midnight of the day ``t`` falls on, ``days_back`` days earlier."""
-    d = datetime.fromtimestamp(t).date()
-    start = datetime(d.year, d.month, d.day)
-    if days_back:
-        from datetime import timedelta
-
-        start -= timedelta(days=days_back)
-    return start.timestamp()
+    d = datetime.fromtimestamp(t).date() - timedelta(days=days_back)
+    return datetime(d.year, d.month, d.day).timestamp()
 
 
 def range_start(now: float) -> float:
