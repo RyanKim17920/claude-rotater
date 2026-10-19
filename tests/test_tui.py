@@ -1139,6 +1139,31 @@ class TestStatusText:
         assert "feed live" in text
         assert "no-viable-target" not in text and len(text) <= 40
 
+    def test_login_note_outranks_the_verdict_and_the_held_note(self):
+        status = self._status(
+            running=True, decision=self._decision(),
+            last_outcome="no switch: no-candidates", last_reason="no-candidates",
+        )
+        note = "#3 login was revoked (signed in elsewhere?) — press l to log in again"
+        text = self._text(status, feed="live", login_note=note, login_failed=True)
+        assert note in text and "stay" not in text and "no-candidates" not in text
+        assert text.endswith("● feed live")
+
+    def test_failed_login_note_is_red_ending_is_amber(self):
+        from claude_rotater.tui.main import status_text
+
+        for failed, role in ((True, Palette.DARK.sev_crit), (False, Palette.DARK.sev_warn)):
+            head = status_text(self._status(running=True), now=time.time(), width=120,
+                               login_note="#3 login ended — press l", login_failed=failed)
+            start = head.plain.index("#3")
+            styles = {str(span.style) for span in head.spans if span.start <= start < span.end}
+            assert styles == {f"bold {role}"}
+
+    def test_narrow_cuts_the_login_note_but_keeps_it(self):
+        note = "login ends in 2d: #3 — press l"
+        text = self._text(self._status(running=True), width=36, feed="live", login_note=note)
+        assert len(text) <= 36 and "login" in text and "feed" not in text
+
     def _decision(self, line="stay: resets soonest (19h40m), 37% headroom", action="stay"):
         from claude_rotater.autoswitch import Decision
 
@@ -2394,6 +2419,33 @@ class TestRefresherHosting:
             await pilot.pause()
             assert app.login_warn_days == 7
             assert "login ends 4d" in row_plain(app, "2") or "login ends 5d" in row_plain(app, "2")
+
+
+    async def test_header_names_a_dead_login_and_the_key(self, tmp_path):
+        from claude_rotater.json_output import USAGE_RELOGIN_REQUIRED
+
+        dead = dataclasses.replace(make_entry(), sentinel=USAGE_RELOGIN_REQUIRED)
+        fake = FakeSwitcher(
+            [make_account(1, email="me@x.com"), make_account(3, active=True, email="w@y.com", entry=dead)],
+            tmp_path,
+        )
+        app = make_app(fake)
+        async with app.run_test(size=(140, 40)) as pilot:
+            await settle(pilot)
+            assert "#3 login was revoked (signed in elsewhere?) — press l to log in again" in painted(app, "#status")
+
+    async def test_header_warns_of_a_login_ending_within_the_warn_days(self, tmp_path):
+        fake = FakeSwitcher(
+            [
+                make_account(1, active=True, email="me@x.com"),
+                dataclasses.replace(make_account(3, email="w@y.com"), login_expires_at=time.time() + 2 * 86400 + 600),
+            ],
+            tmp_path,
+        )
+        app = make_app(fake)
+        async with app.run_test(size=(140, 40)) as pilot:
+            await settle(pilot)
+            assert "login ends in 2d: #3 — press l" in painted(app, "#status")
 
 
 def test_default_factory_builds_live_engine(monkeypatch, tmp_path):

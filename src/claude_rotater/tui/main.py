@@ -62,7 +62,7 @@ from textual.css.scalar import Scalar
 from textual.screen import Screen
 from textual.widgets import ListItem, ListView, RichLog, Static
 
-from claude_rotater import oauth, profiles
+from claude_rotater import login_alerts, oauth, profiles
 from claude_rotater.autoswitch import (
     ALERT_REASONS,
     AutoSwitchEvent,
@@ -305,12 +305,19 @@ def status_text(
     feed: str | None = None,
     over_threshold: bool = False,
     profile: str | None = None,
+    login_note: str = "",
+    login_failed: bool = False,
 ) -> Text:
     """`` rota · work   auto on · stay: resets soonest (19h40m)   ● feed live``.
 
     The engine state with its latest verdict (dim, cut to fit), the feed
     state and, when a switch is blocked, why in place of the verdict; the
-    note goes, then the verdict, when the width runs short."""
+    note goes, then the verdict, when the width runs short.
+
+    ``login_note`` (a login that died or is ending, see ``login_alerts``)
+    outranks all of them: it takes the verdict's place, in red when the
+    login already failed, and is cut to fit rather than dropped — a login
+    that lapses unseen is the one failure rota exists to prevent."""
     head = Text(no_wrap=True, overflow="ellipsis")
     head.append(brand_chip(palette))
     if profile:  # a named profile, so it is obvious which one is open
@@ -324,7 +331,16 @@ def status_text(
         tail.append(f"   {glyph} ", style=getattr(palette, role))
         tail.append(words, style=palette.muted)
     note = status.view_only or switch_note(status, now=now, over_threshold=over_threshold)
-    if note:
+    if login_note:
+        room = width - head.cell_len - tail.cell_len - 3
+        if room < MIN_DECISION_W:  # the feed word gives way first
+            tail = Text(no_wrap=True)
+            room = width - head.cell_len - 3
+        line = Text(login_note, style=f"bold {palette.sev_crit if login_failed else palette.sev_warn}", no_wrap=True)
+        line.truncate(max(room, 0), overflow="ellipsis")
+        head.append("   ")
+        head.append_text(line)
+    elif note:
         if head.cell_len + tail.cell_len + 3 + len(note) <= width:
             tail.append(f"   {note}", style=palette.sev_warn)
     elif status.running and status.decision is not None:
@@ -1517,14 +1533,21 @@ class MainScreen(Screen):
         threshold = self.app.threshold_pct
         active = next((a for a in snap.accounts if a.is_active), None) if snap else None
         pcts = [pct for pct, _r in window_pcts(active, self.app.models).values()] if active else []
+        now = time.time()
+        alerts = login_alerts.collect(
+            login_alerts.states_from_snapshot(snap.accounts if snap else ()),
+            now, self.app.login_warn_days,
+        )
         return status_text(
             self.app.auto_status,
-            now=time.time(),
+            now=now,
             width=width,
             palette=self.palette,
             feed=self.app.feed_state or None,
             over_threshold=threshold is not None and any(p >= threshold for p in pcts),
             profile=profiles.active_name(),
+            login_note=login_alerts.header_note(alerts),
+            login_failed=bool(alerts) and login_alerts.is_failed(alerts[0]),
         )
 
     def row_text(self, number: str, width: int) -> Text:
