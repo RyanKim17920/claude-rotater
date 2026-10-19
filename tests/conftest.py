@@ -735,6 +735,18 @@ def _no_other_rota(request, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _no_desktop_notifications(request, monkeypatch):
+    """A test run must never pop notifications on the developer's desktop:
+    every notifier posts into a list instead (``notifications_sent``)."""
+    sent: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        "claude_rotater.login_alerts.notify_macos",
+        lambda title, body: sent.append((title, body)) or True,
+    )
+    request.node.notifications_sent = sent
+
+
+@pytest.fixture(autouse=True)
 def _deterministic_poll_jitter(monkeypatch):
     """Zero the poll-plan jitter so cadence tests are clock-exact; the jitter
     itself is exercised in test_poll_policy via an injected rng."""

@@ -93,10 +93,13 @@ class UiSettings:
     """TUI preferences (``ui`` section). ``theme`` selects the TUI/CLI
     color theme; ``auto`` follows terminal-background detection.
     ``login_warn_days`` flags an account whose stored login (refresh token)
-    lapses within that many days, so it can be re-logged in ahead of time."""
+    lapses within that many days, so it can be re-logged in ahead of time.
+    ``login_notify`` also posts a desktop notification (macOS) when a login
+    has died or ends within a day."""
 
     theme: str = "auto"
     login_warn_days: int = 3
+    login_notify: bool = True
 
 
 @dataclass(frozen=True)
@@ -318,6 +321,11 @@ SETTING_SPECS: dict[str, SettingSpec] = {
             group="ui", label="Login warning", step=1.0, unit="d",
         ),
         SettingSpec(
+            "ui", "loginNotify", "login_notify", "bool",
+            help="Desktop notification (macOS) when a login dies or ends within a day",
+            group="ui", label="Login notifications",
+        ),
+        SettingSpec(
             "run", "shareDefault", "share_default", "bool",
             help="rota run shares settings, CLAUDE.md and skills from the main "
             "config unless told --share/--no-share",
@@ -457,7 +465,10 @@ def load_ui_settings(backup_root: Path) -> UiSettings:
     if isinstance(days, bool) or not isinstance(days, (int, float)):
         days = default.login_warn_days
     days = int(min(max(days, spec.lo), spec.hi))
-    return UiSettings(theme=theme, login_warn_days=days)
+    notify = section.get(SETTING_SPECS["ui.loginNotify"].json_key, default.login_notify)
+    if not isinstance(notify, bool):
+        notify = default.login_notify
+    return UiSettings(theme=theme, login_warn_days=days, login_notify=notify)
 
 
 def _load_flag_section(backup_root: Path, section: str):

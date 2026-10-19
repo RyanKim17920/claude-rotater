@@ -499,6 +499,24 @@ class TestLoginWarnDays:
             set_setting(tmp_path, "ui.loginWarnDays", "61")
 
 
+class TestLoginNotify:
+    def test_default_on_and_lenient_read(self, tmp_path):
+        import json as _json
+
+        from claude_rotater.settings import load_ui_settings, settings_path
+
+        assert load_ui_settings(tmp_path).login_notify is True
+        for raw, expected in ((False, False), (True, True), ("no", True), (0, True)):
+            settings_path(tmp_path).write_text(_json.dumps({"ui": {"loginNotify": raw}}))
+            assert load_ui_settings(tmp_path).login_notify is expected, raw
+
+    def test_set_turns_it_off(self, tmp_path):
+        from claude_rotater.settings import load_ui_settings, set_setting
+
+        set_setting(tmp_path, "ui.loginNotify", "false")
+        assert load_ui_settings(tmp_path).login_notify is False
+
+
 class TestProfileSettings:
     """``run.shareDefault`` and ``accounts.oauthOnly``: plain bools, read
     leniently, set strictly, shown on the Config page's Profile section."""
