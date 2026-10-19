@@ -196,6 +196,15 @@ def try_refresh_oauth_credentials(
         oauth["expiresAt"] = now_ms + resp_data["expires_in"] * 1000
         if resp_data.get("refresh_token"):
             oauth["refreshToken"] = resp_data["refresh_token"]
+        rt_expires_in = resp_data.get("refresh_token_expires_in")
+        if (
+            isinstance(rt_expires_in, (int, float))
+            and not isinstance(rt_expires_in, bool)
+            and rt_expires_in > 0
+        ):
+            # Keep the login's end date as Claude Code would: a stale one
+            # warns of an end that moved, or misses the one that is coming.
+            oauth["refreshTokenExpiresAt"] = now_ms + int(rt_expires_in * 1000)
         if resp_data.get("scope"):
             oauth["scopes"] = resp_data["scope"].split()
 

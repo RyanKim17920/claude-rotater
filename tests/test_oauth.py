@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import time
 import urllib.error
 from datetime import datetime, timezone
 from unittest.mock import MagicMock, patch
@@ -490,6 +491,25 @@ class TestTryRefreshOAuthCredentials:
         rotated = json.loads(outcome.credentials)["claudeAiOauth"]
         assert rotated["accessToken"] == "new-access"
         assert rotated["refreshToken"] == "new-refresh"
+
+    @pytest.mark.parametrize("given,kept", [(86400, True), (None, False), (0, False), ("soon", False), (True, False)])
+    def test_login_end_follows_the_server(self, given, kept):
+        body = {"access_token": "a", "refresh_token": "r", "expires_in": 3600}
+        if given is not None:
+            body["refresh_token_expires_in"] = given
+        mock_response = MagicMock()
+        mock_response.read.return_value = json.dumps(body).encode()
+        mock_response.__enter__ = lambda s: s
+        mock_response.__exit__ = MagicMock(return_value=False)
+        old = json.loads(self._make_credentials())
+        old["claudeAiOauth"]["refreshTokenExpiresAt"] = 1234
+        with patch("claude_rotater.oauth.urllib.request.urlopen", return_value=mock_response):
+            outcome = oauth.try_refresh_oauth_credentials(json.dumps(old))
+        end = json.loads(outcome.credentials)["claudeAiOauth"]["refreshTokenExpiresAt"]
+        if kept:
+            assert abs(end / 1000 - (time.time() + 86400)) < 60
+        else:
+            assert end == 1234
 
     def test_invalid_grant_body_on_400_is_permanent(self):
         err = self._http_error(400, b'{"error": "invalid_grant"}')
