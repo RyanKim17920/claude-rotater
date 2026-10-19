@@ -12254,3 +12254,43 @@ class TestSwitchUnderCustomConfigDir:
         assert kc[(CLAUDE_CODE_KEYCHAIN_SERVICE, acct)] == "PERSONAL-LOGIN"
         cfg = json.loads((work / ".claude.json").read_text())
         assert cfg["oauthAccount"]["accountUuid"] == "uuid-2"
+
+
+class TestWipedLiveLoginIsDead:
+    """Claude Code empties the live tokens when the server refuses its
+    refresh. That login is dead: it must read "re-login needed" (header,
+    notification, failover), never the silent "no credentials"."""
+
+    WIPED = json.dumps({"claudeAiOauth": {
+        "accessToken": "", "refreshToken": "", "expiresAt": 1000,
+        "scopes": ["user:profile"], "subscriptionType": "max",
+    }})
+
+    def _switcher(self, temp_home: Path) -> ClaudeAccountSwitcher:
+        s = ClaudeAccountSwitcher()
+        s.platform = Platform.LINUX
+        s._setup_directories()
+        return s
+
+    def test_active_wiped_login_needs_a_relogin(self, temp_home: Path):
+        from claude_rotater.json_output import USAGE_RELOGIN_REQUIRED
+
+        s = self._switcher(temp_home)
+        info = (3, "c@example.com", "", "", True, self.WIPED, "")
+        assert s._static_usage_sentinel(info) == USAGE_RELOGIN_REQUIRED
+
+    def test_half_wiped_or_tokenless_shapes_are_not_this_verdict(self, temp_home: Path):
+        from claude_rotater.json_output import USAGE_NO_CREDENTIALS
+
+        s = self._switcher(temp_home)
+        refresh_only = json.dumps({"claudeAiOauth": {"accessToken": "", "refreshToken": "rt"}})
+        assert s._static_usage_sentinel((3, "c@example.com", "", "", True, refresh_only, "")) == USAGE_NO_CREDENTIALS
+        assert s._static_usage_sentinel((3, "c@example.com", "", "", True, "", "")) == USAGE_NO_CREDENTIALS
+
+    def test_is_wiped_shapes(self):
+        from claude_rotater import oauth
+
+        assert oauth.is_wiped(self.WIPED)
+        assert not oauth.is_wiped(json.dumps({"claudeAiOauth": {"accessToken": "a", "refreshToken": ""}}))
+        assert not oauth.is_wiped("not json")
+        assert not oauth.is_wiped(json.dumps({"other": {}}))

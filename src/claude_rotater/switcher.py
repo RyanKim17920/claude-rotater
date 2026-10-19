@@ -4336,6 +4336,11 @@ class ClaudeAccountSwitcher:
         if looks_like_api_key(creds):
             # Managed API-key account: no subscription quota to fetch.
             return USAGE_API_KEY
+        if is_active and creds and oauth.is_wiped(creds):
+            # Claude Code emptied the live tokens: the server refused its
+            # refresh. That is a dead login, not a missing one — saying "no
+            # credentials" left it silent while every claude failed.
+            return USAGE_RELOGIN_REQUIRED
         if not creds or not oauth.extract_access_token(creds):
             if is_active and (
                 self._active_keychain_unavailable or self._active_read_unreadable
@@ -6064,10 +6069,7 @@ class ClaudeAccountSwitcher:
             == oauth.credential_fingerprint(original_creds)
         ):
             return ("own-family", None)
-        live_oauth = oauth.extract_oauth_data(original_creds)
-        if live_oauth is not None and not (
-            live_oauth.get("accessToken") or live_oauth.get("refreshToken")
-        ):
+        if oauth.is_wiped(original_creds):
             return ("wiped", None)
         resolved = provenance.get("resolved")
         if resolved is None or provenance.get("live") != original_creds:

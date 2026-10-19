@@ -70,6 +70,16 @@ def access_token_fingerprint(credentials: str) -> str | None:
     return "sha256-at:" + hashlib.sha256(token.encode()).hexdigest()
 
 
+def is_wiped(credentials: str) -> bool:
+    """Whether this is an OAuth blob whose token fields were emptied in place.
+
+    Claude Code does that to the live store when the server refuses its
+    refresh (``invalid_grant``), keeping the wrapper and metadata (observed
+    on 2.1.181): the login is dead until a new ``/login``."""
+    data = extract_oauth_data(credentials)
+    return data is not None and not (data.get("accessToken") or data.get("refreshToken"))
+
+
 def login_expires_at(credentials: str) -> float | None:
     """When the stored *login* itself lapses, as epoch seconds, or ``None``.
 
