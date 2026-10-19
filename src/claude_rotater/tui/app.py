@@ -113,6 +113,21 @@ def default_refresher_factory(switcher, on_event) -> TokenRefresher:
     return TokenRefresher(switcher, on_event=on_event)
 
 
+def default_cost_source_factory(switcher):
+    """The costs view's data: ccusage over this profile's transcripts, on
+    demand (the view opening, or ``r``)."""
+    from claude_rotater.cost_report import CostSource
+    from claude_rotater.paths import get_base_claude_config_home
+
+    home = get_base_claude_config_home(switcher.backup_dir / "sessions")
+    return CostSource(
+        switcher.backup_dir,
+        getattr(switcher, "usage_history", None),
+        [home],
+        active=switcher.current_account_number,
+    )
+
+
 class RotaApp(App):
     """rota interactive TUI: one screen; the settings show in its body."""
 
@@ -188,6 +203,14 @@ class RotaApp(App):
         self.login_warn_days = ui.login_warn_days
         self.cadence = load_cadence(switcher.backup_dir)  # when a reading counts as overdue
         self.main_screen = MainScreen()
+        self._cost_source = None
+
+    @property
+    def cost_source(self):
+        """Built on first use (``$``): no transcript is read before that."""
+        if self._cost_source is None:
+            self._cost_source = default_cost_source_factory(self.switcher)
+        return self._cost_source
 
     def _load_settings(self) -> None:
         try:

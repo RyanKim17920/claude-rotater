@@ -93,6 +93,8 @@ from claude_rotater.tui.plot import (
 )
 from claude_rotater.tui.config import HINT_KEYS as CONFIG_HINT_KEYS
 from claude_rotater.tui.config import ConfigView
+from claude_rotater.tui.costs import HINT_KEYS as COSTS_HINT_KEYS
+from claude_rotater.tui.costs import CostsView
 from claude_rotater.tui.prompt import PromptLine, hint_text
 from claude_rotater.tui.theme import Palette, blend, brand_chip
 from claude_rotater.tui.widgets import BAR_EIGHTHS, BAR_FULL, BAR_TICK
@@ -1256,6 +1258,7 @@ MAIN_HINT_KEYS: tuple[tuple[str, str], ...] = (
     ("⏎", "switch"),
     ("a", "add"),
     ("m", "manual"),
+    ("$", "costs"),
     ("?", "keys"),
 )
 
@@ -1291,6 +1294,7 @@ KEY_COLUMNS: tuple[tuple[KeyGroup, ...], ...] = (
         ("view", (
             ("y / Y", "copy row / table"),
             ("h", "history (esc back)"),
+            ("$", "costs (esc back)"),
             ("f", "refresh now"),
             ("ctrl+t", "theme"),
         )),
@@ -1345,7 +1349,7 @@ MAIN_ONLY_ACTIONS = frozenset({
     "login_selected", "add", "add_token", "toggle_selected", "remove_selected",
     "toggle_long", "statusline", "refresh_full", "help", "leave_panel",
     "cursor_down", "cursor_up", "open_config", "toggle_mode", "copy_row",
-    "copy_table",
+    "copy_table", "open_costs",
 })
 
 
@@ -1367,6 +1371,7 @@ class MainScreen(Screen):
         Binding("s", "statusline", show=False),
         Binding("f", "refresh_full", show=False),
         Binding("question_mark", "help", show=False),
+        Binding("dollar_sign", "open_costs", show=False),
         Binding("q", "app.quit", show=False),
         Binding("escape", "leave_panel", show=False),
         Binding("j", "cursor_down", show=False),
@@ -1391,6 +1396,9 @@ class MainScreen(Screen):
         config = ConfigView(self.app.switcher.backup_dir, id="config")
         config.display = False
         yield config
+        costs = CostsView(id="costs")
+        costs.display = False
+        yield costs
         yield PromptLine(id="prompt")
 
     def on_mount(self) -> None:
@@ -1426,9 +1434,17 @@ class MainScreen(Screen):
     def config_shown(self) -> bool:
         return self.config.display
 
+    @property
+    def costs(self) -> CostsView:
+        return self.query_one(CostsView)
+
+    @property
+    def costs_shown(self) -> bool:
+        return self.costs.display
+
     def check_action(self, action: str, parameters: tuple) -> bool | None:
-        """With the settings shown, the account keys stand down."""
-        if action in MAIN_ONLY_ACTIONS and self.config_shown:
+        """With the settings or the costs shown, the account keys stand down."""
+        if action in MAIN_ONLY_ACTIONS and (self.config_shown or self.costs_shown):
             return False
         return True
 
@@ -1579,7 +1595,12 @@ class MainScreen(Screen):
         self.query_one("#status").refresh()
 
     def _set_hint(self) -> None:
-        keys = CONFIG_HINT_KEYS if self.config_shown else main_hint_keys(self.app.settings.mode)
+        if self.config_shown:
+            keys = CONFIG_HINT_KEYS
+        elif self.costs_shown:
+            keys = COSTS_HINT_KEYS
+        else:
+            keys = main_hint_keys(self.app.settings.mode)
         self.prompt.set_hint(hint_text(keys, self.palette))
 
     def _on_theme(self) -> None:
@@ -1587,6 +1608,8 @@ class MainScreen(Screen):
         self.repaint()
         if self.config_shown:
             self.config.settings_list.refresh()
+        if self.costs_shown:
+            self.costs.refresh()
 
     async def _on_snapshot(self, snap: AccountsSnapshot | None) -> None:
         if snap is None:
@@ -1679,6 +1702,24 @@ class MainScreen(Screen):
     def on_config_view_closed(self, event: ConfigView.Closed) -> None:
         event.stop()
         self.config.display = False
+        self.query_one("#body").display = True
+        self.query_one("#accounts", ListView).focus()
+        self._set_hint()
+        self.repaint()
+
+    # -- the costs, in place of the body ----------------------------------------
+
+    def action_open_costs(self) -> None:
+        self.prompt.cancel()
+        self._show_keys(False)
+        self.query_one("#body").display = False
+        self.costs.display = True
+        self.costs.open()
+        self._set_hint()
+
+    def on_costs_view_closed(self, event: CostsView.Closed) -> None:
+        event.stop()
+        self.costs.display = False
         self.query_one("#body").display = True
         self.query_one("#accounts", ListView).focus()
         self._set_hint()

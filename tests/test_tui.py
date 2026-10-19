@@ -1418,7 +1418,7 @@ class TestMainPage:
             assert "estimate" not in status and "~" not in status  # no legend: titles say it
             assert "90%" not in status
             # no button bar, no quit button, no stock header/footer: one dim hint
-            assert prompt_plain(app) == "⏎ switch · a add · m manual · ? keys"
+            assert prompt_plain(app) == "⏎ switch · a add · m manual · $ costs · ? keys"
             for stock in (Button, Footer, Header):
                 assert not app.screen.query(stock)
             assert app.focused is app.screen.query_one("#accounts")  # the list keeps the keys
@@ -1623,7 +1623,7 @@ class TestMainPage:
             assert "me@x.com" in first and "62%" in first
             assert "1h59m" in first or "2h00m" in first  # the 5h reset at any width
             assert len(first) <= size[0]
-            assert prompt_plain(app) == "⏎ switch · a add · m manual · ? keys"  # whole at any width
+            assert prompt_plain(app) == "⏎ switch · a add · m manual · $ costs · ? keys"  # whole at any width
             # too few rows for readable charts: hidden, never squeezed
             assert app.screen.query_one("#prompt").region.bottom == size[1]
             assert not braille(painted(app, "#detail"))
@@ -1879,7 +1879,7 @@ class TestMainPage:
             await pilot.press("n")
             await settle(pilot)
             assert not any(c[0] == "remove" for c in fake_calls(app))
-            assert prompt_plain(app) == "⏎ switch · a add · m manual · ? keys"
+            assert prompt_plain(app) == "⏎ switch · a add · m manual · $ costs · ? keys"
             await pilot.press("delete")
             await pilot.pause()
             await pilot.press("escape")  # esc cancels as well
@@ -2020,7 +2020,7 @@ class TestMainPage:
             await pilot.pause()
             assert not screen.config_shown and screen.query_one("#body").display
             assert app.focused is screen.query_one("#accounts")
-            assert prompt_plain(app) == "⏎ switch · a add · m manual · ? keys"
+            assert prompt_plain(app) == "⏎ switch · a add · m manual · $ costs · ? keys"
             await pilot.press("c", "c")  # c toggles back as well
             await pilot.pause()
             assert not screen.config_shown
@@ -3304,7 +3304,7 @@ class TestWidths:
             assert len(page) == size[1] and all(len(line) <= size[0] for line in page)
             for gone in ("~ = estimate", "~?", "on duty", "not enough data", "disabled"):
                 assert gone not in text, gone
-            assert page[-1].strip() == "⏎ switch · a add · m manual · ? keys"
+            assert page[-1].strip() == "⏎ switch · a add · m manual · $ costs · ? keys"
             assert all(row.region.height == 1 for row in app.screen.query(AccountRow))
 
     @pytest.mark.parametrize("size", [(60, 20), (80, 24), (120, 40), (160, 50)])
@@ -3500,7 +3500,7 @@ class TestModeToggle:
             status = painted(app, "#status")
             assert "manual · limit guard" in status and "auto on" not in status
             assert "steps in only at a hard limit" in prompt_plain(app)
-            assert app.screen.prompt.hint.plain == "⏎ switch · a add · m auto · ? keys"
+            assert app.screen.prompt.hint.plain == "⏎ switch · a add · m auto · $ costs · ? keys"
             await pilot.press("m")
             await settle(pilot)
             assert load_settings(tmp_path).mode == "auto"

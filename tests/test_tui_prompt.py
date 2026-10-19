@@ -237,7 +237,7 @@ class TestPromptLineOnThePage:
         app = themed_app(tmp_path, theme_name)
         async with app.run_test(size=size) as pilot:
             await settle(pilot)
-            assert bottom(app, size) == "⏎ switch · a add · m manual · ? keys"
+            assert bottom(app, size) == "⏎ switch · a add · m manual · $ costs · ? keys"
 
     async def test_confirm_yes_no_and_esc(self, tmp_path, size, theme_name):
         app = themed_app(tmp_path, theme_name)
@@ -248,7 +248,7 @@ class TestPromptLineOnThePage:
             assert bottom(app, size).endswith("y remove  n no  esc")
             await pilot.press("escape")
             await pilot.pause()
-            assert bottom(app, size) == "⏎ switch · a add · m manual · ? keys"
+            assert bottom(app, size) == "⏎ switch · a add · m manual · $ costs · ? keys"
             await pilot.press("x", "n", "x", "y")
             await settle(pilot)
             assert [c for c in app.switcher.calls if c[0] == "remove"] == [("remove", "2", True)]
@@ -303,4 +303,4 @@ class TestPromptLineOnThePage:
             await pilot.press("escape")
             await pilot.pause()
             assert not screen.config_shown
-            assert bottom(app, size) == "⏎ switch · a add · m manual · ? keys"
+            assert bottom(app, size) == "⏎ switch · a add · m manual · $ costs · ? keys"
