@@ -381,6 +381,8 @@ def slice_transcripts(
                         if not isinstance(record, dict):
                             continue
                         slot = int(ts // SLOT_S) * SLOT_S
+                        # Compact, as Claude Code writes it: ccusage skips lines
+                        # spelled with spaces (`"type": "assistant"`).
                         data = json.dumps(_trim(record), separators=(",", ":")).encode() + b"\n"
                         buffers.setdefault(out_dir / f"{slot}.jsonl", []).append(data)
                         buffered += len(data)

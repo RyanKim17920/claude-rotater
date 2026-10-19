@@ -257,8 +257,9 @@ class TestSlice:
         assert result.records == 3
         files = sorted(p.name for p in (dst / "projects" / "s0").iterdir())
         assert files == sorted({f"{int(t // 900) * 900}.jsonl" for t in (now - 1000, now - 100, now - 50)})
-        copied = [json.loads(line) for p in (dst / "projects" / "s0").iterdir()
-                  for line in p.read_text().splitlines()]
+        raw = [line for p in (dst / "projects" / "s0").iterdir() for line in p.read_text().splitlines()]
+        assert all('": ' not in line and '", ' not in line for line in raw)  # compact, as ccusage needs
+        copied = [json.loads(line) for line in raw]
         assert {c["message"]["id"] for c in copied} == {"m1", "m2", "m3"}
         for c in copied:  # only what ccusage reads
             assert set(c) <= set(costs._TOP_KEYS) | {"message"}
