@@ -55,7 +55,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, ClassVar
 
-from claude_rotater import expiring_first, oauth, pace_strategy, poll_policy, preempt
+from claude_rotater import expiring_first, login_alerts, oauth, pace_strategy, poll_policy, preempt
 from claude_rotater.estimator import WindowEstimate, carried_burn, estimate_window
 from claude_rotater.exceptions import ClaudeSwitchError
 from claude_rotater.json_output import (
@@ -926,6 +926,10 @@ class AutoSwitchEngine:
         # pace / expiring-first: the proactive target the previous evaluation
         # wanted and when it first wanted it (see PROACTIVE_CONFIRM_S).
         self._proactive_pending: tuple[str, float] | None = None
+        # Logs and notifies dead / ending logins (see ``_watch_logins``).
+        self._login_notifier = login_alerts.LoginNotifier(switcher.backup_dir)
+        # The latest tick's usage entries, handed to ``_watch_logins``.
+        self._login_entries: dict | None = None
 
     # -- state file ---------------------------------------------------------
 
@@ -1122,6 +1126,7 @@ class AutoSwitchEngine:
         """Evaluate once: ingest the statusline feed, poll usage, maybe
         switch. Never raises."""
         self._ingest_feed()
+        self._login_entries = None
         try:
             return self._tick_inner()
         except ClaudeSwitchError as e:
@@ -1132,6 +1137,11 @@ class AutoSwitchEngine:
                 ErrorEvent(message=f"{type(e).__name__}: {e}", transient=True)
             )
             return TickOutcome.ERROR
+        finally:
+            # After the decision, so its clock read never shifts one the
+            # decision makes.
+            if self._login_entries is not None:
+                self._watch_logins(self._login_entries)
 
     def _tick_inner(self) -> TickOutcome:
         self._sleep_until_ts = None
@@ -1181,6 +1191,7 @@ class AutoSwitchEngine:
         entries, usage, headroom = self._collect_scheduled_usage(
             current, quarantined, threshold=settings.threshold
         )
+        self._login_entries = entries
         self._emit(
             PollEvent(
                 active=active_ref,
@@ -2911,6 +2922,39 @@ class AutoSwitchEngine:
             reason=f"repair: put account {current}'s own login back",
         ))
         return TickOutcome.SWITCHED
+
+    def _watch_logins(self, entries: dict) -> None:
+        """Log and notify logins that died or end soon, the pass they are seen.
+
+        The engine owns this (one per data dir), so it reaches the owner
+        from the TUI and from headless ``rota auto`` alike. Never raises: a
+        notification problem must not cost a switch decision. Dry runs
+        write nothing, so they neither notify nor record."""
+        if self.dry_run:
+            return
+        try:
+            from claude_rotater.settings import load_ui_settings
+
+            ui = load_ui_settings(self.switcher.backup_dir)
+            ends = self.switcher.login_ends_by_account()
+            states = [
+                login_alerts.LoginState(
+                    num,
+                    self.switcher.account_email(num) or "",
+                    dead_cause=login_alerts.dead_cause(entry.sentinel, entry.last_error),
+                    ends_at=ends.get(num),
+                )
+                for num, entry in entries.items()
+                if self.switcher.account_kind_for(num) != "api_key"
+                and not self.switcher.is_account_disabled(num)
+            ]
+            now = self.clock()
+            self._login_notifier.observe(
+                login_alerts.collect(states, now, ui.login_warn_days),
+                now, notify=ui.login_notify,
+            )
+        except Exception as e:  # pragma: no cover - safety net
+            _logger.debug("Login watch failed: %r", e)
 
     def _stored_login_problem(self, number: str, email: str, entry) -> str:
         """Why the slot's stored login cannot be restored, or "" when it can."""

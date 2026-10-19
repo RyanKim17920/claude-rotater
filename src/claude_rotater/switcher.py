@@ -393,6 +393,10 @@ class ClaudeAccountSwitcher:
         self._probe_verdicts: dict[
             tuple[str, str, str, str, str, str], bool
         ] = {}
+        # Each slot's stored-login end date as of the latest credential read
+        # (``_build_accounts_info``), so the engine's login watch costs no
+        # Keychain reads of its own and sees a re-login on the next pass.
+        self._last_login_ends: dict[str, float | None] = {}
 
     def _is_running_in_container(self) -> bool:
         """Check if running inside a container."""
@@ -3572,7 +3576,16 @@ class ClaudeAccountSwitcher:
                 creds = self._read_account_credentials(str(num), email)
 
             accounts_info.append((num, email, org_name, org_uuid, is_active, creds, alias))
+        self._last_login_ends = {
+            str(info[0]): oauth.login_expires_at(info[5]) if info[5] else None
+            for info in accounts_info
+        }
         return accounts_info
+
+    def login_ends_by_account(self) -> dict[str, float | None]:
+        """Slot → its stored login's end (epoch seconds, None = unknown), as
+        of the latest collect pass. Empty before the first pass."""
+        return dict(getattr(self, "_last_login_ends", {}))
 
     def _fetch_active_usage(
         self, account_num: str, email: str, creds: str, org_uuid: str = ""

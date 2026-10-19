@@ -7274,3 +7274,69 @@ class TestFreshenRoutesThroughGate:
         assert gate_calls["args"][0] == "2"
         assert "called" not in direct, "freshen must not POST outside the gate"
 
+
+
+class TestLoginWatch:
+    """The engine tells the owner, once a day, about logins that died or are
+    about to end — in the TUI and in headless ``rota auto`` alike."""
+
+    def _dead_entry(self):
+        return UsageEntry(sentinel=DEAD, last_error="invalid_grant")
+
+    def _tick(self, harness, entries):
+        healthy = {n: _entry_for(_usage(10), harness.clock.now) for n in ("1", "2", "3")}
+        return harness.tick_with_entries({**healthy, **entries})
+
+    def test_dead_login_is_notified_and_logged_with_its_cause(self, harness, request, caplog):
+        with caplog.at_level("WARNING", logger="claude_rotater.login_alerts"):
+            self._tick(harness, {"2": self._dead_entry()})
+        assert request.node.notifications_sent == [
+            ("rota", "#2 login was revoked (signed in elsewhere?) — press l to log in again")
+        ]
+        assert "Account 2 (b@example.com)" in caplog.text and "cause: invalid_grant" in caplog.text
+        self._tick(harness, {"2": self._dead_entry()})
+        assert len(request.node.notifications_sent) == 1  # once a day, not per tick
+
+    def test_dead_login_is_never_a_switch_target(self, harness):
+        outcome = harness.tick_with_entries({
+            "1": _entry_for(_usage(95), harness.clock.now),
+            "2": self._dead_entry(),
+            "3": _entry_for(_usage(50), harness.clock.now),
+        })
+        assert outcome is TickOutcome.SWITCHED and harness.active_number() == 3
+
+    def test_ending_login_is_notified_on_its_last_day(self, harness, request):
+        harness.switcher._last_login_ends = {"3": harness.clock.now + 6 * 3600}
+        self._tick(harness, {})
+        assert request.node.notifications_sent == [
+            ("rota", "#3 login ends in 6h — press l to log in again")
+        ]
+
+    def test_notifications_off_still_logs(self, harness, request, caplog):
+        from claude_rotater.settings import set_setting
+
+        set_setting(harness.switcher.backup_dir, "ui.loginNotify", "false")
+        with caplog.at_level("WARNING", logger="claude_rotater.login_alerts"):
+            self._tick(harness, {"2": self._dead_entry()})
+        assert request.node.notifications_sent == [] and "Account 2" in caplog.text
+
+    def test_dry_run_neither_notifies_nor_records(self, harness, request):
+        harness.engine = harness._make_engine(dry_run=True)
+        self._tick(harness, {"2": self._dead_entry()})
+        assert request.node.notifications_sent == []
+        assert not (harness.switcher.backup_dir / "cache" / "login_alerts.json").exists()
+
+    def test_parked_account_is_not_nagged_about(self, harness, request):
+        data = harness.switcher._get_sequence_data()
+        data["accounts"]["2"]["disabled"] = True
+        harness.switcher._write_json(harness.switcher.sequence_file, data)
+        self._tick(harness, {"2": self._dead_entry()})
+        assert request.node.notifications_sent == []
+
+    def test_collect_pass_records_each_slots_login_end(self, harness):
+        blob = {"claudeAiOauth": {"accessToken": "sk-3", "refreshToken": "rt-3",
+                                  "refreshTokenExpiresAt": 1_900_000_000_000}}
+        harness.switcher._write_account_credentials("3", "c@example.com", json.dumps(blob))
+        harness.switcher._build_accounts_info()
+        ends = harness.switcher.login_ends_by_account()
+        assert ends["3"] == 1_900_000_000.0 and ends["2"] is None
