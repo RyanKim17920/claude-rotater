@@ -1,0 +1,648 @@
+"""Costs data: the ccusage runner, slicing, cache, attribution, $ per 1%.
+
+No network and no real ccusage: ``fake_ccusage`` prices a slice the way
+ccusage lays it out (one session per ``projects/<source>/<slot>.jsonl``,
+streamed repeats deduplicated by message id), at $1 per 1000 output tokens.
+The real binary's contract is checked by ``tests/e2e/test_costs_ccusage.py``.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import stat
+import sys
+import time
+from datetime import datetime, timezone
+from pathlib import Path
+
+import pytest
+
+from claude_rotater import cost_report as cr
+from claude_rotater import costs
+from claude_rotater.usage_history import WindowSummary
+
+FIXTURE = Path(__file__).parent / "fixtures" / "ccusage_session.json"
+HOUR = 3600.0
+
+
+def iso(t: float) -> str:
+    return datetime.fromtimestamp(t, timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def entry(t: float, msg: str, *, model: str = "claude-opus-4-7", out: int = 1000, **extra) -> dict:
+    return {
+        "type": "assistant",
+        "timestamp": iso(t),
+        "requestId": f"req_{msg}",
+        "sessionId": "abc",
+        "cwd": "/somewhere",
+        "message": {
+            "id": msg,
+            "model": model,
+            "role": "assistant",
+            "content": [{"type": "text", "text": "a long answer " * 20}],
+            "usage": {"input_tokens": 3, "output_tokens": out,
+                      "cache_creation_input_tokens": 10, "cache_read_input_tokens": 100},
+        },
+        **extra,
+    }
+
+
+def write(path: Path, *records: dict, raw: str = "") -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "a") as fh:
+        for r in records:
+            fh.write(json.dumps(r) + "\n")
+        fh.write(raw)
+    return path
+
+
+def fake_ccusage(calls: list | None = None):
+    """A stand-in for :func:`costs.run_ccusage` over the slice it is given."""
+
+    def run(runner, config_dir: Path) -> dict:
+        if calls is not None:
+            calls.append(config_dir)
+        seen: set[str] = set()
+        sessions = []
+        for project in sorted((config_dir / "projects").iterdir()):
+            for f in sorted(project.glob("*.jsonl")):
+                per: dict[str, dict] = {}
+                for line in f.read_text().splitlines():
+                    rec = json.loads(line)
+                    key = rec["message"]["id"] + rec.get("requestId", "")
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    usage = rec["message"]["usage"]
+                    b = per.setdefault(rec["message"]["model"], {
+                        "modelName": rec["message"]["model"], "cost": 0.0, "inputTokens": 0,
+                        "outputTokens": 0, "cacheCreationTokens": 0, "cacheReadTokens": 0})
+                    b["cost"] += usage["output_tokens"] / 1000
+                    b["inputTokens"] += usage["input_tokens"]
+                    b["outputTokens"] += usage["output_tokens"]
+                    b["cacheCreationTokens"] += usage["cache_creation_input_tokens"]
+                    b["cacheReadTokens"] += usage["cache_read_input_tokens"]
+                if per:
+                    sessions.append({"projectPath": project.name, "sessionId": f.stem,
+                                     "modelBreakdowns": list(per.values())})
+        return {"sessions": sessions, "totals": {}}
+
+    return run
+
+
+@pytest.fixture
+def now() -> float:
+    """Mid-afternoon local time, so "today" has room on both sides."""
+    d = datetime.now().replace(hour=15, minute=0, second=0, microsecond=0)
+    return d.timestamp()
+
+
+@pytest.fixture
+def home(tmp_path) -> Path:
+    return tmp_path / ".claude"
+
+
+def source(home: Path) -> list[costs.Source]:
+    (home / "projects").mkdir(parents=True, exist_ok=True)
+    return [costs.Source("s0", os.path.realpath(home / "projects"))]
+
+
+def touch(path: Path, t: float) -> None:
+    os.utime(path, (t, t))
+
+
+# -- runner ---------------------------------------------------------------------
+
+
+class TestFindRunner:
+    def test_installed_ccusage_first(self):
+        found = {"ccusage": "/bin/ccusage", "bunx": "/bin/bunx", "npx": "/bin/npx"}
+        assert costs.find_runner(found.get) == ["/bin/ccusage"]
+
+    def test_bunx_then_npx_run_the_pinned_release(self):
+        pinned = f"ccusage@{costs.CCUSAGE_VERSION}"
+        assert costs.find_runner({"bunx": "/b", "npx": "/n"}.get) == ["/b", pinned]
+        assert costs.find_runner({"npx": "/n"}.get) == ["/n", "-y", pinned]
+
+    def test_none_without_node_or_bun(self):
+        assert costs.find_runner(lambda _name: None) is None
+
+
+def fake_binary(tmp_path: Path, body: str) -> list[str]:
+    script = tmp_path / "fake-ccusage"
+    script.write_text(f"#!{sys.executable}\nimport json, os, sys\n{body}\n")
+    script.chmod(script.stat().st_mode | stat.S_IXUSR)
+    return [str(script)]
+
+
+class TestRunCcusage:
+    def test_runs_the_claude_session_report_over_the_slice(self, tmp_path):
+        runner = fake_binary(tmp_path, (
+            "print(json.dumps({'argv': sys.argv[1:], 'dir': os.environ['CLAUDE_CONFIG_DIR'],"
+            " 'cwd': os.getcwd(), 'sessions': []}))"
+        ))
+        out = costs.run_ccusage(runner, tmp_path)
+        assert out["argv"] == ["claude", "session", "--json", "--breakdown", "--offline"]
+        assert out["dir"] == str(tmp_path)
+        assert os.path.realpath(out["cwd"]) == os.path.realpath(tmp_path)
+
+    def test_an_older_ccusage_falls_back_to_plain_session(self, tmp_path):
+        runner = fake_binary(tmp_path, (
+            "if sys.argv[1] == 'claude': sys.exit('unknown command')\n"
+            "print(json.dumps({'argv': sys.argv[1:]}))"
+        ))
+        assert costs.run_ccusage(runner, tmp_path)["argv"][0] == "session"
+
+    def test_failure_names_the_error(self, tmp_path):
+        runner = fake_binary(tmp_path, "sys.exit('boom: no pricing')")
+        with pytest.raises(costs.CostError, match="boom: no pricing"):
+            costs.run_ccusage(runner, tmp_path)
+
+    def test_garbage_output_is_an_error(self, tmp_path):
+        runner = fake_binary(tmp_path, "print('not json')")
+        with pytest.raises(costs.CostError, match="no JSON"):
+            costs.run_ccusage(runner, tmp_path)
+
+    def test_a_missing_binary_is_an_error(self, tmp_path):
+        with pytest.raises(costs.CostError, match="did not run"):
+            costs.run_ccusage([str(tmp_path / "nope")], tmp_path)
+
+    def test_timeout_is_an_error(self, tmp_path):
+        runner = fake_binary(tmp_path, "import time; time.sleep(5)")
+        with pytest.raises(costs.CostError, match="did not run"):
+            costs.run_ccusage(runner, tmp_path, timeout=0.5)
+
+
+class TestParseSessions:
+    def test_reads_claude_models_of_our_slots_only(self):
+        rows = costs.parse_sessions(json.loads(FIXTURE.read_text()), ["s0", "s1"])
+        assert sorted((r.source, r.slot, r.model) for r in rows) == [
+            ("s0", 1792336500, "claude-haiku-4-5-20251001"),
+            ("s0", 1792336500, "claude-opus-4-7"),
+            ("s1", 1792340400, "claude-sonnet-4-5-20250929"),
+        ]
+        opus = next(r for r in rows if r.model == "claude-opus-4-7")
+        assert (opus.cost, opus.input, opus.output, opus.cache_write, opus.cache_read) == (
+            1.25, 20, 900, 1000, 40000)
+
+    def test_unknown_sources_and_garbage_are_skipped(self):
+        assert costs.parse_sessions(json.loads(FIXTURE.read_text()), ["s9"]) == []
+        assert costs.parse_sessions({"sessions": "x"}, ["s0"]) == []
+        assert costs.parse_sessions({"sessions": [1, {"projectPath": "s0", "sessionId": "1",
+                                                      "modelBreakdowns": [None]}]}, ["s0"]) == []
+
+    def test_row_json_round_trip_and_rejects(self):
+        row = costs.Row("s0", 900, "claude-opus-4-7", 1.5, 1, 2, 3, 4)
+        assert costs.Row.from_json(row.to_json()) == row
+        assert costs.Row.from_json(["s0", 900, "m", "x", 1, 2, 3, 4]) is None
+        assert costs.Row.from_json([1, 2]) is None
+
+
+# -- sources ----------------------------------------------------------------------
+
+
+class TestSources:
+    def test_main_dir_then_session_profiles_with_their_account(self, tmp_path, home):
+        backup = tmp_path / ".rota"
+        (home / "projects").mkdir(parents=True)
+        (backup / "sessions" / "2-bob-example-com" / "projects").mkdir(parents=True)
+        (backup / "sessions" / "notanumber" / "projects").mkdir(parents=True)
+        (backup / "sessions" / "3-carol" ).mkdir(parents=True)  # never ran: no projects
+        out = costs.transcript_sources(backup, [home])
+        assert [(s.key, s.account) for s in out] == [("s0", None), ("s1", "2")]
+        assert out[1].path == os.path.realpath(backup / "sessions" / "2-bob-example-com" / "projects")
+
+    def test_shared_history_is_read_once_as_the_main_dir(self, tmp_path, home):
+        backup = tmp_path / ".rota"
+        (home / "projects").mkdir(parents=True)
+        profile = backup / "sessions" / "2-bob"
+        profile.mkdir(parents=True)
+        (profile / "projects").symlink_to(home / "projects")
+        out = costs.transcript_sources(backup, [home, home])
+        assert [(s.key, s.account) for s in out] == [("s0", None)]
+
+    def test_missing_dirs_are_no_sources(self, tmp_path):
+        assert costs.transcript_sources(tmp_path / ".rota", [tmp_path / "nope"]) == []
+
+    def test_feed_names_extra_config_dirs_but_not_session_profiles(self, tmp_path):
+        backup = tmp_path / ".rota"
+        feed = backup / "cache" / "feed"
+        feed.mkdir(parents=True)
+        session = backup / "sessions" / "2-bob"
+        (feed / "statusline.jsonl.1").write_text(json.dumps({"config_dir": "/a/.claude"}) + "\n")
+        (feed / "statusline.jsonl").write_text(
+            json.dumps({"config_dir": "/b/.claude-work"}) + "\n"
+            + json.dumps({"config_dir": str(session)}) + "\n"
+            + json.dumps({"config_dir": "/a/.claude"}) + "\n" + "{broken\n")
+        assert costs.feed_config_dirs(backup) == ["/a/.claude", "/b/.claude-work"]
+        assert costs.feed_config_dirs(tmp_path / "none") == []
+
+
+# -- slicing -------------------------------------------------------------------------
+
+
+class TestSlice:
+    def test_copies_usage_records_in_range_into_slot_files(self, tmp_path, home, now):
+        f = write(home / "projects" / "p" / "a.jsonl",
+                  entry(now - 2 * 86400, "old"),
+                  {"type": "user", "timestamp": iso(now - 60), "message": {"content": "hi"}},
+                  entry(now - 1000, "m1"),
+                  entry(now - 100, "m2", isSidechain=True))
+        write(home / "projects" / "p" / "sub" / "subagents" / "agent.jsonl", entry(now - 50, "m3"))
+        (home / "projects" / "p" / "notes.txt").write_text(json.dumps(entry(now, "x")))
+        dst = tmp_path / "slice"
+        result = costs.slice_transcripts(source(home), now - 86400, now + 86400, dst)
+        assert result.records == 3
+        files = sorted(p.name for p in (dst / "projects" / "s0").iterdir())
+        assert files == sorted({f"{int(t // 900) * 900}.jsonl" for t in (now - 1000, now - 100, now - 50)})
+        copied = [json.loads(line) for p in (dst / "projects" / "s0").iterdir()
+                  for line in p.read_text().splitlines()]
+        assert {c["message"]["id"] for c in copied} == {"m1", "m2", "m3"}
+        for c in copied:  # only what ccusage reads
+            assert set(c) <= set(costs._TOP_KEYS) | {"message"}
+            assert set(c["message"]) == {"id", "model", "usage"}
+            assert c["requestId"].startswith("req_")
+        assert str(f) in result.offsets
+
+    def test_old_files_are_not_opened(self, tmp_path, home, now):
+        f = write(home / "projects" / "p" / "a.jsonl", entry(now - 3 * 86400, "old"))
+        touch(f, now - 3 * 86400)
+        result = costs.slice_transcripts(source(home), now - 86400, now, tmp_path / "s")
+        assert result.records == 0 and result.offsets == {}
+
+    def test_a_line_still_being_written_waits(self, tmp_path, home, now):
+        f = write(home / "projects" / "p" / "a.jsonl", entry(now - 100, "m1"),
+                  raw=json.dumps(entry(now - 50, "m2"))[:40])
+        result = costs.slice_transcripts(source(home), now - 86400, now + 86400, tmp_path / "s")
+        assert result.records == 1
+        complete = len(json.dumps(entry(now - 100, "m1"))) + 1
+        assert result.offsets[str(f)][1] == complete
+
+    def test_offset_marks_where_the_next_day_begins(self, tmp_path, home, now):
+        boundary = now - 500
+        first = json.dumps(entry(now - 1000, "m1")) + "\n"
+        f = write(home / "projects" / "p" / "a.jsonl", entry(now - 1000, "m1"), entry(now - 100, "m2"))
+        result = costs.slice_transcripts(source(home), now - 86400, boundary, tmp_path / "s")
+        ino, offset, size = result.offsets[str(f)]
+        assert (ino, offset, size) == (f.stat().st_ino, len(first), f.stat().st_size)
+
+    def test_resumes_from_a_valid_offset_and_rereads_a_replaced_file(self, tmp_path, home, now):
+        f = write(home / "projects" / "p" / "a.jsonl", entry(now - 1000, "m1"), entry(now - 100, "m2"))
+        first = costs.slice_transcripts(source(home), now - 86400, now - 500, tmp_path / "a")
+        resumed = costs.slice_transcripts(source(home), now - 500, now + 86400, tmp_path / "b",
+                                          first.offsets)
+        assert resumed.records == 1
+        f.unlink()  # rewritten: new inode, so the offset no longer applies
+        write(f, entry(now - 400, "n1"), entry(now - 300, "n2"))
+        reread = costs.slice_transcripts(source(home), now - 500, now + 86400, tmp_path / "c",
+                                         {str(f): [first.offsets[str(f)][0] + 10**9, 10**6, 10**6]})
+        assert reread.records == 2
+
+    def test_bad_lines_are_skipped(self, tmp_path, home, now):
+        write(home / "projects" / "p" / "a.jsonl", entry(now - 100, "m1"),
+              raw='{"usage": 1, "timestamp": "nope"}\n{"usage" "timestamp":"2026-10-18T10:00:00Z" broken\n'
+                  '["usage", {"timestamp": "2026-10-18T10:00:00Z"}]\n')
+        result = costs.slice_transcripts(source(home), now - 86400 * 400, now + 86400, tmp_path / "s")
+        assert result.records == 1
+
+
+# -- refresh and cache -------------------------------------------------------------------
+
+
+class TestRefresh:
+    def test_full_build_prices_every_slot_in_range(self, tmp_path, home, now):
+        write(home / "projects" / "p" / "a.jsonl",
+              entry(now - 40 * 86400, "ancient"), entry(now - 3 * 86400, "d3", out=2000),
+              entry(now - 600, "t1"), entry(now - 590, "t1"),  # a streamed repeat
+              entry(now - 60, "t2", model="claude-sonnet-4-5", out=500))
+        cache = costs.refresh(None, source(home), ["ccusage"], now, run=fake_ccusage())
+        assert sorted((r.model, r.cost) for r in cache.rows) == [
+            ("claude-opus-4-7", 1.0), ("claude-opus-4-7", 2.0), ("claude-sonnet-4-5", 0.5)]
+        assert cache.boundary == costs.day_start(now)
+        assert all(r.slot >= costs.range_start(now) for r in cache.rows)
+
+    def test_reprices_only_from_the_boundary_and_matches_a_full_build(self, tmp_path, home, now):
+        f = write(home / "projects" / "p" / "a.jsonl", entry(now - 3 * 86400, "d3"), entry(now - 600, "t1"))
+        calls: list = []
+        first = costs.refresh(None, source(home), ["x"], now, run=fake_ccusage(calls))
+        assert costs.is_current(first, source(home), now)
+        write(f, entry(now - 30, "t2", out=3000))
+        assert not costs.is_current(first, source(home), now)
+        sliced: list[Path] = []
+
+        def spy(runner, d):
+            sliced.extend(p.name for p in (d / "projects" / "s0").iterdir())
+            return fake_ccusage()(runner, d)
+
+        second = costs.refresh(first, source(home), ["x"], now, run=spy)
+        assert all(int(name.split(".")[0]) >= costs.day_start(now) for name in sliced)
+        full = costs.refresh(None, source(home), ["x"], now, run=fake_ccusage())
+        assert second.rows == full.rows
+        assert costs.is_current(second, source(home), now)
+
+    def test_nothing_new_since_the_boundary_runs_no_ccusage(self, tmp_path, home, now):
+        f = write(home / "projects" / "p" / "a.jsonl", entry(now - 3 * 86400, "d3"))
+        touch(f, now - 3 * 86400)
+        calls: list = []
+        first = costs.refresh(None, source(home), ["x"], now, run=fake_ccusage(calls))
+        again = costs.refresh(first, source(home), ["x"], now, run=fake_ccusage(calls))
+        assert len(calls) == 1 and again.rows == first.rows
+
+    def test_a_new_day_reprices_from_the_old_boundary(self, tmp_path, home, now):
+        f = write(home / "projects" / "p" / "a.jsonl", entry(now - 600, "t1"))
+        first = costs.refresh(None, source(home), ["x"], now, run=fake_ccusage())
+        tomorrow = now + 86400
+        write(f, entry(now + 3 * HOUR, "late"), entry(tomorrow - 60, "next"))
+        assert not costs.is_current(first, source(home), tomorrow)
+        later = costs.refresh(first, source(home), ["x"], tomorrow, run=fake_ccusage())
+        assert later.boundary == costs.day_start(tomorrow)
+        assert sorted(r.slot for r in later.rows) == sorted(
+            int(t // 900) * 900 for t in (now - 600, now + 3 * HOUR, tomorrow - 60))
+
+    def test_old_slots_fall_out_of_the_range(self, tmp_path, home, now):
+        write(home / "projects" / "p" / "a.jsonl", entry(now - 29 * 86400, "edge"))
+        first = costs.refresh(None, source(home), ["x"], now, run=fake_ccusage())
+        assert len(first.rows) == 1
+        later = costs.refresh(first, source(home), ["x"], now + 2 * 86400, run=fake_ccusage())
+        assert later.rows == []
+
+    def test_changed_sources_rebuild(self, tmp_path, home, now):
+        write(home / "projects" / "p" / "a.jsonl", entry(now - 600, "t1"))
+        first = costs.refresh(None, source(home), ["x"], now, run=fake_ccusage())
+        other = tmp_path / ".claude-work"
+        write(other / "projects" / "q" / "b.jsonl", entry(now - 3 * 86400, "w1"))
+        both = source(home) + [costs.Source("s1", os.path.realpath(other / "projects"))]
+        assert not costs.is_current(first, both, now)
+        rebuilt = costs.refresh(first, both, ["x"], now, run=fake_ccusage())
+        assert {r.source for r in rebuilt.rows} == {"s0", "s1"}
+
+    def test_cache_round_trip_and_garbage(self, tmp_path, home, now):
+        write(home / "projects" / "p" / "a.jsonl", entry(now - 600, "t1"))
+        backup = tmp_path / ".rota"
+        cache = costs.refresh(None, source(home), ["x"], now, run=fake_ccusage())
+        costs.save_cache(backup, cache)
+        loaded = costs.load_cache(backup)
+        assert loaded.rows == cache.rows and loaded.offsets == cache.offsets
+        assert loaded.boundary == cache.boundary and loaded.sources == cache.sources
+        costs.cache_path(backup).write_text("{not json")
+        assert costs.load_cache(backup) is None
+        costs.cache_path(backup).write_text(json.dumps({"schemaVersion": 99}))
+        assert costs.load_cache(backup) is None
+        assert costs.load_cache(tmp_path / "missing") is None
+
+    def test_a_ccusage_failure_propagates_and_keeps_no_partial_cache(self, tmp_path, home, now):
+        write(home / "projects" / "p" / "a.jsonl", entry(now - 600, "t1"))
+
+        def broken(runner, d):
+            raise costs.CostError("ccusage failed: boom")
+
+        with pytest.raises(costs.CostError):
+            costs.refresh(None, source(home), ["x"], now, run=broken)
+
+
+# -- attribution ---------------------------------------------------------------------------
+
+
+def log_line(t: float, frm: str, to: str) -> str:
+    stamp = datetime.fromtimestamp(t).strftime("%Y-%m-%d %H:%M:%S")
+    return f"{stamp},123 - INFO - Switched from account {frm} to {to}\n"
+
+
+class TestSwitchHistory:
+    def test_reads_rotated_logs_oldest_first(self, tmp_path, now):
+        (tmp_path / "rota.log.1").write_text(log_line(now - 7200, "1", "2") + "junk\n")
+        (tmp_path / "rota.log").write_text(
+            "2026-10-18 13:14:22,211 - INFO - Auto-switch (pace): account 4 -> 1; ...\n"
+            + log_line(now - 3600, "2", "1")
+            + "2026-10-18 13:14:22,211 - INFO - [dry-run] would switch from account 2 to 3\n")
+        got = cr.switch_history(tmp_path)
+        assert [(s.frm, s.to) for s in got] == [("1", "2"), ("2", "1")]
+        assert got[0].at == pytest.approx(now - 7200, abs=1)
+
+    def test_no_log_no_history(self, tmp_path):
+        assert cr.switch_history(tmp_path) == []
+
+    def test_duty_spans(self, now):
+        lo, hi = now - 10 * HOUR, now
+        switches = [cr.Switch(now - 5 * HOUR, "2", "1"), cr.Switch(now - 2 * HOUR, "1", "2")]
+        assert cr.duty_spans(switches, "1", lo, hi) == [
+            (lo, now - 5 * HOUR, "1"), (now - 5 * HOUR, now - 2 * HOUR, "2"), (now - 2 * HOUR, hi, "1")]
+
+    def test_duty_spans_without_switches_use_the_account_on_duty(self, now):
+        assert cr.duty_spans([], "3", now - HOUR, now) == [(now - HOUR, now, "3")]
+        assert cr.duty_spans([], None, now - HOUR, now) == []
+
+    def test_a_switch_before_the_range_sets_who_starts_it(self, now):
+        spans = cr.duty_spans([cr.Switch(now - 50 * HOUR, "2", "1")], "2", now - 10 * HOUR, now)
+        assert spans == [(now - 10 * HOUR, now, "2")]
+
+    def test_a_slot_with_a_switch_in_it_is_split_by_time(self):
+        spans = [(0.0, 300.0, "1"), (300.0, 2000.0, "2")]
+        got = dict(cr.shares(0, spans, [s[0] for s in spans]))
+        assert got == pytest.approx({"1": 1 / 3, "2": 2 / 3})
+
+    def test_attribute_credits_session_profiles_to_their_account(self):
+        sources = [costs.Source("s0", "/a"), costs.Source("s1", "/b", "7")]
+        rows = [costs.Row("s0", 0, "m", 3.0, 0, 0, 0, 0), costs.Row("s1", 0, "m", 2.0, 0, 0, 0, 0),
+                costs.Row("s0", 900, "m", 1.0, 0, 0, 0, 0)]
+        spans = [(0.0, 300.0, "1"), (300.0, 1800.0, "2")]
+        got = cr.attribute(rows, sources, spans)
+        assert got["7"] == [(0, 2.0)]
+        assert dict(got["1"]) == pytest.approx({0: 1.0})
+        assert dict(got["2"]) == pytest.approx({0: 2.0, 900: 1.0})
+
+    def test_spend_before_any_known_duty_is_unattributed(self):
+        got = cr.attribute([costs.Row("s0", 0, "m", 3.0, 0, 0, 0, 0)], [costs.Source("s0", "/a")], [])
+        assert got == {}
+
+
+# -- $ per 1% ---------------------------------------------------------------------------------
+
+
+def spend_every_slot(lo: float, hi: float, per_hour: float) -> list[tuple[int, float]]:
+    start = int(lo // 900) * 900
+    return [(s, per_hour / 4) for s in range(start, int(hi), 900)]
+
+
+class TestEstimate:
+    def test_ratio_of_spend_to_peak_over_windows(self, now):
+        lo = now - 10 * 86400
+        spend = spend_every_slot(lo, now, 4.0)  # $4/h
+        windows = [WindowSummary(now - k * 6 * HOUR, 10.0) for k in range(1, 6)]  # 5h -> $20 at 10%
+        est = cr.estimate_per_pct(spend, windows, 5 * HOUR, lo, now)
+        assert est.dollars == pytest.approx(2.0) and est.n == 5
+        assert est.rel_err == pytest.approx(0.0, abs=1e-9)
+
+    def test_spread_of_the_windows_gives_the_error(self, now):
+        lo = now - 10 * 86400
+        spend = spend_every_slot(lo, now, 4.0)
+        windows = [WindowSummary(now - 6 * HOUR, 10.0), WindowSummary(now - 12 * HOUR, 20.0)]
+        est = cr.estimate_per_pct(spend, windows, 5 * HOUR, lo, now)
+        assert est.dollars == pytest.approx(40 / 30)
+        assert est.rel_err is not None and est.rel_err > 0.2
+
+    def test_one_window_has_no_error_bar(self, now):
+        lo = now - 86400
+        est = cr.estimate_per_pct(spend_every_slot(lo, now, 4.0), [WindowSummary(now - HOUR, 10.0)],
+                                  5 * HOUR, lo, now)
+        assert est.n == 1 and est.rel_err is None
+
+    def test_running_window_counts_spend_so_far(self, now):
+        lo = now - 86400
+        est = cr.estimate_per_pct(spend_every_slot(lo, now, 4.0),
+                                  [WindowSummary(now + 3 * HOUR, 4.0)], 5 * HOUR, lo, now)
+        assert est.dollars == pytest.approx(8.0 / 4.0)
+
+    def test_windows_starting_before_the_data_tiny_or_used_elsewhere_are_skipped(self, now):
+        lo = now - 86400
+        spend = spend_every_slot(now - 10 * HOUR, now - 6 * HOUR, 4.0)
+        windows = [WindowSummary(lo + HOUR, 50.0),  # starts before the data
+                   WindowSummary(now - 5 * HOUR, 1.0),  # under MIN_WINDOW_PCT
+                   WindowSummary(now + 4 * HOUR, 30.0)]  # moved with no local spend
+        assert cr.estimate_per_pct(spend, windows, 5 * HOUR, lo, now) is None
+
+
+# -- rollups ---------------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("raw,name", [
+    ("claude-opus-4-7", "Opus 4.7"),
+    ("claude-opus-4-20250514", "Opus 4"),
+    ("claude-sonnet-4-5-20250929", "Sonnet 4.5"),
+    ("claude-haiku-4-5-20251001", "Haiku 4.5"),
+    ("claude-fable-5-1", "Fable 5.1"),
+    ("claude-3-5-haiku-20241022", "Haiku 3.5"),
+    ("claude-3-opus-20240229", "Opus 3"),
+    ("claude-sonnet-4-5[1m]", "Sonnet 4.5"),
+    ("claude-weird_name", "weird_name"),
+])
+def test_model_name(raw, name):
+    assert cr.model_name(raw) == name
+
+
+class FakeHistory:
+    def __init__(self, windows: dict):
+        self._w = windows
+
+    def windows(self, identity, label, since):
+        return [w for w in self._w.get((identity[0], label), []) if w.resets_at >= since]
+
+
+def make_cache(rows: list[costs.Row], now: float) -> costs.CostCache:
+    return costs.CostCache(costs.day_start(now), ["/a"], rows, {}, now - 60, 1.5)
+
+
+class TestBuildReport:
+    def test_totals_days_models_trend_and_accounts(self, now):
+        today = costs.day_start(now)
+        rows = [
+            costs.Row("s0", int(now - 2 * HOUR) // 900 * 900, "claude-opus-4-7", 30.0, 1, 2, 3, 4),
+            costs.Row("s0", int(now - 3 * 86400) // 900 * 900, "claude-opus-4-7", 20.0, 1, 2, 3, 4),
+            costs.Row("s0", int(now - 3 * 86400) // 900 * 900, "claude-sonnet-4-5", 10.0, 1, 1, 1, 1),
+            costs.Row("s0", int(now - 10 * 86400) // 900 * 900, "claude-opus-4-7", 25.0, 1, 2, 3, 4),
+            costs.Row("s0", int(now - 20 * 86400) // 900 * 900, "claude-opus-4-7", 15.0, 0, 0, 0, 0),
+            costs.Row("s0", int(now - 2 * HOUR) // 900 * 900, "claude-haiku-4-5", 0.001, 0, 0, 0, 0),
+        ]
+        spans = [(now - 40 * 86400, now - 3 * 86400 - HOUR, "2"), (now - 3 * 86400 - HOUR, now, "1")]
+        report = cr.build_report(make_cache(rows, now), [costs.Source("s0", "/a")], spans,
+                                 lambda n, label, since: [], now)
+        assert report.today == pytest.approx(30.0 + 0.001)
+        assert report.week == pytest.approx(60.001)
+        assert report.month == pytest.approx(100.001)
+        assert report.week_change == pytest.approx((60.001 - 25.0) / 25.0)
+        assert [m.name for m in report.models] == ["Opus 4.7", "Sonnet 4.5"]  # $0.001 is noise
+        opus = report.models[0]
+        assert opus.cost == 90.0 and opus.share == pytest.approx(0.9, abs=1e-3)
+        assert opus.trend == pytest.approx((50 - 25) / 25)
+        assert report.models[1].trend is None  # nothing the week before
+        assert len(report.days) == costs.RANGE_DAYS and report.days[-1][0] == today
+        assert report.days[-1][1]["Opus 4.7"] == 30.0
+        assert [(a.number, round(a.cost, 3)) for a in report.accounts] == [("1", 60.001), ("2", 40.0)]
+        assert report.unattributed == pytest.approx(0.0, abs=1e-6)
+
+    def test_accounts_get_estimates_from_their_history(self, now):
+        lo = costs.range_start(now)
+        rows = [costs.Row("s0", s, "claude-opus-4-7", c, 0, 0, 0, 0)
+                for s, c in spend_every_slot(now - 2 * 86400, now, 4.0)]
+        history = FakeHistory({("a@x", "5h"): [WindowSummary(now - 6 * HOUR, 10.0),
+                                               WindowSummary(now - 12 * HOUR, 10.0)],
+                               ("a@x", "7d"): [WindowSummary(now + 86400, 8.0)]})
+        report = cr.build_report(
+            make_cache(rows, now), [costs.Source("s0", "/a")], [(lo, now, "1")],
+            lambda n, label, since: history.windows(("a@x", "o") if n == "1" else ("?", "?"), label, since),
+            now)
+        acc = report.accounts[0]
+        assert acc.per_5h.dollars == pytest.approx(2.0) and acc.per_5h.n == 2
+        assert acc.per_7d.dollars == pytest.approx(192.0 / 8.0) and acc.per_7d.rel_err is None
+
+    def test_history_errors_leave_no_estimate(self, now):
+        rows = [costs.Row("s0", int(now - HOUR) // 900 * 900, "claude-opus-4-7", 5.0, 0, 0, 0, 0)]
+
+        def broken(*_a):
+            raise RuntimeError("corrupt")
+
+        report = cr.build_report(make_cache(rows, now), [costs.Source("s0", "/a")],
+                                 [(now - 86400, now, "1")], broken, now)
+        assert report.accounts[0].per_5h is None
+
+    def test_empty(self, now):
+        report = cr.build_report(make_cache([], now), [], [], lambda *a: [], now)
+        assert report.month == 0 and report.models == () and report.week_change is None
+        assert report.top_model is None
+
+
+# -- the source the view reads ------------------------------------------------------------------
+
+
+class TestCostSource:
+    def make(self, tmp_path, home, now, *, runner=("x",), run=None):
+        return cr.CostSource(
+            tmp_path / ".rota", FakeHistory({}), [home], active=lambda: "1",
+            find_runner=lambda: list(runner) if runner else None,
+            run=run or fake_ccusage(), clock=lambda: now)
+
+    def test_first_refresh_builds_and_saves_then_reopening_is_cached(self, tmp_path, home, now):
+        write(home / "projects" / "p" / "a.jsonl", entry(now - 600, "t1", out=4000))
+        calls: list = []
+        src = self.make(tmp_path, home, now, run=fake_ccusage(calls))
+        assert src.cached({}).report is None
+        first = src.refresh({})
+        assert first.ran and first.report.today == pytest.approx(4.0) and first.note is None
+        assert costs.cache_path(tmp_path / ".rota").exists()
+        assert src.cached({}).report.today == pytest.approx(4.0)
+        again = src.refresh({})
+        assert not again.ran and len(calls) == 1
+        forced = src.refresh({}, force=True)
+        assert forced.ran and len(calls) == 2
+
+    def test_missing_ccusage_says_how_to_get_it(self, tmp_path, home, now):
+        write(home / "projects" / "p" / "a.jsonl", entry(now - 600, "t1"))
+        result = self.make(tmp_path, home, now, runner=None).refresh({})
+        assert result.report is None and result.note == costs.MISSING_HINT
+
+    def test_missing_ccusage_still_shows_the_cached_report(self, tmp_path, home, now):
+        f = write(home / "projects" / "p" / "a.jsonl", entry(now - 600, "t1"))
+        self.make(tmp_path, home, now).refresh({})
+        write(f, entry(now - 60, "t2"))
+        result = self.make(tmp_path, home, now, runner=None).refresh({})
+        assert result.report is not None and result.note == costs.MISSING_HINT
+
+    def test_a_ccusage_error_is_a_note(self, tmp_path, home, now):
+        write(home / "projects" / "p" / "a.jsonl", entry(now - 600, "t1"))
+
+        def broken(runner, d):
+            raise costs.CostError("ccusage failed: boom")
+
+        result = self.make(tmp_path, home, now, run=broken).refresh({})
+        assert result.report is None and result.note == "ccusage failed: boom"
+        assert not costs.cache_path(tmp_path / ".rota").exists()
+
+    def test_switch_log_attributes_spend(self, tmp_path, home, now):
+        backup = tmp_path / ".rota"
+        backup.mkdir()
+        (backup / "rota.log").write_text(log_line(now - HOUR, "1", "2"))
+        write(home / "projects" / "p" / "a.jsonl", entry(now - 2 * HOUR, "a1"), entry(now - 600, "b1"))
+        report = self.make(tmp_path, home, now).refresh({}).report
+        assert {a.number: a.cost for a in report.accounts} == pytest.approx({"1": 1.0, "2": 1.0})
