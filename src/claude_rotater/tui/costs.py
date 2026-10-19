@@ -308,6 +308,8 @@ def costs_lines(
     n_models = min(len(report.models), MODEL_ROWS)
     n_accounts = len(report.accounts)
     summary = summary_text(report, palette, status=status)
+    if summary.cell_len > width:  # the freshness note is the first to go
+        summary = summary_text(report, palette)
 
     def layout(note: bool, gaps: bool, model_rows: int, chart: bool) -> int | None:
         """Chart height that fits these choices (0: no chart), None if none does."""
@@ -453,7 +455,7 @@ class CostsView(Widget, can_focus=True):
             return Text(note or LOADING, style=palette.muted)
         lines = costs_lines(report, width=width, height=height, names=self.names(),
                             palette=palette, status=self.status())
-        return Text("\n").join(lines)
+        return Text("\n", no_wrap=True, overflow="ellipsis").join(lines)
 
     # -- actions ---------------------------------------------------------------------
 

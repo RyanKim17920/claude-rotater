@@ -137,6 +137,16 @@ def test_page_fits_and_keeps_the_essentials(width, height):
     assert "$/1% 5h" in text and "#1" in text  # the accounts always stay
 
 
+def test_the_freshness_note_goes_first_when_the_summary_is_too_wide():
+    rep = report()
+    wide = view.costs_lines(rep, width=118, height=36, names={}, palette=Palette.DARK,
+                            status="updated 2m ago")
+    assert wide[0].plain.endswith("updated 2m ago")
+    narrow = view.costs_lines(rep, width=78, height=36, names={}, palette=Palette.DARK,
+                              status="updated 2m ago")
+    assert "updated" not in narrow[0].plain and narrow[0].cell_len <= 78
+
+
 def test_the_note_and_gaps_go_before_the_chart_shrinks():
     rep = report(n_models=3, n_accounts=2)
     roomy = view.costs_lines(rep, width=118, height=36, names={}, palette=Palette.DARK)
@@ -202,6 +212,10 @@ class TestCostsPage:
             assert "me@x.com" in text and "~$3.10 ±20%" in text
             assert "daily cost" in text and "Opus 4.7" in text
             costs_view = app.screen.query_one("#costs")
+            assert costs_view.render().no_wrap  # a line too long is cut, never wrapped
+            screen = ["".join(seg.text for seg in strip)
+                      for strip in app.screen._compositor.render_strips()]
+            assert screen[2].strip().startswith("today") and screen[3].strip() == ""
             assert costs_view.region.bottom <= app.screen.query_one("#prompt").region.y
             assert all(len(line) <= size[0] - 2 for line in lines[1:])
             assert app.screen.query_one("#status").region.y == 0  # the header stays
