@@ -70,7 +70,10 @@ class StatuslineSetupError(Exception):
 @dataclass(frozen=True)
 class StatuslineStatus:
     install: str  # NOT_INSTALLED | INSTALLED | FOREIGN (someone else's statusline)
-    # "live" (feed recent) | "stale" (installed, feed quiet) | "off" |
+    # "live" (feed recent) | "idle" (installed, fed before, quiet lately:
+    # no chat on this profile has answered for a while, so the active
+    # account is polled instead; normal, not a fault) | "stale" (installed,
+    # nothing ever fed) | "off" |
     # "unset" (installed, but the data dir the command feeds does not exist,
     # so ``rota feed`` quietly records nothing)
     state: str
@@ -371,7 +374,7 @@ def status(backup_dir: Path | None = None, *, now: float | None = None) -> Statu
             last_feed_at = None
         current = time.time() if now is None else now
         fresh = last_feed_at is not None and current - last_feed_at <= poll_policy.FEED_STALE_S
-        state = "live" if fresh else "stale"
+        state = "live" if fresh else ("idle" if last_feed_at is not None else "stale")
         if not fresh and command:
             target = feed_target(command, path.parent)
             if _split_feed(command) is not None and _norm(target) != _norm(root):

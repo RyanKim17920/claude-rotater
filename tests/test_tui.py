@@ -1105,7 +1105,8 @@ class TestStatusText:
 
     @pytest.mark.parametrize(
         "state,words",
-        [("live", "● feed live"), ("stale", "◐ feed stale"), ("off", "○ feed off"), ("unset", "○ feed: not set up")],
+        [("live", "● feed live"), ("idle", "◐ feed idle"), ("stale", "◐ feed: no data yet"),
+         ("off", "○ feed off"), ("unset", "○ feed: not set up")],
     )
     def test_feed_indicator(self, state, words):
         assert words in self._text(self._status(running=True), feed=state)
@@ -3274,7 +3275,7 @@ class TestStatuslineKey:
         app = make_app(three_accounts(tmp_path))
         async with app.run_test(size=(120, 40)) as pilot:
             await settle(pilot)
-            assert "◐ feed stale" in painted(app, "#status")
+            assert "◐ feed: no data yet" in painted(app, "#status")
             await pilot.press("s")
             await pilot.pause()
             assert prompt_plain(app).startswith("remove rota from Claude Code's statusline")
@@ -3307,7 +3308,7 @@ class TestStatuslineKey:
             await settle(pilot)
             assert statusline_setup.status(tmp_path).installed
             assert app.feed_installed and app.feed_state == "stale"
-            assert "◐ feed stale" in painted(app, "#status")
+            assert "◐ feed: no data yet" in painted(app, "#status")
             await pilot.press("s", "y")
             await settle(pilot)
             assert not app.feed_installed and app.feed_state == "off"

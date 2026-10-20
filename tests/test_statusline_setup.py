@@ -57,14 +57,15 @@ class TestStatus:
                                                "command": "rota feed --tee | x.sh"}})
         assert ss.status(env[1]).installed
 
-    def test_live_and_stale_follow_the_feed_file(self, env):
+    def test_live_idle_and_stale_follow_the_feed_file(self, env):
         path, data = env
         ss.install(data)
         assert ss.status(data).state == "stale"  # nothing fed yet
         feed.append_record(feed.feed_path(data), {"t": 1.0, "five_hour": {"pct": 1.0}})
         mtime = os.stat(feed.feed_path(data)).st_mtime
         assert ss.status(data, now=mtime + 10).state == "live"
-        assert ss.status(data, now=mtime + 10_000).state == "stale"
+        # Fed before, quiet since: no chat answered lately, which is normal.
+        assert ss.status(data, now=mtime + 10_000).state == "idle"
 
     def test_unreadable_settings_reads_as_nothing(self, env):
         env[0].write_text("{nope")

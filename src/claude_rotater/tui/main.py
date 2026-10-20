@@ -215,7 +215,9 @@ class AutoStatus:
 FEED_LABELS = {
     # state -> (glyph, palette role, words)
     "live": ("●", "sev_ok", "feed live"),
-    "stale": ("◐", "sev_warn", "feed stale"),
+    # No chat here answered lately: the active account is polled instead.
+    "idle": ("◐", "muted", "feed idle"),
+    "stale": ("◐", "sev_warn", "feed: no data yet"),
     "off": ("○", "muted", "feed off"),
     "unset": ("○", "sev_warn", "feed: not set up"),
 }
