@@ -1105,28 +1105,62 @@ class TestStatusText:
 
     @pytest.mark.parametrize(
         "state,words",
-        [("live", "● feed live"), ("idle", "◐ feed idle"), ("stale", "◐ feed: no data yet"),
-         ("off", "○ feed off"), ("unset", "○ feed: not set up")],
+        [("live", "● live"), ("stale", "◐ feed: no data yet"),
+         ("off", "○ statusline off (s)"), ("unset", "○ feed: not set up")],
     )
     def test_feed_indicator(self, state, words):
         assert words in self._text(self._status(running=True), feed=state)
 
-    @pytest.mark.parametrize("state", ["idle", "stale", "off", "unset"])
-    def test_quiet_feed_says_polling_continues(self, state):
+    def test_quiet_feed_shows_the_age_of_the_newest_reading(self):
         now = time.time()
-        text = self._text(self._status(running=True), now, feed=state, polled_at=now - 125)
-        assert text.rstrip().endswith(" · polled 2m ago")
+        text = self._text(self._status(running=True), now, feed="idle", polled_at=now - 125)
+        assert text.rstrip().endswith("↻ 2m ago")
+        assert "idle" not in text and "stale" not in text and "feed" not in text
 
-    def test_live_feed_does_not_repeat_the_poll_age(self):
+    @pytest.mark.parametrize("state", ["live", "stale", "off", "unset"])
+    def test_one_indicator_only(self, state):
         now = time.time()
-        assert "polled" not in self._text(self._status(running=True), now, feed="live",
-                                          polled_at=now - 125)
+        assert "ago" not in self._text(self._status(running=True), now, feed=state,
+                                       polled_at=now - 125)
 
-    def test_never_polled_says_nothing_about_polls(self):
-        assert "polled" not in self._text(self._status(running=True), feed="idle")
+    def test_never_polled_quiet_feed_shows_nothing(self):
+        text = self._text(self._status(running=True), feed="idle")
+        assert "↻" not in text and "idle" not in text
+
+    def _age_style(self, age, late_after=1200.0):
+        from claude_rotater.tui.main import status_text
+
+        now = time.time()
+        head = status_text(self._status(running=True), now=now, width=120, feed="idle",
+                           polled_at=now - age, late_after=late_after)
+        start = head.plain.index("↻")
+        return {str(span.style) for span in head.spans if span.start <= start < span.end}
+
+    def test_recent_reading_is_dim(self):
+        assert self._age_style(125) == {Palette.DARK.muted}
+
+    def test_late_reading_is_amber(self):
+        assert self._age_style(35 * 60) == {Palette.DARK.sev_warn}
+        assert self._age_style(35 * 60, late_after=3600) == {Palette.DARK.muted}
+
+    def test_late_after_follows_the_poll_interval(self):
+        from claude_rotater.tui.main import LATE_POLL_FACTOR
+        from claude_rotater.poll_policy import DEFAULT_CADENCE
+
+        assert LATE_POLL_FACTOR * DEFAULT_CADENCE.spare_s == 1200.0
+
+    def test_warnings_are_amber(self):
+        from claude_rotater.tui.main import status_text
+
+        for state in ("stale", "off", "unset"):
+            head = status_text(self._status(running=True), now=time.time(), width=120, feed=state)
+            start = head.plain.rindex("   ") + 3
+            styles = {str(span.style) for span in head.spans if span.start <= start < span.end}
+            assert styles == {Palette.DARK.sev_warn}, state
 
     def test_no_feed_state_no_indicator(self):
-        assert "feed" not in self._text(self._status(running=True))
+        text = self._text(self._status(running=True))
+        assert "feed" not in text and "●" not in text and "↻" not in text
 
     def test_cooldown_shows_only_while_it_holds_a_switch(self):
         now = time.time()
@@ -1151,7 +1185,7 @@ class TestStatusText:
     def test_narrow_drops_the_note(self):
         status = self._status(running=True, last_outcome="no switch: no-viable-target", last_reason="no-viable-target")
         text = self._text(status, width=40, feed="live")
-        assert "feed live" in text
+        assert "● live" in text
         assert "no-viable-target" not in text and len(text) <= 40
 
     def test_login_note_outranks_the_verdict_and_the_held_note(self):
@@ -1162,7 +1196,7 @@ class TestStatusText:
         note = "#3 login was revoked (signed in elsewhere?) — press l to log in again"
         text = self._text(status, feed="live", login_note=note, login_failed=True)
         assert note in text and "stay" not in text and "no-candidates" not in text
-        assert text.endswith("● feed live")
+        assert text.endswith("● live")
 
     def test_failed_login_note_is_red_ending_is_amber(self):
         from claude_rotater.tui.main import status_text
@@ -1177,7 +1211,7 @@ class TestStatusText:
     def test_narrow_cuts_the_login_note_but_keeps_it(self):
         note = "login ends in 2d: #3 — press l"
         text = self._text(self._status(running=True), width=36, feed="live", login_note=note)
-        assert len(text) <= 36 and "login" in text and "feed" not in text
+        assert len(text) <= 36 and "login" in text and "● live" not in text
 
     def _decision(self, line="stay: resets soonest (19h40m), 37% headroom", action="stay"):
         from claude_rotater.autoswitch import Decision
@@ -1186,20 +1220,14 @@ class TestStatusText:
 
     def test_latest_verdict_follows_auto_on(self):
         text = self._text(self._status(running=True, decision=self._decision()), feed="live")
-        assert "auto on · stay: resets soonest (19h40m), 37% headroom   ● feed live" in text
+        assert "auto on · stay: resets soonest (19h40m), 37% headroom   ● live" in text
 
-    def test_poll_age_sits_beside_the_verdict_when_wide(self):
+    def test_poll_age_sits_beside_the_verdict(self):
         now = time.time()
         status = self._status(running=True, decision=self._decision())
-        text = self._text(status, now, width=120, feed="idle", polled_at=now - 125)
-        assert "auto on · stay: resets soonest (19h40m), 37% headroom" in text
-        assert text.rstrip().endswith("◐ feed idle · polled 2m ago")
-
-    def test_poll_age_gives_way_to_the_verdict_when_narrow(self):
-        now = time.time()
-        status = self._status(running=True, decision=self._decision())
-        text = self._text(status, now, width=60, feed="idle", polled_at=now - 125)
-        assert "stay:" in text and "polled" not in text and "feed idle" in text
+        for width in (120, 60):
+            text = self._text(status, now, width=width, feed="idle", polled_at=now - 125)
+            assert "stay:" in text and text.rstrip().endswith("↻ 2m ago"), width
 
     def test_verdict_is_dim(self):
         from claude_rotater.tui.main import status_text
@@ -1211,12 +1239,12 @@ class TestStatusText:
 
     def test_verdict_is_cut_to_fit_and_keeps_the_feed(self):
         text = self._text(self._status(running=True, decision=self._decision()), width=50, feed="live")
-        assert len(text) <= 50 and text.endswith("● feed live")
+        assert len(text) <= 50 and text.endswith("● live")
         assert "· stay: resets" in text and "…" in text
 
     def test_too_narrow_drops_the_verdict(self):
         text = self._text(self._status(running=True, decision=self._decision()), width=34, feed="live")
-        assert "stay" not in text and "·" not in text.split("rota", 1)[1] and "feed live" in text
+        assert "stay" not in text and "·" not in text.split("rota", 1)[1] and "● live" in text
 
     def test_no_verdict_while_the_engine_is_off(self):
         assert "stay" not in self._text(self._status(running=False, decision=self._decision()))
@@ -3261,11 +3289,11 @@ class TestStatuslineKey:
 
         return statusline_setup.settings_path()
 
-    async def test_header_shows_feed_off_without_a_feed(self, tmp_path):
+    async def test_header_shows_statusline_off_without_a_feed(self, tmp_path):
         app = make_app(three_accounts(tmp_path))
         async with app.run_test(size=(120, 40)) as pilot:
             await settle(pilot)
-            assert "○ feed off" in painted(app, "#status")
+            assert "○ statusline off (s)" in painted(app, "#status")
 
     async def test_header_shows_live_feed_from_feed_file(self, tmp_path):
         from claude_rotater import feed, statusline_setup
@@ -3278,7 +3306,7 @@ class TestStatuslineKey:
         app = make_app(three_accounts(tmp_path))
         async with app.run_test(size=(120, 40)) as pilot:
             await settle(pilot)
-            assert "● feed live" in painted(app, "#status")
+            assert "● live" in painted(app, "#status")
 
     async def test_s_confirms_then_installs(self, tmp_path, monkeypatch):
         calls = self._calls(monkeypatch, self._status("not-installed", "off"))

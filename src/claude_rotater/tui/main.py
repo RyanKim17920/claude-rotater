@@ -2,8 +2,8 @@
 
 Layout, top to bottom, as tall as the terminal allows:
 
-- header band: the ``rota`` chip, the auto-switch state, the statusline feed
-  state and why a switch is held (only while one is);
+- header band: the ``rota`` chip, the auto-switch state, how fresh the
+  usage is and why a switch is held (only while one is);
 - one ``AccountRow`` per account, measured now: "›" (and an accent band, bold
   name) on the row under the cursor, "●" and an accent name on the account
   on duty, the account, a
@@ -213,14 +213,35 @@ class AutoStatus:
 
 
 FEED_LABELS = {
-    # state -> (glyph, palette role, words)
-    "live": ("●", "sev_ok", "feed live"),
-    # No chat here answered lately: polls carry on (status_text says when).
-    "idle": ("◐", "muted", "feed idle"),
+    # statusline state -> (glyph, palette role, words) for the states that
+    # need the owner; "idle" (no chat here lately) is not a fault and shows
+    # the age of the newest reading instead (see freshness_label).
+    "live": ("●", "sev_ok", "live"),
     "stale": ("◐", "sev_warn", "feed: no data yet"),
-    "off": ("○", "muted", "feed off"),
+    "off": ("○", "sev_warn", "statusline off (s)"),
     "unset": ("○", "sev_warn", "feed: not set up"),
 }
+
+# The newest reading counts as late past this many poll intervals: polls
+# carry on whatever the feed does, so a reading this old means they fail.
+LATE_POLL_FACTOR = 2.0
+
+
+def freshness_label(
+    feed: str | None, polled_at: float | None, *, now: float, late_after: float,
+) -> tuple[str, str, str] | None:
+    """(glyph, palette role, words) for how fresh the usage on the page is:
+    ``● live`` while the statusline feeds it, ``↻ 2m ago`` (the newest
+    reading from any source) otherwise, amber once that is late. A
+    statusline that never fed, or is not set up, says so instead."""
+    if feed == "idle":
+        if polled_at is None:
+            return None
+        age = max(now - polled_at, 0.0)
+        return ("↻", "sev_warn" if age > late_after else "muted",
+                f"{countdown_text(age)} ago")
+    return FEED_LABELS.get(feed or "")
+
 
 # Engine outcomes that mean a switch was wanted and could not happen.
 BLOCKED_REASONS = frozenset(
@@ -311,14 +332,15 @@ def status_text(
     login_note: str = "",
     login_failed: bool = False,
     polled_at: float | None = None,
+    late_after: float = LATE_POLL_FACTOR * DEFAULT_CADENCE.spare_s,
 ) -> Text:
-    """`` rota · work   auto on · stay: resets soonest (19h40m)   ● feed live``.
+    """`` rota · work   auto on · stay: resets soonest (19h40m)   ● live``.
 
-    The engine state with its latest verdict (dim, cut to fit), the feed
-    state and, when a switch is blocked, why in place of the verdict; the
-    note goes, then the verdict, when the width runs short. Any feed state
-    but live adds how long ago the latest poll was (``polled_at``): usage
-    keeps being polled either way, and use elsewhere is seen only that way.
+    The engine state with its latest verdict (dim, cut to fit), how fresh
+    the usage is (:func:`freshness_label`; ``polled_at`` is the newest
+    reading, ``late_after`` when it counts as late) and, when a switch is
+    blocked, why in place of the verdict; the note goes, then the verdict,
+    when the width runs short.
 
     ``login_note`` (a login that died or is ending, see ``login_alerts``)
     outranks all of them: it takes the verdict's place, in red when the
@@ -332,28 +354,16 @@ def status_text(
     head.append("  ")
     head.append_text(mode_label(status, palette))
     tail = Text(no_wrap=True)
-    if feed in FEED_LABELS:
-        glyph, role, words = FEED_LABELS[feed]
-        tail.append(f"   {glyph} ", style=getattr(palette, role))
-        tail.append(words, style=palette.muted)
+    label = freshness_label(feed, polled_at, now=now, late_after=late_after)
+    if label is not None:
+        glyph, role, words = label
+        style = getattr(palette, role)
+        tail.append(f"   {glyph} ", style=style)
+        tail.append(words, style=style if role == "sev_warn" else palette.muted)
     note = status.view_only or switch_note(status, now=now, over_threshold=over_threshold)
-    if feed in FEED_LABELS and feed != "live" and polled_at is not None:
-        # The poll age is the first thing to give way to what follows.
-        polled = f" · polled {countdown_text(now - polled_at)} ago"
-        if login_note:
-            after = 3 + MIN_DECISION_W
-        elif note:
-            after = 3 + len(note)
-        elif status.running and status.decision is not None:
-            # Keep a readable stretch of the verdict, not just its stub.
-            after = len(DECISION_SEP) + min(len(status.decision.line), VERDICT_KEEP_W)
-        else:
-            after = 0
-        if head.cell_len + tail.cell_len + len(polled) + after <= width:
-            tail.append(polled, style=palette.muted)
     if login_note:
         room = width - head.cell_len - tail.cell_len - 3
-        if room < MIN_DECISION_W:  # the feed word gives way first
+        if room < MIN_DECISION_W:  # the freshness label gives way first
             tail = Text(no_wrap=True)
             room = width - head.cell_len - 3
         line = Text(login_note, style=f"bold {palette.sev_crit if login_failed else palette.sev_warn}", no_wrap=True)
@@ -1586,6 +1596,7 @@ class MainScreen(Screen):
                 (a.usage.fetched_at for a in snap.accounts if a.usage.fetched_at is not None),
                 default=None,
             ) if snap else None,
+            late_after=LATE_POLL_FACTOR * self.app.cadence.spare_s,
         )
 
     def row_text(self, number: str, width: int) -> Text:
