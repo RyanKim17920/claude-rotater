@@ -49,7 +49,9 @@ Windows.
 - `rota run <account>`: run Claude Code as another account in one terminal
   only, so two accounts can work in parallel.
 - Reads live usage from Claude Code's statusline, so the active account is
-  not polled while you work.
+  not polled while you work. Every account is still polled (every 10 min,
+  every 5 min while its usage climbs), so use on another machine or on
+  claude.ai shows up too.
 
 ## Install
 
