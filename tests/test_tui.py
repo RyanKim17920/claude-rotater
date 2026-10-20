@@ -1111,6 +1111,20 @@ class TestStatusText:
     def test_feed_indicator(self, state, words):
         assert words in self._text(self._status(running=True), feed=state)
 
+    @pytest.mark.parametrize("state", ["idle", "stale", "off", "unset"])
+    def test_quiet_feed_says_polling_continues(self, state):
+        now = time.time()
+        text = self._text(self._status(running=True), now, feed=state, polled_at=now - 125)
+        assert text.rstrip().endswith(" · polled 2m ago")
+
+    def test_live_feed_does_not_repeat_the_poll_age(self):
+        now = time.time()
+        assert "polled" not in self._text(self._status(running=True), now, feed="live",
+                                          polled_at=now - 125)
+
+    def test_never_polled_says_nothing_about_polls(self):
+        assert "polled" not in self._text(self._status(running=True), feed="idle")
+
     def test_no_feed_state_no_indicator(self):
         assert "feed" not in self._text(self._status(running=True))
 
@@ -1173,6 +1187,19 @@ class TestStatusText:
     def test_latest_verdict_follows_auto_on(self):
         text = self._text(self._status(running=True, decision=self._decision()), feed="live")
         assert "auto on · stay: resets soonest (19h40m), 37% headroom   ● feed live" in text
+
+    def test_poll_age_sits_beside_the_verdict_when_wide(self):
+        now = time.time()
+        status = self._status(running=True, decision=self._decision())
+        text = self._text(status, now, width=120, feed="idle", polled_at=now - 125)
+        assert "auto on · stay: resets soonest (19h40m), 37% headroom" in text
+        assert text.rstrip().endswith("◐ feed idle · polled 2m ago")
+
+    def test_poll_age_gives_way_to_the_verdict_when_narrow(self):
+        now = time.time()
+        status = self._status(running=True, decision=self._decision())
+        text = self._text(status, now, width=60, feed="idle", polled_at=now - 125)
+        assert "stay:" in text and "polled" not in text and "feed idle" in text
 
     def test_verdict_is_dim(self):
         from claude_rotater.tui.main import status_text

@@ -215,7 +215,7 @@ class AutoStatus:
 FEED_LABELS = {
     # state -> (glyph, palette role, words)
     "live": ("●", "sev_ok", "feed live"),
-    # No chat here answered lately: the active account is polled instead.
+    # No chat here answered lately: polls carry on (status_text says when).
     "idle": ("◐", "muted", "feed idle"),
     "stale": ("◐", "sev_warn", "feed: no data yet"),
     "off": ("○", "muted", "feed off"),
@@ -274,6 +274,7 @@ def same_verdict(new: Decision, old: Decision | None) -> bool:
 
 DECISION_SEP = " · "
 MIN_DECISION_W = 12  # narrower than "stay: reset…" says nothing; drop it
+VERDICT_KEEP_W = 40  # the verdict keeps this much before the poll age shows
 # Clicking the header's mode label runs the same action as ``m``.
 MODE_CLICK = Style(meta={"@click": "screen.toggle_mode"})
 
@@ -309,12 +310,15 @@ def status_text(
     profile: str | None = None,
     login_note: str = "",
     login_failed: bool = False,
+    polled_at: float | None = None,
 ) -> Text:
     """`` rota · work   auto on · stay: resets soonest (19h40m)   ● feed live``.
 
     The engine state with its latest verdict (dim, cut to fit), the feed
     state and, when a switch is blocked, why in place of the verdict; the
-    note goes, then the verdict, when the width runs short.
+    note goes, then the verdict, when the width runs short. Any feed state
+    but live adds how long ago the latest poll was (``polled_at``): usage
+    keeps being polled either way, and use elsewhere is seen only that way.
 
     ``login_note`` (a login that died or is ending, see ``login_alerts``)
     outranks all of them: it takes the verdict's place, in red when the
@@ -333,6 +337,20 @@ def status_text(
         tail.append(f"   {glyph} ", style=getattr(palette, role))
         tail.append(words, style=palette.muted)
     note = status.view_only or switch_note(status, now=now, over_threshold=over_threshold)
+    if feed in FEED_LABELS and feed != "live" and polled_at is not None:
+        # The poll age is the first thing to give way to what follows.
+        polled = f" · polled {countdown_text(now - polled_at)} ago"
+        if login_note:
+            after = 3 + MIN_DECISION_W
+        elif note:
+            after = 3 + len(note)
+        elif status.running and status.decision is not None:
+            # Keep a readable stretch of the verdict, not just its stub.
+            after = len(DECISION_SEP) + min(len(status.decision.line), VERDICT_KEEP_W)
+        else:
+            after = 0
+        if head.cell_len + tail.cell_len + len(polled) + after <= width:
+            tail.append(polled, style=palette.muted)
     if login_note:
         room = width - head.cell_len - tail.cell_len - 3
         if room < MIN_DECISION_W:  # the feed word gives way first
@@ -1564,6 +1582,10 @@ class MainScreen(Screen):
             profile=profiles.active_name(),
             login_note=login_alerts.header_note(alerts),
             login_failed=bool(alerts) and login_alerts.is_failed(alerts[0]),
+            polled_at=max(
+                (a.usage.fetched_at for a in snap.accounts if a.usage.fetched_at is not None),
+                default=None,
+            ) if snap else None,
         )
 
     def row_text(self, number: str, width: int) -> Text:
