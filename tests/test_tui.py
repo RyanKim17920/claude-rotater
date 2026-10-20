@@ -894,7 +894,7 @@ class TestAccountRowText:
 
     def test_forecast_cell_is_an_estimate(self):
         est, now = window_est()
-        text = self._text(make_account(1, entry=make_entry(60.0, 10.0)), est, now=now)
+        text = self._text(make_account(1, active=True, entry=make_entry(60.0, 10.0)), est, now=now)
         assert "~5h limit in 60m" in text.plain
         assert has_color(text, "~5h limit", SEV_CRIT) and not is_dim(text, "~5h limit")  # crosses: red
         assert "%/h" not in text.plain  # no burn rates in the table
@@ -1773,7 +1773,8 @@ class TestMainPage:
             await pilot.pause()
             head = painted(app, "#detail").splitlines()[0]
             if elsewhere:
-                assert "~7d limit in" in row_plain(app, "2"), row_plain(app, "2")
+                # The row itself says whose use this is, not only the chart.
+                assert "elsewhere ~7d in" in row_plain(app, "2"), row_plain(app, "2")
                 assert "used elsewhere" in head
                 assert app.screen.summary("2").endswith("used elsewhere")
             else:
@@ -3716,3 +3717,16 @@ class TestCopy:
             await pilot.press("y", "Y")
             await settle(pilot)
             assert copied == []
+
+
+def test_elsewhere_forecast_words():
+    from claude_rotater.tui.main import Forecast, elsewhere_forecast
+
+    crit = Forecast("~7d limit in 15h", "~7d in 15h", "crit", True)
+    assert elsewhere_forecast(crit) == Forecast("elsewhere ~7d in 15h", "~7d in 15h", "crit", True)
+    days = Forecast("~7d limit in 2d23h", "~7d in 2d23h", "crit", True)
+    assert elsewhere_forecast(days).text == "elsewhere ~7d in 2d23h"
+    wide = Forecast("~Fable limit in 15h", "~Fable in 15h", "crit", True)
+    assert elsewhere_forecast(wide).text == "~Fable limit in 15h"  # would not fit
+    assert elsewhere_forecast(Forecast("ok", "ok", "ok", False)).text == "used elsewhere"
+    assert elsewhere_forecast(None).short == "elsewhere"

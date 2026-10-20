@@ -371,7 +371,7 @@ _RESET_GLYPH = "↻"
 _MAX_TAG_W = 16  # "login ends 5h03m"
 _MIN_NAME_W = 8
 _MAX_NAME_W = 32
-_FORECAST_W = 20  # "~Fable limit in 15h"
+_FORECAST_W = 22  # "elsewhere ~7d in 2d23h", "~Fable limit in 15h"
 _FORECAST_SHORT_W = 10  # "~7d in 15h"
 
 
@@ -793,6 +793,18 @@ def used_elsewhere(acc: AccountSnapshot, est: AccountEstimate | None) -> bool:
     )
 
 
+def elsewhere_forecast(fc: Forecast | None) -> Forecast:
+    """The forecast of an account rising while another is on duty here, so
+    its projection plainly is not this machine's doing:
+    ``elsewhere ~7d in 15h`` (the short form when the long one would not
+    fit the cell), ``used elsewhere`` when it stays under."""
+    if fc is None or fc.text == "ok":
+        role = fc.role if fc is not None else "muted"
+        return Forecast(ELSEWHERE, "elsewhere", role, True)
+    text = f"elsewhere {fc.short}"
+    return dataclasses.replace(fc, text=text if len(text) <= _FORECAST_W else fc.text)
+
+
 def forecast_text(fc: Forecast | None, width: int, *, long: bool, palette: Palette) -> Text:
     if fc is None:
         return Text()
@@ -894,6 +906,8 @@ def account_row_text(
             )
         )
     fc = forecast(acc, est, threshold=threshold, now=now, models=models) if layout.forecast_w else None
+    if layout.forecast_w and used_elsewhere(acc, est):
+        fc = elsewhere_forecast(fc)
     if fc is not None:
         text.append(" " * _GAP)
         text.append(forecast_text(fc, layout.forecast_w, long=layout.level.long_forecast, palette=palette))
