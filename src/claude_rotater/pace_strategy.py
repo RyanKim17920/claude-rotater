@@ -188,6 +188,10 @@ class _Fleet:
         if self.burn_covers_all:
             vs = f" vs burn {self.burn:.1f}%/h" if self.burn else ""
             return f"no 7d reset is close (needs ≤{self.top_need:.1f}%/h{vs})"
+        if len(self.pool) < 2:
+            # The others cannot take meaningful work before their resets at
+            # the user's burn: there is no second need to compare with.
+            return "no other account needs using first"
         low = f"{min(self.need[v.number] for v in self.pool):.1f}"
         high = f"{self.top_need:.1f}"
         span = high if low == high else f"{low}–{high}"

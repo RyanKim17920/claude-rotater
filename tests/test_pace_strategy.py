@@ -125,6 +125,21 @@ class TestStaysOnARunning5hWindow:
             )
 
 
+class TestNothingToCompareWith:
+    """Personal profile, 2026-10-19 23:30: on #1 (5h 1%, 7d 0% resetting in
+    6d2h) beside #4 (7d 67%, resets in 4d19h), with a near-zero burn since
+    the switch. #4 cannot take meaningful work at that burn, so only #1
+    counts; the line said "7d needs similar (0.7%/h)", a comparison with
+    nobody."""
+
+    def test_says_no_other_account_needs_using_first(self):
+        on_1 = view("1", seven=0, reset_h=6 * 24 + 2, five=1, five_reset_h=50 / 60)
+        busy_4 = view("4", seven=67, reset_h=4 * 24 + 19, five=6)
+        choice = choose(on_1, busy_4, burn=0.01, threshold=99.9)
+        assert choice.action == "stay"
+        assert choice.reason.endswith("using it first; no other account needs using first")
+
+
 @pytest.mark.parametrize(
     "active, candidates, burn, expected_action, expected_target, reason",
     [
