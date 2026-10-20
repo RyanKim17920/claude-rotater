@@ -910,7 +910,8 @@ class TestAdaptiveScheduler:
         # The history-fed estimate projects the crossing; the active account
         # tightens to ETA/POLLS_BEFORE_CROSSING (never below MIN_INTERVAL_S;
         # there is no faster urgent mode, the statusline feed is what watches
-        # a burning account).
+        # a burning account), or to the busy cadence of a rising account,
+        # whichever is sooner.
         h = self._harness(temp_home, monkeypatch, accounts=2)
         usage = {"1": _usage(62), "2": _usage(10)}
         counts: dict[str, int] = {}
@@ -920,8 +921,9 @@ class TestAdaptiveScheduler:
         self._tick(h, counts, usage)
         assert counts["1"] == 2
         e = h.switcher._usage_store.entries({"1": ("a@example.com", "")})["1"]
-        assert e.poll_interval_s == pytest.approx(360.0)  # 1080 / 3
-        h.clock.advance(359)
+        # min(1080 / 3, BUSY_INTERVAL_S)
+        assert e.poll_interval_s == pytest.approx(poll_policy.BUSY_INTERVAL_S)
+        h.clock.advance(poll_policy.BUSY_INTERVAL_S - 1)
         self._tick(h, counts, usage)
         assert counts["1"] == 2
         h.clock.advance(1)

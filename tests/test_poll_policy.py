@@ -8,9 +8,14 @@ from datetime import datetime, timezone
 import pytest
 
 from claude_rotater import poll_policy
-from claude_rotater.estimator import AccountEstimate, WindowEstimate, estimate_account
+from claude_rotater.estimator import (
+    AccountEstimate,
+    WindowEstimate,
+    estimate_account,
+    estimate_fleet,
+)
 from claude_rotater.poll_policy import PollCadence
-from claude_rotater.usage_history import UsageHistory
+from claude_rotater.usage_history import Point, UsageHistory
 
 NOW = 1_000_000.0
 HALF = lambda: 0.5  # noqa: E731 — rng midpoint: jitter factor exactly 1.0
@@ -122,6 +127,86 @@ class TestApproach:
         _, interval = _plan(estimate=_estimate(0.0, last_pct=100.0), is_active=True,
                             new_usage=_usage(100))
         assert interval == poll_policy.EXHAUSTED_INTERVAL_S
+
+
+def _measured(rate: float, *, window="7d", confidence="medium", n=3,
+              last_pct=50.0) -> WindowEstimate:
+    """A window fitted from ``n`` readings at ``rate`` %/h."""
+    pts = tuple(Point(t=NOW - 600.0 * (n - 1 - i), pct=last_pct, resets_at=None)
+                for i in range(n))
+    return WindowEstimate(window=window, last_pct=last_pct, last_t=NOW, resets_at=None,
+                          rate_pct_per_h=rate, confidence=confidence, points=pts)
+
+
+def _account(*windows: WindowEstimate, binding_confidence=None) -> AccountEstimate:
+    binding = windows[0]
+    return AccountEstimate(windows={w.window: w for w in windows}, binding=binding,
+                           eta_threshold_s=None, eta_limit_s=None,
+                           confidence=binding_confidence or binding.confidence)
+
+
+class TestBusy:
+    """Use elsewhere (an SSH machine, claude.ai) reaches rota only through
+    polls, so an account whose readings rise is polled faster, whichever
+    role it has and whatever the statusline feed says."""
+
+    @pytest.mark.parametrize("is_active", [True, False])
+    def test_rising_account_polls_at_busy_cadence(self, is_active):
+        _, interval = _plan(estimate=_account(_measured(1.2)), is_active=is_active)
+        assert interval == poll_policy.BUSY_INTERVAL_S == 300.0
+
+    def test_flat_account_stays_at_baseline(self):
+        assert _plan(estimate=_account(_measured(0.0)))[1] == BASE
+
+    def test_noise_is_not_burn(self):
+        slow = poll_policy.BUSY_MIN_RATE_PCT_PER_H / 2
+        assert _plan(estimate=_account(_measured(slow)))[1] == BASE
+
+    def test_a_guess_without_two_readings_is_not_burn(self):
+        # A window average or a burn carried over a switch has one reading.
+        assert _plan(estimate=_account(_measured(5.0, n=1)))[1] == BASE
+
+    def test_unknown_confidence_is_not_burn(self):
+        assert _plan(estimate=_account(_measured(5.0, confidence="none")))[1] == BASE
+
+    def test_any_rising_window_counts_even_off_the_binding_one(self):
+        flat_5h = _measured(0.0, window="5h", confidence="none", n=1)
+        est = _account(flat_5h, _measured(1.2, window="7d"))
+        assert est.confidence == "none"
+        assert _plan(estimate=est)[1] == poll_policy.BUSY_INTERVAL_S
+
+    def test_near_crossing_still_goes_below_busy(self):
+        w = _measured(30.0, last_pct=85.0)
+        est = AccountEstimate(windows={"7d": w}, binding=w, eta_threshold_s=300.0,
+                              eta_limit_s=None, confidence="medium")
+        assert _plan(estimate=est, new_usage=_usage(85))[1] == poll_policy.MIN_INTERVAL_S
+
+    def test_exhausted_is_not_hurried(self):
+        _, interval = _plan(estimate=_account(_measured(5.0, last_pct=100.0)),
+                            new_usage=_usage(100))
+        assert interval == poll_policy.EXHAUSTED_INTERVAL_S
+
+    def test_recent_429_backs_off_past_busy(self):
+        _, interval = _plan(estimate=_account(_measured(1.2)), recent_429=True,
+                            prev_interval_s=poll_policy.BUSY_INTERVAL_S)
+        # AIMD from the busy interval: 300 * 1.5.
+        assert interval == poll_policy.BUSY_INTERVAL_S * poll_policy.POST_429_BACKOFF_MULT
+
+    def test_slower_user_baseline_is_kept_faster_only(self):
+        fast = PollCadence(spare_s=120.0)
+        assert _plan(estimate=_account(_measured(1.2)), cadence=fast)[1] == 120.0
+
+    def test_budget_caps_busy_polling(self):
+        cadence = PollCadence(hourly_budget=4)
+        attempts = [NOW - 3000, NOW - 2000, NOW - 1000, NOW]
+        next_poll, interval = _plan(estimate=_account(_measured(1.2)), cadence=cadence,
+                                    attempts=attempts)
+        assert interval == poll_policy.BUSY_INTERVAL_S
+        assert next_poll == pytest.approx(NOW - 3000 + 3600)
+
+    def test_busy_stays_within_the_default_budget(self):
+        assert 3600 / (poll_policy.BUSY_INTERVAL_S * (1 - poll_policy.JITTER_FRAC)) \
+            < poll_policy.HOURLY_BUDGET
 
 
 class TestCadenceSettings:
@@ -356,7 +441,7 @@ class TestSimulation:
             return int(10 + 2.0 * h)
         return 5
 
-    def _run(self, tmp_path, cadence=poll_policy.DEFAULT_CADENCE, jitter=HALF):
+    def _run(self, tmp_path, cadence=poll_policy.DEFAULT_CADENCE, jitter=HALF, fleet=False):
         clock_t = [self.T0]
         hist = UsageHistory(tmp_path / "cache", clock=lambda: clock_t[0])
         ids = {n: (f"{n}@x.com", "org") for n in ("1", "2", "3")}
@@ -376,7 +461,11 @@ class TestSimulation:
             hist.record_attempts([num], ids, t)
             polls[num].append(t)
             series = hist.series({num: ids[num]})[num]
-            est = estimate_account(series, models=(), threshold=self.THRESHOLD, now=t)
+            if fleet:  # roles known, as in the switcher: #1 on duty
+                est = estimate_fleet({num: series}, active="1", models=(),
+                                     threshold=self.THRESHOLD, now=t)[num]
+            else:
+                est = estimate_account(series, models=(), threshold=self.THRESHOLD, now=t)
             nxt, interval = poll_policy.plan_after_fetch(
                 prev_interval_s=prev_int[num], prev_usage=None, new_usage=usage,
                 is_active=(num == "1"), threshold=self.THRESHOLD, models=(),
@@ -400,6 +489,16 @@ class TestSimulation:
         assert len(before) >= 2
         # The active account tightened near the crossing; idle ones did not.
         assert len(polls["1"]) > len(polls["3"])
+        assert self._max_in_any_hour(polls["3"]) <= 3600 / (BASE * 0.9) + 1
+
+    @pytest.mark.parametrize("jitter", [HALF, lambda: 0.0, lambda: 1.0])
+    def test_account_used_elsewhere_is_polled_faster(self, tmp_path, jitter):
+        # #2 is off duty here but climbs 2%/h (an SSH machine); #3 is quiet.
+        polls = self._run(tmp_path, jitter=jitter, fleet=True)
+        late = lambda times: [t for t in times if t >= self.T0 + 3600]  # noqa: E731
+        assert len(late(polls["2"])) >= 2 * len(late(polls["3"])) - 1
+        for times in polls.values():
+            assert self._max_in_any_hour(times) <= poll_policy.HOURLY_BUDGET
         assert self._max_in_any_hour(polls["3"]) <= 3600 / (BASE * 0.9) + 1
 
     def test_fast_custom_cadence_still_capped_by_its_budget(self, tmp_path):

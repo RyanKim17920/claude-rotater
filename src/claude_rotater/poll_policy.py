@@ -93,6 +93,14 @@ MIN_INTERVAL_S = 180.0
 # from settings (see PollCadence).
 SPARE_INTERVAL_S = 600.0
 
+# An account whose readings are rising is being burned by someone: the user
+# here, or a use this machine cannot see (an SSH machine, claude.ai), which
+# only polls reveal. It is sampled at this cadence (12 requests/hour) until
+# its readings go flat again; quiet accounts stay at the baseline.
+BUSY_INTERVAL_S = 300.0
+# Slower than this is integer-percent noise, not burn.
+BUSY_MIN_RATE_PCT_PER_H = 0.2
+
 # How long a statusline feed record keeps the active account off polling. No
 # Claude Code session reporting for this long usually means nothing is
 # burning, so spare cadence is enough. A DEFAULT, see PollCadence.
@@ -151,8 +159,8 @@ POST_429_BACKOFF_MULT = 1.5
 POST_429_MAX_INTERVAL_S = 1800.0
 
 # The engine escalates to a full candidate refresh when the active account is
-# within this margin of the threshold (decision policy, but the approach
-# cadence keys on the same band, so it lives with the cadence numbers).
+# within this margin of the threshold, and polls the active account at
+# MIN_INTERVAL_S inside it (decision policy, kept with the cadence numbers).
 ESCALATION_MARGIN_PCT = 15.0
 
 # Never schedule a poll later than a known window reset (+ slack): stored
@@ -281,6 +289,18 @@ def budget_release_at(
     return trailing[-budget] + TRAILING_HOUR_S
 
 
+def is_rising(estimate: AccountEstimate) -> bool:
+    """True when any relevant window of ``estimate`` was measured filling
+    faster than quantization noise. A slope needs two readings: a window
+    average or a burn carried over a switch is a guess, not evidence."""
+    return any(
+        len(w.points) >= 2
+        and w.confidence != "none"
+        and (w.rate_pct_per_h or 0.0) >= BUSY_MIN_RATE_PCT_PER_H
+        for w in estimate.windows.values()
+    )
+
+
 def plan_after_fetch(
     *,
     prev_interval_s: float | None,
@@ -306,9 +326,12 @@ def plan_after_fetch(
        here only runs once the feed has gone quiet.
     2. An exhausted account polls no faster than ``EXHAUSTED_INTERVAL_S``
        (bounded, so an early quota grant is still observed).
-    3. Otherwise, when the estimator projects a threshold crossing, shrink
-       the interval to ``eta / POLLS_BEFORE_CROSSING``, floored at
-       ``MIN_INTERVAL_S``. Never above the baseline.
+    3. Otherwise an account whose readings are rising (any relevant
+       window, any confidence but "none") polls at ``BUSY_INTERVAL_S``:
+       use elsewhere is visible only to polls. And when the estimator
+       projects a threshold crossing, shrink the interval to
+       ``eta / POLLS_BEFORE_CROSSING``, floored at ``MIN_INTERVAL_S``.
+       Never above the baseline.
     4. A recent 429 widens the interval multiplicatively (AIMD) toward
        ``POST_429_MAX_INTERVAL_S``.
     5. Jitter by ``JITTER_FRAC``.
@@ -317,11 +340,11 @@ def plan_after_fetch(
        token's ledger, including the fetch just made). Last, so nothing —
        not even the reset pull-in — schedules above budget.
 
-    ``prev_usage`` and ``is_active`` are accepted for signature
-    compatibility: burn is read from ``estimate``, and the active account no
-    longer has a cadence of its own.
+    ``prev_usage``, ``is_active`` and ``threshold`` are accepted for
+    signature compatibility: burn and the threshold ETA are read from
+    ``estimate``, and the active account no longer has a cadence of its own.
     """
-    del prev_usage, is_active
+    del prev_usage, is_active, threshold
     baseline = cadence.spare_s
     interval = baseline
     headroom = oauth.account_headroom(new_usage, models)
@@ -331,24 +354,16 @@ def plan_after_fetch(
         # before the previously advertised timestamp. The approach step is
         # skipped: its ETA is 0 here, which would undo this bound.
         interval = max(interval, EXHAUSTED_INTERVAL_S)
-    elif estimate is not None and estimate.confidence != "none":
+    elif estimate is not None:
+        if is_rising(estimate):
+            # Never above the baseline, like every floor here.
+            interval = min(interval, BUSY_INTERVAL_S)
         eta = estimate.eta_threshold_s
-        if eta is not None:
+        if estimate.confidence != "none" and eta is not None:
             # A floor is never above the baseline: a user who asked for a
             # faster baseline must not be slowed down near the threshold.
             floor = min(MIN_INTERVAL_S, baseline)
-            interval = min(max(eta / POLLS_BEFORE_CROSSING, floor), baseline)
-        else:
-            binding = estimate.binding
-            if (
-                binding is not None
-                and binding.last_pct >= threshold - ESCALATION_MARGIN_PCT
-                and (binding.rate_pct_per_h or 0.0) > 0
-            ):
-                # Burning inside the band, but the crossing lands after the
-                # reset: the baseline is enough (the reset pull-in re-reads
-                # the new window).
-                interval = min(interval, baseline)
+            interval = min(max(eta / POLLS_BEFORE_CROSSING, floor), interval)
     if recent_429:
         # AIMD additive-increase: grow the interval multiplicatively from the
         # last one toward the wider 429 ceiling, so machines sharing a
