@@ -489,6 +489,30 @@ class TestStaleness:
         assert reading_time({"t": 100.0}) == 100.0
         assert reading_time({"t": 100.0, "at": True}) == 100.0
 
+    def test_reading_time_of_changed_numbers_is_when_seen(self):
+        assert reading_time({"t": 100.0, "at": 30.0}, news=True) == 100.0
+        assert reading_time({"t": 100.0}, news=True) == 100.0
+        # Within a re-render of the entry: it came with that response.
+        assert reading_time({"t": 100.0, "at": 90.0}, news=True) == 90.0
+
+    def test_long_turn_reading_is_not_dated_before_a_poll_that_read_less(self, h):
+        # Real case: a chat at 41% whose next response streamed for minutes.
+        # Its statusline showed the new 47% while the transcript's last
+        # assistant entry was still the 41% one; back-dated there, the 47%
+        # landed before a poll that read 42%, and the history dropped 47→42
+        # (read as a window reset, which cut the 5h fit to two points).
+        ing = FeedIngestor(h.switcher, clock=h.clock)
+        polled(h, "1")
+        h.clock.advance(10)
+        first = h.clock.now
+        swrite(h, "s", at=first, pct5=41.0)
+        ing.ingest()
+        h.clock.advance(330)
+        swrite(h, "s", at=first, pct5=47.0)
+        assert ing.ingest().adopted == {"1": h.clock.now}
+        series = h.switcher.usage_history.series({"1": ID1})["1"]["5h"]
+        assert [(p.t, p.pct) for p in series][-2:] == [(first, 41.0), (h.clock.now, 47.0)]
+
     def test_idle_chat_rerendering_old_numbers_is_stale(self, h):
         ing = FeedIngestor(h.switcher, clock=h.clock)
         # Rendered just now, but its last response was 20 minutes ago.

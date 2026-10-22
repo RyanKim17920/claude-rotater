@@ -101,6 +101,10 @@ BEHIND_PCT = RESET_DROP_PCT
 # statusline refreshes every few seconds while a session is busy).
 HISTORY_MIN_GAP_S = 60.0
 
+# Changed numbers seen this long after the session's last assistant entry
+# came from a request still in flight, not from that entry (reading_time).
+IN_FLIGHT_S = 60.0
+
 # Sessions whose last record is remembered for the re-render check; the
 # oldest is forgotten first (costs at most one duplicate record).
 SESSION_MEMORY = 256
@@ -139,13 +143,23 @@ def _norm(path: str) -> str:
     return os.path.normcase(resolved)
 
 
-def reading_time(record: dict) -> float:
+def reading_time(record: dict, *, news: bool = False) -> float:
     """When a record's numbers were current: the session's last assistant
-    message (``at``) when known, never later than the record itself."""
+    message (``at``) when known, never later than the record itself.
+
+    ``news``: the session's numbers changed since its previous record. Seen
+    within :data:`IN_FLIGHT_S` of ``at`` they came with that response (the
+    statusline re-renders as soon as an entry is written). Seen later, they
+    came from a request still in flight: Claude Code writes the assistant
+    entry only once a response is complete, while the rate limits arrive
+    with its first bytes, so a long turn shows new numbers next to an old
+    ``at``. Those are dated when seen; back-dated to ``at`` they landed
+    before polls that read less, and the window looked to drop."""
     t = float(record["t"])
     at = record.get("at")
     if isinstance(at, (int, float)) and not isinstance(at, bool):
-        return min(float(at), t)
+        if not (news and t - float(at) > IN_FLIGHT_S):
+            return min(float(at), t)
     return t
 
 
@@ -348,18 +362,22 @@ class FeedIngestor:
             _logger.debug("Statusline feed records dropped: %s", dict(result.rejected))
         return result
 
-    def _rerender(self, record: dict) -> bool:
-        """Whether ``record`` repeats its session's previous record."""
+    def _rerender(self, record: dict) -> tuple[bool, bool]:
+        """``(repeat, news)``: whether ``record`` repeats its session's
+        previous record, and whether its numbers differ from that record's
+        (see :func:`reading_time`)."""
         session = record.get("session_id")
         if not isinstance(session, str):
-            return False
+            return False, False
         values = _values(record)
-        repeat = self._sessions.get(session) == values
+        previous = self._sessions.get(session)
         self._sessions[session] = values
         self._sessions.move_to_end(session)
         while len(self._sessions) > SESSION_MEMORY:
             self._sessions.popitem(last=False)
-        return repeat
+        if previous is None:
+            return False, False
+        return previous == values, previous[1:] != values[1:]
 
     def _apply(self, records: list[dict], result: IngestResult) -> None:
         now = self.clock()
@@ -376,10 +394,11 @@ class FeedIngestor:
 
         accepted: dict[str, list[dict]] = {}
         for record in records:
-            if self._rerender(record):
+            repeat, news = self._rerender(record)
+            if repeat:
                 result.rejected["rerender"] += 1
                 continue
-            record = dict(record, t=reading_time(record))
+            record = dict(record, t=reading_time(record, news=news))
             verdict = attribute(
                 record,
                 now=now,
