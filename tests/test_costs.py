@@ -291,12 +291,14 @@ class TestSlice:
 
     def test_resumes_from_a_valid_offset_and_rereads_a_replaced_file(self, tmp_path, home, now):
         f = write(home / "projects" / "p" / "a.jsonl", entry(now - 1000, "m1"), entry(now - 100, "m2"))
+        touch(f, now)  # written at the fixture's 15:00, not the wall clock's
         first = costs.slice_transcripts(source(home), now - 86400, now - 500, tmp_path / "a")
         resumed = costs.slice_transcripts(source(home), now - 500, now + 86400, tmp_path / "b",
                                           first.offsets)
         assert resumed.records == 1
         f.unlink()  # rewritten: new inode, so the offset no longer applies
         write(f, entry(now - 400, "n1"), entry(now - 300, "n2"))
+        touch(f, now)
         reread = costs.slice_transcripts(source(home), now - 500, now + 86400, tmp_path / "c",
                                          {str(f): [first.offsets[str(f)][0] + 10**9, 10**6, 10**6]})
         assert reread.records == 2
