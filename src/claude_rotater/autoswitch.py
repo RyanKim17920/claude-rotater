@@ -49,7 +49,7 @@ import logging
 import math
 import threading
 import time
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -1571,8 +1571,10 @@ class AutoSwitchEngine:
             active_headroom=active_headroom,
             settings=settings,
             now=decided_now,
-            landing_rise=(
-                projection.projected_pct - projection.pct if projection else 0.0
+            landing_rise=projection.rise_pct if projection else 0.0,
+            landing_at=(
+                self._landing_positions(oauth_candidates, usage, decided_now)
+                if projection else None
             ),
         )
 
@@ -2189,11 +2191,15 @@ class AutoSwitchEngine:
         settings: AutoSwitchSettings,
         now: float,
         landing_rise: float = 0.0,
+        landing_at: Mapping[str, float] | None = None,
     ) -> tuple[list[str], bool, float | None]:
         """Filter and rank OAuth candidates for this tick's trigger.
 
         ``landing_rise`` is a pre-empt's projected rise by the next reading:
         the burn is the user's, so it follows them onto the target.
+        ``landing_at`` is where each target most likely is inside its whole
+        percent (``preempt.position``): a target reading 99 that was left at
+        99.9 is not a landing spot.
 
         Returns ``(ordered, any_known, active_reset_ts)``. Pure — no emits,
         no state writes — so the consume-first two-phase commit can run it
@@ -2263,7 +2269,8 @@ class AutoSwitchEngine:
             if num == no_return:
                 continue  # the account we just left; see _no_return_account
             if trigger == PREEMPT_TRIGGER and (
-                100.0 - h + landing_rise >= preempt.switch_point(settings.threshold)
+                max(100.0 - h, (landing_at or {}).get(num, 0.0)) + landing_rise
+                >= preempt.switch_point(settings.threshold)
             ):
                 continue  # would itself be pre-empted on landing
             reset_ts = (
@@ -2473,6 +2480,35 @@ class AutoSwitchEngine:
         except Exception as e:
             _logger.debug("pre-empt projection unavailable: %r", e)
             return None
+
+    def _landing_positions(
+        self, candidates, usage: dict, now: float
+    ) -> dict[str, float]:
+        """Each pre-empt target's likely position inside its whole percent,
+        from its own history. Advisory: a target it cannot read is left to
+        its reading."""
+        out: dict[str, float] = {}
+        try:
+            series = self.switcher.usage_history.series(self.switcher.usage_identities())
+        except Exception as e:
+            _logger.debug("landing positions unavailable: %r", e)
+            return out
+        for num in candidates:
+            value = usage.get(num)
+            live = {
+                label: (pct, _parse_reset_ts(resets_at))
+                for label, pct, resets_at in oauth.relevant_windows(
+                    value if isinstance(value, dict) else None, self._models
+                )
+            }
+            try:
+                pos = preempt.position(series.get(num, {}), live, models=self._models, now=now)
+            except Exception as e:
+                _logger.debug("landing position of %s unavailable: %r", num, e)
+                continue
+            if pos is not None:
+                out[num] = pos
+        return out
 
     def _active_poll_in(self, entry, usage: dict | None, now: float) -> float:
         """Seconds until the engine's next poll of the active account: its

@@ -284,5 +284,8 @@ class TestFiveHourLimitHitReplay:
         assert moved_at == "13:09:11", moved_at
         switch = next(e for e in h.events if isinstance(e, SwitchEvent))
         assert switch.trigger == "pre-empt"
-        assert switch.reason.startswith("pre-empt: ~102.0% by next reading in ~1m")
+        # 99 + where the fast burn has carried it inside the 99th percent + the
+        # 3-point turn.
+        assert switch.reason.startswith("pre-empt: ~103.0% by next reading in ~1m")
+        assert switch.reason.endswith("turn 3%)")
         assert h.active_number() != 1

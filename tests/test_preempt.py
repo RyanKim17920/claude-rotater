@@ -35,13 +35,16 @@ class TestSwitchPoint:
 class TestProject:
     def test_steady_burn_extrapolates_over_the_gap(self):
         # 1%/min for 20 minutes, one point a minute: no reading jumped more
-        # than the burn, so the burn over the 3-minute gap decides.
+        # than the burn, so the burn over the 3-minute gap decides. The step
+        # to 95 landed half a minute ago: half a point into the percent, with
+        # the drift safety on top.
         series = five_hour(*((20 * MIN - i * MIN, 75.0 + i) for i in range(21)))
         p = run(series, horizon_s=180.0)
         assert p.window == "5h"
         assert p.pct == 95.0
         assert p.burn_pct_per_min == pytest.approx(1.0, rel=0.05)
-        assert p.projected_pct == pytest.approx(98.0, abs=0.2)
+        assert p.offset_pct == pytest.approx(0.5 * preempt.DRIFT_SAFETY, abs=0.05)
+        assert p.projected_pct == pytest.approx(98.0 + p.offset_pct, abs=0.2)
         assert not p.reaches(99.9)
         assert run(series, horizon_s=300.0).reaches(99.9)
 
@@ -51,34 +54,40 @@ class TestProject:
                            (10 * MIN, 95.0), (0, 97.0))
         p = run(series, horizon_s=60.0)
         assert p.jump_pct == 3.0
-        assert p.projected_pct == pytest.approx(100.0)
+        assert 0.0 < p.offset_pct <= 1.0
+        assert p.projected_pct == pytest.approx(97.0 + p.offset_pct + 3.0)
         assert p.reaches(99.9)
 
     def test_margin_is_the_larger_of_burn_and_jump_not_their_sum(self):
         series = five_hour((10 * MIN, 90.0), (5 * MIN, 92.0), (0, 94.0))
         p = run(series, horizon_s=60.0)
         rise_burn = p.burn_pct_per_min * 1.0
-        assert p.projected_pct == pytest.approx(94.0 + max(rise_burn, p.jump_pct))
+        assert p.jump_pct == 2.0
+        assert p.projected_pct == pytest.approx(
+            94.0 + p.offset_pct + max(rise_burn, p.jump_pct)
+        )
 
     def test_sparse_single_reading_falls_back_to_the_window_average(self):
         # One reading: no slope and no jump, but 98% two hours into the
         # window is 0.82%/min on average, which a 2-minute gap carries over.
+        # Where inside the 98th percent is unknown: half a point.
         p = run(five_hour((0, 98.0)))
         assert p.burn_pct_per_min == pytest.approx(98.0 / 120.0)
-        assert p.projected_pct == pytest.approx(98.0 + 2 * 98.0 / 120.0)
-        assert p.reaches(99.5) and not p.reaches(99.9)
+        assert p.offset_pct == 0.5
+        assert p.projected_pct == pytest.approx(98.5 + 2 * 98.0 / 120.0)
+        assert p.reaches(99.9)
 
     def test_sparse_reading_after_a_mid_window_switch_says_nothing_more(self):
         # The window average includes another duty: no burn, no margin.
         p = run(five_hour((0, 98.0)), since=NOW - 60)
-        assert p.projected_pct == 98.0
+        assert p.projected_pct == 98.5
 
     def test_only_this_duty_counts(self):
         # The 5-point jump happened before the last switch (another account's
         # duty, or this one's old session): it is not this duty's margin.
         series = five_hour((60 * MIN, 90.0), (50 * MIN, 95.0), (5 * MIN, 95.0), (0, 96.0))
         p = run(series, since=NOW - 10 * MIN, horizon_s=60.0)
-        assert p.jump_pct == 1.0
+        assert p.jump_pct == 0.0  # a 1-point step is the resolution
         assert not p.reaches(99.9)
 
     def test_window_resetting_before_the_next_reading_is_skipped(self):
@@ -99,9 +108,14 @@ class TestProject:
         assert run(series, horizon_s=60.0).window == "7d"
         assert run(series, horizon_s=60.0, models=("Fable",)).window == "Fable"
 
-    def test_reason_line(self):
-        p = Projection("5h", 99.0, 100.4, 170.0, 1.2, 1.0)
-        assert p.reason() == "pre-empt: ~100.4% by next reading in ~3m (burn +1.2%/m)"
+    def test_reason_line_burn_in_pct_per_hour(self):
+        # A weekly burn of 0.02%/min read "+0.0%/m": per hour it says 1.2.
+        p = Projection("7d", 99.0, 100.4, 170.0, 0.02, 3.0)
+        assert p.reason() == (
+            "pre-empt: ~100.4% by next reading in ~3m (burn +1.2%/h, turn 3%)"
+        )
+        steady = Projection("5h", 99.0, 100.4, 170.0, 1.0, 0.0)
+        assert steady.reason() == "pre-empt: ~100.4% by next reading in ~3m (burn +60.0%/h)"
 
 
 class TestNextReadingIn:
@@ -138,3 +152,80 @@ class TestNextReadingIn:
 
 def test_module_constants_are_sane():
     assert preempt.MIN_GAPS >= 2 and preempt.GAP_SAMPLES >= preempt.MIN_GAPS
+
+
+WEEK_RESET = NOW + 3 * 86400
+
+
+def week(*readings: tuple[float, float]) -> list[Point]:
+    return [Point(NOW - ago, pct, WEEK_RESET) for ago, pct in readings]
+
+
+class TestResolution:
+    def test_whole_percents_have_one_point_of_resolution(self):
+        assert preempt.resolution_of(week((60, 98.0), (0, 99.0))) == 1.0
+
+    def test_decimals_have_none(self):
+        assert preempt.resolution_of(week((60, 98.0), (0, 98.4))) == 0.0
+
+
+class TestBurnInUse:
+    def test_the_night_is_not_burn_free_time(self):
+        # 3 points over a 2-hour morning after a flat night: per hour of use
+        # that is ~1.5%/h, where a slope over the 12 wall hours reads 0.25.
+        # Use is counted IN_USE_S before each rise, so 40-minute steps leave
+        # gaps and the rate reads high, the safe side.
+        night = [(12 * 3600 - i * 1800, 90.0) for i in range(20)]
+        morning = [(7200 - i * 180, 90.0 + (i * 180) // 2400) for i in range(41)]
+        series = {"7d": week(*night, *morning)}
+        rate = preempt.burn_in_use(series, "7d", now=NOW, since=None)
+        assert 1.4 <= rate <= 2.1
+
+    def test_needs_some_use_behind_it(self):
+        series = {"7d": week((600, 90.0), (300, 91.0))}
+        assert preempt.burn_in_use(series, "7d", now=NOW, since=None) is None
+
+    def test_only_the_current_window(self):
+        # The reset back to 2% ends the old window's rise.
+        series = {"7d": week((7200, 95.0), (3600, 99.0), (3000, 0.0), (0, 2.0))}
+        rate = preempt.burn_in_use(series, "7d", now=NOW, since=None)
+        assert rate is not None and rate < 4.5
+
+
+class TestInUse:
+    def test_the_fastest_window_decides(self):
+        # 5h climbed every few minutes until 40 minutes ago and stopped; the
+        # slow 7d last stepped 40 minutes ago too, which at 1%/h is normal,
+        # but 5h going flat says the user stopped.
+        five = [Point(NOW - ago, pct, RESET) for ago, pct in
+                ((5400 - i * 180, 20.0 + i) for i in range(17))] + [
+                Point(NOW - ago, 36.0, RESET) for ago in (1800, 1200, 600, 0)]
+        p = run({"5h": five, "7d": week((7200, 97.0), (2400, 98.0), (0, 98.0))},
+                horizon_s=180.0)
+        assert p.burn_pct_per_min == 0.0 and p.jump_pct == 0.0
+
+    def test_a_window_that_never_rose_says_nothing(self):
+        # A per-model window flat at 0 (another model) does not make an
+        # account idle that its 7d shows in use.
+        series = {
+            "7d": week(*((3600 - i * 300, 90.0 + i // 3) for i in range(13))),
+            "Fable": week(*((3600 - i * 300, 0.0) for i in range(13))),
+        }
+        p = run(series, models=("Fable",), horizon_s=180.0)
+        assert p.window == "7d" and p.burn_pct_per_min > 0.0
+
+
+class TestPosition:
+    def test_where_an_idle_account_was_left(self):
+        # Stepped to 99 two hours ago, used an hour more at ~2%/h, idle since:
+        # most likely near the top of its percent.
+        series = {"7d": week(*((14400 - i * 600, 96.0 + i // 3) for i in range(10)),
+                             *((7200 - i * 600, 99.0) for i in range(13))),
+                  "5h": [Point(NOW - ago, pct, RESET) for ago, pct in
+                         ((7200 - i * 600, 10.0 + i) for i in range(7))] +
+                        [Point(NOW - ago, 16.0, RESET) for ago in (3000, 1800, 600, 0)]}
+        pos = preempt.position(series, {}, models=(), now=NOW)
+        assert 99.5 < pos <= 100.0
+
+    def test_unknown_step_is_mid_percent(self):
+        assert preempt.position({"7d": week((0, 99.0))}, {}, models=(), now=NOW) == 99.5

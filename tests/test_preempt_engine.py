@@ -83,7 +83,9 @@ class TestPreempt:
         sw = switches(h)[-1]
         assert sw.trigger == PREEMPT_TRIGGER
         assert sw.to_ref["number"] == 2
-        assert sw.reason.startswith("pre-empt: ~102.0% by next reading in ~1m (burn +")
+        assert sw.reason.startswith("pre-empt: ~102.")
+        assert "by next reading in ~1m (burn +" in sw.reason
+        assert sw.reason.endswith("%/h, turn 3%)")
         assert any("Auto-switch (pre-empt)" in r.getMessage() for r in caplog.records)
 
     def test_no_projection_over_the_line_stays(self, temp_home):
@@ -189,6 +191,77 @@ class TestPreempt:
         duty(h, TURN)
         assert tick(h, {"1": 100.0, "2": 20.0, "3": 40.0}) is TickOutcome.SWITCHED
         assert switches(h)[-1].trigger == "at-limit"
+
+
+def record_both(h: EngineHarness, slot: str, readings) -> None:
+    """``(seconds_before_now, pct5, pct7)`` readings into the slot's history."""
+    email = h.switcher.account_email(slot)
+    now = h.clock.now
+    for ago, p5, p7 in readings:
+        h.switcher.usage_history.record({slot: usage(h, p5, p7)}, {slot: (email, "")}, now - ago)
+
+
+def tick_both(h: EngineHarness, pcts: dict[str, tuple[float, float]]) -> TickOutcome:
+    now = h.clock.now
+    return h.tick_with_entries({n: entry(usage(h, *p), now) for n, p in pcts.items()})
+
+
+def week_step(minutes: int, step_at: int, p5_from: float, p5_rate: float | None):
+    """A reading every 3 minutes over ``minutes``: 7d reads 98, then 99 from
+    ``step_at`` minutes ago; 5h climbs ``p5_rate`` points per reading, or
+    stops climbing at the step when ``p5_rate`` is None."""
+    out, p5 = [], p5_from
+    for m in range(minutes, -1, -3):
+        p7 = 99.0 if m <= step_at else 98.0
+        if p5_rate is not None or m > step_at:
+            p5 += p5_rate or 1.0
+        out.append((m * MIN, p5, p7))
+    return out
+
+
+class TestWholePercentReadings:
+    """Readings come in whole percents: a step of one is not a turn."""
+
+    def test_the_step_to_99_on_a_slow_week_does_not_switch(self, temp_home):
+        # Replayed from an owner's log: 7d stepped 98 -> 99 on the newest
+        # reading at ~2%/h, 5h still climbing. It used to switch at once.
+        h = make(temp_home)
+        record_both(h, "1", week_step(60, 0, 20.0, 1.0))
+        assert tick_both(h, {"1": (41.0, 99.0), "2": (10.0, 50.0), "3": (10.0, 60.0)}) \
+            is TickOutcome.NO_ACTION
+        assert not switches(h)
+
+    def test_the_burn_since_the_step_switches_before_the_percent_runs_out(self, temp_home):
+        h = make(temp_home)
+        record_both(h, "1", week_step(60, 30, 20.0, 1.0))
+        assert tick_both(h, {"1": (41.0, 99.0), "2": (10.0, 50.0), "3": (10.0, 60.0)}) \
+            is TickOutcome.SWITCHED
+        sw = switches(h)[-1]
+        assert sw.trigger == PREEMPT_TRIGGER
+        assert "%/h)" in sw.reason and "turn" not in sw.reason
+
+    def test_a_target_left_at_the_top_of_its_percent_is_not_a_landing_spot(self, temp_home):
+        # #2 stepped to 99 three hours ago and was used for two more hours:
+        # it most likely sits near 100. #3 stepped to 99 and went idle at once.
+        h = make(temp_home)
+        record_both(h, "1", week_step(60, 30, 20.0, 1.0))
+        record_both(h, "2", [(m * MIN, 30.0 + (300 - m) / 10, 97.0 if m > 240 else
+                              98.0 if m > 180 else 99.0) for m in range(300, 119, -3)]
+                    + [(m * MIN, 48.0, 99.0) for m in range(117, -1, -15)])
+        record_both(h, "3", week_step(60, 20, 5.0, None))
+        assert tick_both(h, {"1": (41.0, 99.0), "2": (48.0, 99.0), "3": (25.0, 99.0)}) \
+            is TickOutcome.SWITCHED
+        assert switches(h)[-1].to_ref["number"] == 3
+
+    def test_only_a_target_at_the_top_holds(self, temp_home):
+        h = make(temp_home)
+        record_both(h, "1", week_step(60, 30, 20.0, 1.0))
+        record_both(h, "2", [(m * MIN, 30.0 + (300 - m) / 10, 97.0 if m > 240 else
+                              98.0 if m > 180 else 99.0) for m in range(300, 119, -3)]
+                    + [(m * MIN, 48.0, 99.0) for m in range(117, -1, -15)])
+        assert tick_both(h, {"1": (41.0, 99.0), "2": (48.0, 99.0), "3": (10.0, 100.0)}) \
+            is TickOutcome.BLOCKED
+        assert reasons(h)[-1] == NO_HEADROOM_REASON
 
 
 class TestFeedReadingSwitchesInTheSameTick:
