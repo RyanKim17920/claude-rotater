@@ -1340,6 +1340,55 @@ class TestForecast:
         fc = self._fc(est, now=now, entry=make_entry(88.0, 10.0))
         assert fc.text == "~5h at limit" and fc.estimate
 
+    @staticmethod
+    def _multi(*wins, now):
+        """An estimate of several windows: ``(label, last, rate, ago, resets_in)``."""
+        from claude_rotater.estimator import AccountEstimate, WindowEstimate
+
+        ws = {
+            label: WindowEstimate(label, last, now - ago, now + resets_in, rate, "high", ())
+            for label, last, rate, ago, resets_in in wins
+        }
+        return AccountEstimate(ws, next(iter(ws.values())), None, None, "high")
+
+    def test_both_cross_names_the_five_hour_when_it_is_first(self):
+        now = time.time()
+        # 5h: 60% at 30%/h, 90% in an hour; 7d: 80% at 5%/h, 90% in 2h.
+        est = self._multi(("5h", 60.0, 30.0, 0.0, 7200), ("7d", 80.0, 5.0, 0.0, 3 * 86400), now=now)
+        fc = self._fc(est, now=now, entry=make_entry(60.0, 80.0))
+        assert fc.text == "~5h limit in 60m"
+
+    def test_both_cross_names_the_seven_day_when_it_is_first(self):
+        now = time.time()
+        # 5h 90% in 1h30m; 7d: 80% at 40%/h, 90% in 15m.
+        est = self._multi(("5h", 60.0, 20.0, 0.0, 7200), ("7d", 80.0, 40.0, 0.0, 3 * 86400), now=now)
+        fc = self._fc(est, now=now, entry=make_entry(60.0, 80.0))
+        assert fc.text == "~7d limit in 15m"
+
+    def test_five_hour_crossing_after_its_reset_is_ignored(self):
+        now = time.time()
+        # 5h would reach 90% in 3h, after its 2h reset; 7d reaches it in 5h.
+        est = self._multi(("5h", 60.0, 10.0, 0.0, 7200), ("7d", 80.0, 2.0, 0.0, 3 * 86400), now=now)
+        fc = self._fc(est, now=now, entry=make_entry(60.0, 80.0))
+        assert fc.text == "~7d limit in 5h"
+
+    def test_model_window_first_is_named(self):
+        from claude_rotater.tui.main import forecast
+
+        now = time.time()
+        est = self._multi(
+            ("5h", 60.0, 20.0, 0.0, 7200), ("7d", 50.0, 1.0, 0.0, 3 * 86400),
+            ("Fable", 80.0, 40.0, 0.0, 2 * 86400), now=now,
+        )
+        acc = make_account(1, entry=make_entry(60.0, 50.0, scoped=[("Fable", 80.0)]))
+        fc = forecast(acc, est, threshold=90.0, now=now, models=("fable",))
+        assert fc.text == "~Fable limit in 15m"
+
+    def test_neither_crossing_is_ok(self):
+        now = time.time()
+        est = self._multi(("5h", 30.0, 2.0, 0.0, 7200), ("7d", 40.0, 0.5, 0.0, 3 * 86400), now=now)
+        assert self._fc(est, now=now, entry=make_entry(30.0, 40.0)).text == "ok"
+
     def test_nothing_to_forecast(self):
         est, now = window_est()
         assert self._fc(est, threshold=None) is None

@@ -77,6 +77,7 @@ from claude_rotater.estimator import (
     AccountEstimate,
     WindowEstimate,
     estimate_window,
+    first_crossing,
     is_relevant_window,
 )
 from claude_rotater.json_output import USAGE_API_KEY, USAGE_RELOGIN_REQUIRED
@@ -783,14 +784,16 @@ def forecast(
     # Too little history to say: the cell stays blank rather than guess.
     if est is None or not est.windows:
         return None
-    hits = []
-    for west in est.windows.values():
-        west = _at_measured_reset(west, pcts.get(west.window, (0.0, None))[1])
-        eta = west.eta_s(threshold, now)
-        if eta is not None:
-            hits.append((eta, west))
-    if hits:
-        eta, west = min(hits, key=lambda h: h[0])
+    # The binding limit: whichever window gets there first, before its reset.
+    hit = first_crossing(
+        (
+            _at_measured_reset(west, pcts.get(west.window, (0.0, None))[1])
+            for west in est.windows.values()
+        ),
+        threshold, now,
+    )
+    if hit:
+        eta, west = hit
         if west.confidence not in _TRUSTED:
             return None
         mark, name = ESTIMATE_MARK, west.window
