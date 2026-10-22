@@ -407,7 +407,9 @@ class TestAccount:
         five = line(20.0, start_pct=40.0, n=8, step_s=300, resets_at=NOW + 4 * 3600)
         seven = line(1.0, start_pct=70.0, n=8, step_s=300, resets_at=NOW + 3 * 86400)
         a = estimate_account({"5h": five, "7d": seven}, models=(), threshold=90.0, now=NOW)
-        assert a.binding.window == "7d"  # 70+ beats ~51
+        # 7d reads higher (70+ vs ~51), but 5h reaches 100 first (~2.5h at
+        # 20%/h, before its 4h reset; 7d needs ~29h): 5h binds.
+        assert a.binding.window == "5h"
         assert a.confidence == a.binding.confidence
         eta5 = a.windows["5h"].eta_s(90.0, NOW)
         eta7 = a.windows["7d"].eta_s(90.0, NOW)
@@ -415,6 +417,55 @@ class TestAccount:
         assert a.eta_limit_s == pytest.approx(
             min(a.windows["5h"].eta_s(100.0, NOW), a.windows["7d"].eta_s(100.0, NOW))
         )
+
+    def test_seven_day_binds_when_it_crosses_first(self):
+        five = line(5.0, start_pct=40.0, n=8, step_s=300, resets_at=NOW + 4 * 3600)
+        seven = line(10.0, start_pct=80.0, n=8, step_s=300, resets_at=NOW + 3 * 86400)
+        a = estimate_account({"5h": five, "7d": seven}, models=(), threshold=90.0, now=NOW)
+        assert a.binding.window == "7d"
+        assert a.eta_limit_s == pytest.approx(a.windows["7d"].eta_s(100.0, NOW))
+
+    def test_five_hour_crossing_after_its_reset_never_binds(self):
+        # 5h reads higher and climbs faster, but would reach 100 only after
+        # its reset in 20m (even the threshold only in ~25m): it starts over
+        # first. 7d gets there in ~11h.
+        five = line(30.0, start_pct=60.0, n=8, step_s=300, resets_at=NOW + 1200)
+        seven = line(2.0, start_pct=77.0, n=8, step_s=300, resets_at=NOW + 3 * 86400)
+        a = estimate_account({"5h": five, "7d": seven}, models=(), threshold=90.0, now=NOW)
+        assert a.windows["5h"].eta_s(100.0, NOW) is None
+        assert a.binding.window == "7d"
+        assert a.eta_threshold_s == pytest.approx(a.windows["7d"].eta_s(90.0, NOW))
+        assert a.confidence == a.windows["7d"].confidence
+
+    def test_model_window_binds_when_it_crosses_first(self):
+        five = line(5.0, start_pct=10.0, n=8, step_s=300, resets_at=NOW + 4 * 3600)
+        seven = line(1.0, start_pct=50.0, n=8, step_s=300, resets_at=NOW + 3 * 86400)
+        fable = line(10.0, start_pct=85.0, n=8, step_s=300, resets_at=NOW + 2 * 86400)
+        a = estimate_account({"5h": five, "7d": seven, "Fable": fable},
+                             models=("fable",), threshold=90.0, now=NOW)
+        assert a.binding.window == "Fable"
+        assert a.eta_threshold_s == pytest.approx(a.windows["Fable"].eta_s(90.0, NOW))
+
+    def test_no_crossing_binds_on_the_highest_level(self):
+        five = line(1.0, start_pct=10.0, n=8, step_s=300, resets_at=NOW + 4 * 3600)
+        seven = [Point(NOW - 600, 40.0, RESET), Point(NOW, 40.0, RESET)]
+        a = estimate_account({"5h": five, "7d": seven}, models=(), threshold=90.0, now=NOW)
+        assert a.eta_limit_s is None and a.eta_threshold_s is None
+        assert a.binding.window == "7d"
+
+    def test_first_crossing_picks_the_earliest_and_skips_none(self):
+        from claude_rotater.estimator import first_crossing
+
+        fast = estimate_window(line(20.0, start_pct=50.0, n=8, step_s=300,
+                                    resets_at=NOW + 4 * 3600), window="5h", now=NOW)
+        slow = estimate_window(line(2.0, start_pct=50.0, n=8, step_s=300,
+                                    resets_at=NOW + 3 * 86400), window="7d", now=NOW)
+        flat = estimate_window([Point(NOW - 600, 5.0, RESET), Point(NOW, 5.0, RESET)],
+                               window="Fable", now=NOW)
+        eta, win = first_crossing([flat, slow, fast], 90.0, NOW)
+        assert win is fast and eta == pytest.approx(fast.eta_s(90.0, NOW))
+        assert first_crossing([flat], 90.0, NOW) is None
+        assert first_crossing([], 90.0, NOW) is None
 
     def test_binding_uses_projection_then_last_pct(self):
         rising = line(60.0, start_pct=40.0, n=8, step_s=300, end_t=NOW - 1800,

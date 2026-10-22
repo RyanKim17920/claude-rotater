@@ -253,11 +253,16 @@ def estimate_window(
 
 @dataclass(frozen=True)
 class AccountEstimate:
+    """One account's windows and its binding limit: the window whose
+    forecast reaches the line first (:func:`first_crossing`). A window
+    that would get there only after its own reset never binds: it starts
+    over empty first."""
+
     windows: dict[str, WindowEstimate]  # only relevant windows (respect `models`)
-    binding: WindowEstimate | None  # max projected_pct(now)
-    eta_threshold_s: float | None  # min over windows
-    eta_limit_s: float | None  # min over windows to 100
-    confidence: Confidence  # binding window's confidence
+    binding: WindowEstimate | None  # first to reach 100, else highest projected now
+    eta_threshold_s: float | None  # earliest crossing of the threshold, any window
+    eta_limit_s: float | None  # earliest crossing of 100, any window
+    confidence: Confidence  # of the window behind eta_threshold_s, else binding's
 
 
 EMPTY_ACCOUNT_ESTIMATE = AccountEstimate(
@@ -274,9 +279,18 @@ def is_relevant_window(label: str, models: tuple[str, ...]) -> bool:
     return "all" in wanted or label.lower() in wanted
 
 
-def _min_or_none(values: list[float | None]) -> float | None:
-    known = [v for v in values if v is not None]
-    return min(known) if known else None
+def first_crossing(
+    windows: Iterable[WindowEstimate], target_pct: float, now: float
+) -> tuple[float, WindowEstimate] | None:
+    """``(eta_s, window)`` for the window that reaches ``target_pct`` first,
+    or None when none gets there before its reset. Ties go to the window
+    listed first. The one rule every surface reads the binding limit by."""
+    best: tuple[float, WindowEstimate] | None = None
+    for est in windows:
+        eta = est.eta_s(target_pct, now)
+        if eta is not None and (best is None or eta < best[0]):
+            best = (eta, est)
+    return best
 
 
 def estimate_account(
@@ -308,13 +322,15 @@ def estimate_account(
         projected = est.projected_pct(now)
         return est.last_pct if projected is None else projected
 
-    binding = max(windows.values(), key=level)
+    at_threshold = first_crossing(windows.values(), threshold, now)
+    at_limit = first_crossing(windows.values(), 100.0, now)
+    binding = at_limit[1] if at_limit else max(windows.values(), key=level)
     return AccountEstimate(
         windows=windows,
         binding=binding,
-        eta_threshold_s=_min_or_none([w.eta_s(threshold, now) for w in windows.values()]),
-        eta_limit_s=_min_or_none([w.eta_s(100.0, now) for w in windows.values()]),
-        confidence=binding.confidence,
+        eta_threshold_s=at_threshold[0] if at_threshold else None,
+        eta_limit_s=at_limit[0] if at_limit else None,
+        confidence=(at_threshold[1] if at_threshold else binding).confidence,
     )
 
 
