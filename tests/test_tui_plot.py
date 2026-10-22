@@ -123,13 +123,13 @@ class TestLinePlot:
         lines = line_plot(est, now=NOW, threshold=90, width=40, height=8)
         assert [line.plain for line in lines] == [
             "100┤┄ switch 90% ┄┄┄┄┄┄┄┄┄┄·····┄┄┄┄┄┄┄┄",
-            "   │              │   ·····            ┊",
-            "   │            ⢀⡠⠄···                 ┊",
-            "   │        ⣀⠤⠒⠊⠁ │                    ┊",
-            "   │   ⢀⠤⠔⠊⠉      │                    ┊",
-            "   │              │                    ┊",
-            "  0┤              │                    ┊",
-            "    20:13        now         reset 01:13",
+            "   │              │   ·····    ╎       ┊",
+            "   │            ⢀⡠⠄···         ╎       ┊",
+            "   │        ⣀⠤⠒⠊⠁ │            ╎       ┊",
+            "   │   ⢀⠤⠔⠊⠉      │            ╎       ┊",
+            "   │              │            ╎       ┊",
+            "  0┤              │            ╎       ┊",
+            "    20:13        now        ~00:01 01:13",
         ]
 
     def test_golden_flat_week_without_reset(self, utc):
@@ -424,3 +424,95 @@ class TestPeakColumns:
         # The oldest visible window sits right at the left edge.
         lines = self._render([(NOW - 7 * 86400 + 60, 70.0)], threshold=None, width=30)
         assert self._runs(lines[-2])
+
+
+# --- limit-hit marker -------------------------------------------------------
+
+from claude_rotater.tui.plot import HIT_GLYPH, LIMIT_GLYPH, limit_hit_at, limit_label  # noqa: E402
+
+
+def climbing(pct: float, rate: float, *, resets_in: float, window: str = "5h"):
+    """An estimate at ``pct`` now, rising ``rate`` %/h, resetting in ``resets_in`` s."""
+    reset = NOW + resets_in
+    pts = tuple(Point(NOW - 3600 + i * 600, pct - rate + i * rate / 6, reset) for i in range(7))
+    return WindowEstimate(window, pct, NOW, reset, rate, "high", pts)
+
+
+def hit_columns(lines) -> set[int]:
+    return {i for line in lines[:-1] for i, ch in enumerate(line.plain) if ch == HIT_GLYPH}
+
+
+class TestLimitHit:
+    def test_hit_time_from_rate(self):
+        est = climbing(70.0, 10.0, resets_in=4 * 3600)
+        assert limit_hit_at(est, NOW) == pytest.approx(NOW + 3 * 3600)
+
+    def test_no_hit_after_reset_or_without_rate(self):
+        assert limit_hit_at(climbing(70.0, 5.0, resets_in=3 * 3600), NOW) is None
+        assert limit_hit_at(flat_est(70.0, resets_at=NOW + 3600, rate=None), NOW) is None
+        assert limit_hit_at(climbing(100.0, 5.0, resets_in=3600), NOW) is None  # already there
+
+    def test_marker_column_sits_at_the_hit_time(self, utc):
+        est = climbing(70.0, 10.0, resets_in=4 * 3600)
+        lines = line_plot(est, now=NOW, threshold=90, width=60, height=8, points=est.points)
+        cols = hit_columns(lines)
+        assert len(cols) == 1
+        x0, x1 = NOW + 4 * 3600 - 5 * 3600, NOW + 4 * 3600
+        frac = (NOW + 3 * 3600 - x0) / (x1 - x0)
+        expected = GUTTER + round(frac * ((60 - GUTTER) * 2 - 1)) // 2
+        assert cols == {expected}
+
+    def test_marker_is_labelled_on_the_axis_in_projection_colour(self, utc):
+        est = climbing(70.0, 10.0, resets_in=4 * 3600)
+        lines = line_plot(
+            est, now=NOW, threshold=90, width=60, height=8, points=est.points,
+            projection_color=SEV_CRIT,
+        )
+        axis = lines[-1]
+        label = limit_label(NOW + 3 * 3600, NOW)
+        assert label in axis.plain
+        start = axis.plain.index(label)
+        assert any(sp.start <= start < sp.end and SEV_CRIT in str(sp.style) for sp in axis.spans)
+        assert "now" in axis.plain  # never overwritten
+
+    def test_no_marker_when_the_hit_is_past_the_reset(self):
+        est = climbing(70.0, 5.0, resets_in=3 * 3600)
+        lines = line_plot(est, now=NOW, threshold=90, width=60, height=8, points=est.points)
+        assert not hit_columns(lines)
+        assert all(LIMIT_GLYPH not in line.plain for line in lines)
+
+    def test_limit_row_drawn_only_with_a_hit(self):
+        est = climbing(70.0, 10.0, resets_in=4 * 3600)
+        lines = line_plot(est, now=NOW, threshold=60, width=60, height=10, points=est.points)
+        assert LIMIT_GLYPH in lines[0].plain
+        # When the threshold row is the top row, it stands in for the limit.
+        lines = line_plot(est, now=NOW, threshold=98, width=60, height=8, points=est.points)
+        assert LIMIT_GLYPH not in lines[0].plain and THRESHOLD_GLYPH in lines[0].plain
+
+    def test_narrow_plot_keeps_labels_apart(self, utc):
+        est = climbing(70.0, 10.0, resets_in=4 * 3600)
+        for width in (24, 30, 34, 40):
+            lines = line_plot(est, now=NOW, threshold=90, width=width, height=4, points=est.points)
+            axis = lines[-1].plain
+            assert len(axis) == width
+            words = axis.split()
+            assert len(words) == len(set(words))  # nothing overlaps into a mash
+            assert all(w in ("now", "reset") or w[0] in "~0123456789" for w in words), axis
+
+    def test_reset_prefix_yields_to_the_hit_label(self, utc):
+        est = climbing(70.0, 10.0, resets_in=4 * 3600)
+        axis = line_plot(est, now=NOW, threshold=90, width=40, height=5, points=est.points)[-1].plain
+        assert limit_label(NOW + 3 * 3600, NOW) in axis
+        assert "reset" not in axis
+
+
+class TestLimitLabel:
+    def test_formats(self, utc):
+        # NOW is 2023-11-14 22:13 UTC (a Tuesday); like every axis clock, a
+        # time within half a day is just a clock, even past midnight.
+        assert limit_label(NOW + 1200, NOW) == "~22:33"
+        assert limit_label(NOW + 3 * 3600, NOW) == "~01:13"
+        assert limit_label(NOW + 3 * 3600, NOW, short=True) == "~01:13"
+        assert limit_label(NOW + 2 * 86400, NOW) == "~Thu 22:13"
+        assert limit_label(NOW + 2 * 86400, NOW, short=True) == "~Thu"
+        assert limit_label(NOW + 8 * 86400, NOW) == "~Nov 22"

@@ -10,7 +10,9 @@ projection as a row of sparse ``·`` dots from the last measurement up to the
 reset (or 100%), the
 auto-switch threshold as a dashed row, the reset as a marker column, and a
 dim vertical line at "now", where the measured line ends and the projection
-begins.
+begins. When the projection reaches 100% before the reset, a dashed column
+marks that moment (labelled ``~14:30`` on the time axis) and a dashed row
+marks the limit it runs into.
 """
 
 from __future__ import annotations
@@ -29,6 +31,8 @@ SPARK_GLYPHS = "▁▂▃▄▅▆▇█"
 THRESHOLD_GLYPH = "┄"
 RESET_GLYPH = "┊"
 NOW_GLYPH = "│"  # where measurement ends and the projection starts
+HIT_GLYPH = "╎"  # where the projection reaches 100%
+LIMIT_GLYPH = "╌"  # the 100% row, drawn only when the projection hits it
 # The projection is drawn in its own glyph, a row of single centred dots,
 # so it reads apart from the dense braille of the measured line even where
 # colours are hard to tell apart.
@@ -216,9 +220,13 @@ def line_plot(
         reset_col = dx(est.resets_at) // 2
 
     now_col = dx(now) // 2 if x0 <= now <= x1 else None
+    hit_t = limit_hit_at(est, now)
+    hit_col = dx(hit_t) // 2 if hit_t is not None and now < hit_t <= x1 else None
+    if hit_col is not None and hit_col in (now_col, reset_col):
+        hit_col = None  # too close to tell apart; the row's forecast says it
     lines = _grid_rows(
         canvas, threshold=threshold, reset_col=reset_col, palette=palette, now_col=now_col,
-        projection_color=projection_color,
+        projection_color=projection_color, hit_col=hit_col,
     )
     right = clock_label(x1, now)
     if est.resets_at is not None:
@@ -226,8 +234,28 @@ def line_plot(
     # A weekly window starts on the weekday and clock it resets on: its
     # start is a date, so the two ends never read alike.
     left = clock_label(x0, now) if x1 - x0 <= 86400 else datetime.fromtimestamp(x0).strftime("%b %d")
-    lines.append(_time_axis(cols, x0, x1, now, left, right, palette))
+    hit = None
+    if hit_col is not None and hit_t is not None:
+        labels = (limit_label(hit_t, now), limit_label(hit_t, now, short=True))
+        hit = (hit_col, labels, projection_color or palette.sev_crit)
+    lines.append(_time_axis(cols, x0, x1, now, left, right, palette, hit=hit))
     return lines
+
+
+def limit_hit_at(est: WindowEstimate, now: float) -> float | None:
+    """When the projection reaches 100%, if that is still ahead of ``now``
+    and before the reset; else None (unknown rate, never, or already there)."""
+    eta = est.eta_s(100.0, now)
+    return now + eta if eta else None
+
+
+def limit_label(t: float, now: float, *, short: bool = False) -> str:
+    """:func:`clock_label` marked ``~`` as a forecast: ``~14:30``,
+    ``~Thu 14:30`` (``~Thu`` when ``short``), ``~Oct 25``."""
+    label = clock_label(t, now)
+    if short and 12 * 3600 <= abs(t - now) < 6 * 86400:
+        label = label.split()[0]
+    return f"~{label}"
 
 
 def clock_label(t: float, now: float) -> str:
@@ -297,11 +325,16 @@ def _grid_rows(
     palette: Palette,
     now_col: int | None = None,
     projection_color: str | None = None,
+    hit_col: int | None = None,
 ) -> list[Text]:
     """The plot body: y-axis gutter, braille cells, threshold row (named
-    ``switch 90%`` in place), reset column."""
+    ``switch 90%`` in place), reset column, and with ``hit_col`` the
+    limit-hit column plus the dashed 100% row (unless the threshold row
+    already sits there)."""
     rows, cols = canvas.rows, canvas.cols
     thr_row = _threshold_row(threshold, canvas.dot_h)
+    limit_row = 0 if hit_col is not None and thr_row != 0 else None
+    hit_style = projection_color or palette.sev_crit
     lines: list[Text] = []
     for r in range(rows):
         # Color by height: a cell's severity is its row's midpoint pct, so the
@@ -315,8 +348,12 @@ def _grid_rows(
                 cells.append((chr(_BRAILLE_BASE | solid | dotted), color))
             elif dotted:
                 cells.append((PROJECTION_GLYPH, projection_color or color))
+            elif c == hit_col:
+                cells.append((HIT_GLYPH, hit_style))
             elif r == thr_row:
                 cells.append((THRESHOLD_GLYPH, f"{palette.sev_warn} dim"))
+            elif r == limit_row:
+                cells.append((LIMIT_GLYPH, f"{hit_style} dim"))
             elif c == reset_col:
                 cells.append((RESET_GLYPH, palette.muted))
             elif c == now_col:
@@ -337,14 +374,49 @@ def _gutter(r: int, rows: int, thr_row: int | None) -> str:
 
 def _time_axis(
     cols: int, x0: float, x1: float, now: float | None, left: str, right: str, palette: Palette,
+    *, hit: tuple[int, tuple[str, ...], str] | None = None,
 ) -> Text:
+    """Ends, ``now`` and, with ``hit``, the limit-hit time under its column:
+    the first of its labels that fits clear of the others, centred there,
+    else ending or starting there. If none fits, the right end drops its
+    ``reset`` prefix (the reset column says it) to make room; failing that
+    the hit label is left out."""
+    axis, hit_span = _axis_cells(cols, x0, x1, now, left, right, hit)
+    bare = right.removeprefix("reset ")
+    if hit is not None and hit_span is None and bare != right:
+        retry = _axis_cells(cols, x0, x1, now, left, bare, hit)
+        if retry[1] is not None:
+            axis, hit_span = retry
+    text = Text(" " * GUTTER, no_wrap=True)
+    if hit is None or hit_span is None:
+        text.append("".join(axis), style=palette.muted)
+        return text
+    a, b = hit_span
+    text.append("".join(axis[:a]), style=palette.muted)
+    text.append("".join(axis[a:b]), style=hit[2])
+    text.append("".join(axis[b:]), style=palette.muted)
+    return text
+
+
+def _axis_cells(
+    cols: int, x0: float, x1: float, now: float | None, left: str, right: str,
+    hit: tuple[int, tuple[str, ...], str] | None,
+) -> tuple[list[str], tuple[int, int] | None]:
+    """The axis characters and where the hit label landed (None if not)."""
     axis = [" "] * cols
     _place(axis, 0, left)
     _place(axis, cols - len(right), right)
     if now is not None and x0 <= now <= x1:
         dot = round((now - x0) / (x1 - x0) * (cols * 2 - 1))
         _place(axis, dot // 2 - 1, "now")
-    return Text(" " * GUTTER + "".join(axis), style=palette.muted, no_wrap=True)
+    if hit is None:
+        return axis, None
+    col, labels, _style = hit
+    for label in dict.fromkeys(labels):
+        for start in (col - len(label) // 2, col - len(label) + 1, col):
+            if 0 <= start <= cols - len(label) and _place(axis, start, label):
+                return axis, (start, start + len(label))
+    return axis, None
 
 
 def history_plot(
@@ -522,5 +594,5 @@ def peak_columns(
 
 
 __all__ = [
-    "PROJECTION_GLYPH", "history_plot", "line_plot", "peak_columns", "sparkline", "windows_per_bar",
+    "HIT_GLYPH", "PROJECTION_GLYPH", "history_plot", "limit_hit_at", "limit_label", "line_plot", "peak_columns", "sparkline", "windows_per_bar",
 ]
