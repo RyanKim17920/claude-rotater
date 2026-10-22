@@ -186,10 +186,22 @@ class TestBurnInUse:
         assert preempt.burn_in_use(series, "7d", now=NOW, since=None) is None
 
     def test_only_the_current_window(self):
-        # The reset back to 2% ends the old window's rise.
-        series = {"7d": week((7200, 95.0), (3600, 99.0), (3000, 0.0), (0, 2.0))}
+        # The reset back to 0% (a new reset time) ends the old window's rise.
+        new = WEEK_RESET + 7 * 86400
+        series = {"7d": week((7200, 95.0), (3600, 99.0))
+                  + [Point(NOW - 3000, 0.0, new), Point(NOW, 2.0, new)]}
         rate = preempt.burn_in_use(series, "7d", now=NOW, since=None)
         assert rate is not None and rate < 4.5
+
+    def test_a_lagging_reading_is_no_reset(self):
+        # Same reset time: 47 then 42 is a reading dated too early, not the
+        # window starting over; the burn spans the whole climb.
+        series = {"5h": [Point(NOW - ago, pct, RESET) for ago, pct in (
+            (3600, 0.0), (2700, 12.0), (1800, 24.0), (900, 36.0), (600, 47.0),
+            (560, 42.0), (0, 48.0),
+        )]}
+        rate = preempt.burn_in_use(series, "5h", now=NOW, since=None)
+        assert rate is not None and rate >= 40.0
 
 
 class TestInUse:

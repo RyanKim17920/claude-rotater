@@ -44,7 +44,12 @@ import statistics
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 
-from claude_rotater.estimator import WindowEstimate, estimate_window, is_relevant_window
+from claude_rotater.estimator import (
+    WindowEstimate,
+    current_window,
+    estimate_window,
+    is_relevant_window,
+)
 from claude_rotater.usage_history import Point
 
 # Readings older than this say nothing about the current cadence.
@@ -181,12 +186,9 @@ def burn_in_use(
     start = now - USE_LOOKBACK_S
     if since is not None:
         start = max(start, since)
-    pts = sorted((p for p in series.get(label, ()) if p.t >= start), key=lambda p: p.t)
-    # Only the current window: a reset drops the reading back towards 0.
-    for i in range(len(pts) - 1, 0, -1):
-        if pts[i].pct < pts[i - 1].pct:
-            pts = pts[i:]
-            break
+    # Only the current window, read as the estimator reads it: a reset
+    # starts it over, a lagging reading is no reset.
+    pts = current_window(p for p in series.get(label, ()) if p.t >= start)
     if len(pts) < 2 or pts[-1].pct <= pts[0].pct:
         return None
     rises = sorted(r for points in series.values() for r in _rise_times(points)
