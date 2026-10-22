@@ -31,6 +31,7 @@ from pathlib import Path
 
 DATA_DIRNAME = ".rota"
 DATA_HOME_ENV = "ROTA_HOME"
+SHARED_HOME_ENV = "ROTA_SHARED_HOME"
 KEYCHAIN_SERVICE_BASE = "rota"
 
 # Upstream claude-swap's data locations, read only by the one-time import.
@@ -162,6 +163,17 @@ def get_backup_root() -> Path:
     if value:
         return Path(os.path.abspath(os.path.expanduser(value)))
     return get_default_backup_root()
+
+
+def get_shared_cache_dir() -> Path:
+    """Where every rota on this machine keeps what belongs to an account
+    rather than to a profile (usage history, attempt ledger, latest
+    reading): ``$ROTA_SHARED_HOME/cache``, else the default data dir's
+    ``cache``. Profiles are picked by setting ``ROTA_HOME``, so this
+    deliberately ignores it: two profiles holding one account share it."""
+    value = os.environ.get(SHARED_HOME_ENV, "")
+    root = Path(os.path.abspath(os.path.expanduser(value))) if value else get_default_backup_root()
+    return root / "cache"
 
 
 def _normalized(path: Path) -> str:

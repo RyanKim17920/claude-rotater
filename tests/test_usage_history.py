@@ -63,8 +63,8 @@ class TestRoundTrip:
     def test_file_schema(self, hist):
         hist.record({"1": _usage(40)}, {"1": ID1}, NOW)
         raw = json.loads(hist.path.read_text())
-        assert raw["schemaVersion"] == 1
-        row = raw["accounts"]["1"]
+        assert raw["schemaVersion"] == 2
+        row = raw["accounts"]["a@x.com|org-1"]
         assert row["email"] == "a@x.com" and row["organizationUuid"] == "org-1"
         assert row["samples"] == [[NOW, {"5h": [40.0, NOW + 3600], "7d": [10.0, None]}]]
 
@@ -106,13 +106,15 @@ class TestIdentityGuard:
         hist.record_attempts(["1"], {"1": ID1}, NOW)
         assert hist.attempts("1", ID2, 0) == []
 
-    def test_reused_slot_starts_fresh(self, hist):
+    def test_reused_slot_keeps_each_account_its_own_history(self, hist):
         hist.record({"1": _usage(40)}, {"1": ID1}, NOW - 60)
         hist.record_attempts(["1"], {"1": ID1}, NOW - 60)
         hist.record({"1": _usage(5)}, {"1": ID2}, NOW)
         assert hist.series({"1": ID2})["1"]["5h"] == [Point(NOW, 5.0, NOW + 3600)]
         assert hist.attempts("1", ID2, 0) == []
-        assert hist.series({"1": ID1}) == {"1": {}}
+        # The account that held slot 1 before is the same account wherever
+        # it shows up again: its history stays its own.
+        assert [p.pct for p in hist.series({"2": ID1})["2"]["5h"]] == [40.0]
 
     def test_missing_org_matches_empty_org(self, hist):
         hist.record({"1": _usage(40)}, {"1": ("a@x.com", "")}, NOW)

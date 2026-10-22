@@ -6,20 +6,36 @@ is burning. This module keeps the recent past next to it, in its own file
 (``cache/usage_history.json``) under its own lock, so the store's lock stays
 short and the large store module stays untouched.
 
-Two things live here per slot:
+History belongs to the account, not to a profile: one file per machine
+(:func:`claude_rotater.paths.get_shared_cache_dir`, the default data dir's
+``cache`` unless ``ROTA_SHARED_HOME`` says otherwise), keyed by identity
+(``email|organizationUuid``), read and written by every rota on the machine,
+whatever its data dir. An account that two profiles both hold therefore has
+one history, one attempt ledger and one forecast, and a reading either
+profile takes serves the other (``latest``, adopted by the collector instead
+of a second request). A profile's older slot-keyed file is merged in once
+and renamed ``*.merged``.
+
+Per identity:
 
 - ``samples``: ``[t, {window_label: [pct, resets_at_epoch_or_null]}]`` for
   every successful measurement. The window label is the
   ``oauth.relevant_windows`` label (``5h``, ``7d``, or a scoped model name),
   the one key the estimator and the TUI share.
-- ``attempts``: epochs of every fetch attempt this machine made (successes
-  and failures alike), trimmed to the trailing hour. The poll planner reads
-  it to enforce the hourly request budget from shared on-disk state, so
-  every process on this machine draws on one budget.
+- ``attempts``: epochs of every fetch attempt any rota on this machine made
+  for the account (successes and failures alike), trimmed to the trailing
+  hour. The poll planner reads it to enforce the hourly request budget from
+  shared on-disk state, so every process and profile draws on one budget.
+- ``latest``: ``[t, usage, data_dir]``, the newest full reading and which
+  data dir took it.
+
+Beside them, ``duty`` says per data dir which account it has on duty, since
+when, and which accounts it holds (:meth:`UsageHistory.set_duty`), so every
+profile reads an account it shares the same way (:func:`shared_duty`).
 
 Past the sample ring's eight days, a downsampled long-term history lives in
-``cache/usage_longterm.json``, keyed by account identity (not slot) and
-bounded to ``LONG_MAX_AGE_S`` (90 days):
+``cache/usage_longterm.json``, keyed by account identity and bounded to
+``LONG_MAX_AGE_S`` (90 days):
 
 - ``h``: per window label, the hourly peak pct, one integer of tenths per
   hour from hour index ``h0`` on (``-1`` marks an hour with no sample).
@@ -27,8 +43,8 @@ bounded to ``LONG_MAX_AGE_S`` (90 days):
   seen, the current one included.
 
 Completed hours are folded in from the sample ring at most once an hour per
-account (``foldedHour`` in the slot row says how far), so the long-term
-file is rewritten hourly, not on every sample. Readers merge it with the
+account (``foldedHour`` in the row says how far), so the long-term file is
+rewritten hourly, not on every sample. Readers merge it with the
 not-yet-folded samples: :meth:`UsageHistory.long_series` and
 :meth:`UsageHistory.windows`.
 
@@ -55,7 +71,7 @@ _logger = logging.getLogger(__name__)
 
 Identity = tuple[str, str]  # (email, organizationUuid), as usage_store.Identity
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2  # 2: rows keyed by identity (1: by slot, one file per profile)
 
 # Retention, applied on every write.
 FULL_RES_S = 24 * 3600.0  # keep every sample younger than this...
@@ -136,23 +152,34 @@ def _valid_sample(s: object) -> bool:
 
 
 class UsageHistory:
-    def __init__(self, cache_dir: Path, clock: Callable[[], float] = time.time):
+    def __init__(
+        self,
+        cache_dir: Path,
+        clock: Callable[[], float] = time.time,
+        *,
+        legacy_dirs: Iterable[Path] = (),
+    ):
+        """History in ``cache_dir`` (the machine's shared cache dir); each of
+        ``legacy_dirs`` (a profile's own cache dir) has its old slot-keyed
+        files merged in once, best effort."""
         self.path = cache_dir / "usage_history.json"
         self._lock_path = cache_dir / ".usage_history.lock"
         self.long_path = cache_dir / "usage_longterm.json"
         self.clock = clock
+        for legacy in legacy_dirs:
+            self._merge_legacy(Path(legacy))
 
     # -- raw I/O --------------------------------------------------------------
 
-    def _read_rows(self) -> dict[str, dict]:
+    def _read_raw(self) -> dict:
         try:
             raw = json.loads(self.path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError, UnicodeDecodeError):
             return {}
-        if not isinstance(raw, dict) or raw.get("schemaVersion") != SCHEMA_VERSION:
-            return {}
-        rows = raw.get("accounts")
-        return rows if isinstance(rows, dict) else {}
+        return raw if isinstance(raw, dict) else {}
+
+    def _read_rows(self) -> dict[str, dict]:
+        return _rows_of(self._read_raw())
 
     @staticmethod
     def _matches(row: object, identity: Identity) -> bool:
@@ -162,32 +189,36 @@ class UsageHistory:
             and row.get("organizationUuid", "") == identity[1]
         )
 
-    def _row_for(self, rows: dict, num: str, identity: Identity) -> dict:
-        """The slot's row, replaced by a fresh one when it belongs to another
-        account (a reused slot never inherits history)."""
-        row = rows.get(num)
+    def _row_for(self, rows: dict, identity: Identity) -> dict:
+        """The account's row, created (or cleaned) on demand."""
+        key = _identity_key(identity)
+        row = rows.get(key)
         if not self._matches(row, identity):
             row = {"email": identity[0], "organizationUuid": identity[1]}
-            rows[num] = row
-        samples = row.get("samples")
-        row["samples"] = [s for s in samples if _valid_sample(s)] if isinstance(samples, list) else []
-        attempts = row.get("attempts")
-        row["attempts"] = (
-            [a for a in attempts if isinstance(a, (int, float)) and not isinstance(a, bool)]
-            if isinstance(attempts, list)
-            else []
-        )
+            rows[key] = row
+        _clean_row(row)
         return row
 
-    def _mutate(self, mutator: Callable[[dict], None]) -> None:
-        """Read-modify-write under the lock; never raises."""
+    def _mutate(
+        self, mutator: Callable[[dict], None], *, duty: Callable[[dict], bool] | None = None
+    ) -> None:
+        """Read-modify-write under the lock; never raises. ``duty`` edits the
+        ``duty`` table and says whether it changed anything (nothing is
+        written when only it ran and changed nothing)."""
         try:
             with FileLock(self._lock_path):
-                rows = self._read_rows()
+                raw = self._read_raw()
+                rows = _rows_of(raw)
+                table = _duty_of(raw)
+                changed = True
                 mutator(rows)
+                if duty is not None:
+                    changed = duty(table)
+                if not changed:
+                    return
                 atomic_write_json(
                     self.path,
-                    {"schemaVersion": SCHEMA_VERSION, "accounts": rows},
+                    {"schemaVersion": SCHEMA_VERSION, "accounts": rows, "duty": table},
                     compact=True,
                 )
         except Exception as e:  # best effort: history must never fail a fetch
@@ -200,14 +231,18 @@ class UsageHistory:
         usages: dict[str, dict | None],
         identities: dict[str, Identity],
         at: float,
+        *,
+        by: Path | str | None = None,
     ) -> None:
         """Add one sample per slot (taken at ``at``), in one locked write.
 
         ``usage=None`` and usages with no window data add nothing. A sample at
         the same ``t`` as an existing one is dropped (the same measurement
-        seen twice)."""
+        seen twice). ``by`` (the data dir that took the reading) also makes
+        it the account's ``latest`` when it is the newest, for another
+        profile to adopt instead of fetching."""
         batch = {
-            num: windows
+            num: (usage, windows)
             for num, usage in usages.items()
             if usage is not None and num in identities
             and (windows := usage_windows(usage))
@@ -218,13 +253,10 @@ class UsageHistory:
         def apply(rows: dict) -> None:
             now = self.clock()
             due: list[tuple[dict, int]] = []
-            for num, windows in batch.items():
-                old = rows.get(num)
-                if _retiring(old, identities[num]):
-                    # The slot now holds another account: keep everything
-                    # the old one had not folded yet.
-                    due.append((old, _NO_ROW_HOUR))
-                row = self._row_for(rows, num, identities[num])
+            for num, (usage, windows) in batch.items():
+                row = self._row_for(rows, identities[num])
+                if by is not None and at > _latest_t(row):
+                    row["latest"] = [at, usage, str(by)]
                 samples = row["samples"]
                 if any(s[0] == at for s in samples):
                     continue
@@ -239,17 +271,88 @@ class UsageHistory:
 
         self._mutate(apply)
 
+    def set_duty(
+        self,
+        data_dir: Path | str,
+        *,
+        active: Identity | None,
+        since: float | None,
+        members: Iterable[Identity],
+    ) -> None:
+        """Say which account ``data_dir`` has on duty (``active``), since its
+        last switch (``since``), and which accounts it holds. Written only
+        when something changed, so calling it every pass costs a read."""
+        record = {
+            "active": None if active is None else _identity_key(active),
+            "since": since,
+            "members": sorted({_identity_key(i) for i in members}),
+        }
+        key = str(data_dir)
+        if _duty_of(self._read_raw()).get(key) == record:
+            return
+
+        def edit(table: dict) -> bool:
+            if table.get(key) == record:
+                return False
+            table[key] = record
+            for other in list(table):  # a data dir removed since
+                if other != key and not Path(other).is_dir():
+                    del table[other]
+            return True
+
+        self._mutate(lambda _rows: None, duty=edit)
+
+    # -- legacy merge ---------------------------------------------------------
+
+    def _merge_legacy(self, legacy: Path) -> None:
+        """Merge a profile's own (pre-sharing) history files into this one,
+        then rename them ``*.merged``. A no-op when there is nothing to
+        merge or ``legacy`` is this cache dir (its slot-keyed rows are
+        re-keyed on read and written back keyed by identity). Never raises."""
+        old = legacy / "usage_history.json"
+        old_long = legacy / "usage_longterm.json"
+        try:
+            if legacy.resolve() == self.path.parent.resolve():
+                return
+            if not old.exists() and not old_long.exists():
+                return
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            with FileLock(self._lock_path):
+                try:
+                    theirs = json.loads(old.read_text(encoding="utf-8"))
+                except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+                    theirs = {}
+                raw = self._read_raw()
+                rows = _rows_of(raw)
+                for key, row in _rows_of(theirs if isinstance(theirs, dict) else {}).items():
+                    _merge_row(rows, key, row)
+                atomic_write_json(
+                    self.path,
+                    {"schemaVersion": SCHEMA_VERSION, "accounts": rows, "duty": _duty_of(raw)},
+                    compact=True,
+                )
+                long_theirs = _read_long_file(old_long)
+                if long_theirs:
+                    accounts = self._read_long()
+                    cutoff = _hour(self.clock() - LONG_MAX_AGE_S)
+                    for key, account in long_theirs.items():
+                        _merge_long_account(accounts, key, account, cutoff)
+                    atomic_write_json(
+                        self.long_path,
+                        {"schemaVersion": LONG_SCHEMA_VERSION, "accounts": accounts},
+                        compact=True,
+                    )
+            for path in (old, old_long):
+                if path.exists():
+                    path.replace(path.with_name(path.name + ".merged"))
+            _logger.info(f"Merged usage history from {legacy} into {self.path.parent}")
+        except Exception as e:
+            _logger.warning(f"Usage history merge from {legacy} failed: {e!r}")
+
     # -- long-term history ----------------------------------------------------
 
     def _read_long(self) -> dict[str, dict]:
-        try:
-            raw = json.loads(self.long_path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError, UnicodeDecodeError):
-            return {}
-        if not isinstance(raw, dict) or raw.get("schemaVersion") != LONG_SCHEMA_VERSION:
-            return {}
-        accounts = raw.get("accounts")
-        return accounts if isinstance(accounts, dict) else {}
+        return _read_long_file(self.long_path)
 
     def _fold(self, due: list[tuple[dict, int]], now: float) -> None:
         """Fold the due rows' samples from their ``foldedHour`` up to (not
@@ -375,7 +478,7 @@ class UsageHistory:
         def apply(rows: dict) -> None:
             now = self.clock()
             for num in targets:
-                row = self._row_for(rows, num, identities[num])
+                row = self._row_for(rows, identities[num])
                 row["attempts"] = self._trim_attempts(row["attempts"] + [at], now)
 
         self._mutate(apply)
@@ -391,12 +494,11 @@ class UsageHistory:
     ) -> dict[str, dict[str, list[Point]]]:
         """``{slot: {window_label: [Point oldest -> newest]}}``.
 
-        A slot with no history, or whose row belongs to another account,
-        maps to ``{}``."""
+        A slot whose account has no history maps to ``{}``."""
         rows = self._read_rows()
         out: dict[str, dict[str, list[Point]]] = {}
         for num, identity in identities.items():
-            row = rows.get(num)
+            row = rows.get(_identity_key(identity))
             per_window: dict[str, list[Point]] = {}
             if self._matches(row, identity) and isinstance(row.get("samples"), list):
                 samples = sorted(
@@ -411,8 +513,9 @@ class UsageHistory:
         return out
 
     def attempts(self, num: str, identity: Identity, since: float) -> list[float]:
-        """Attempt epochs for the slot at or after ``since``, oldest first."""
-        row = self._read_rows().get(num)
+        """Attempt epochs for the account at or after ``since``, oldest
+        first, whichever rota on this machine made them."""
+        row = self._read_rows().get(_identity_key(identity))
         if not self._matches(row, identity) or not isinstance(row.get("attempts"), list):
             return []
         return sorted(
@@ -420,6 +523,176 @@ class UsageHistory:
             for a in row["attempts"]
             if isinstance(a, (int, float)) and not isinstance(a, bool) and a >= since
         )
+
+    def latest(self, identities: dict[str, Identity]) -> dict[str, Latest]:
+        """Per slot, the newest full reading any rota here recorded for its
+        account (see :meth:`record`'s ``by``); slots with none are left out."""
+        rows = self._read_rows()
+        out: dict[str, Latest] = {}
+        for num, identity in identities.items():
+            row = rows.get(_identity_key(identity))
+            if not self._matches(row, identity):
+                continue
+            value = row.get("latest")
+            if (
+                isinstance(value, list) and len(value) == 3
+                and isinstance(value[0], (int, float)) and not isinstance(value[0], bool)
+                and isinstance(value[1], dict) and isinstance(value[2], str)
+            ):
+                out[num] = Latest(float(value[0]), value[1], value[2])
+        return out
+
+    def duty(self) -> dict[str, dict]:
+        """``{data_dir: {"active", "since", "members"}}`` (see :meth:`set_duty`)."""
+        return _duty_of(self._read_raw())
+
+
+@dataclass(frozen=True)
+class Latest:
+    """An account's newest full reading: when, the usage dict, and the data
+    dir of the rota that took it."""
+
+    t: float
+    usage: dict
+    by: str
+
+
+def shared_duty(
+    duty: dict[str, dict],
+    identities: dict[str, Identity],
+    data_dir: Path | str,
+) -> dict[str, tuple[bool, float | None]]:
+    """Per slot whose account another data dir also holds: ``(on_duty,
+    since)`` read the same way from every profile — on duty when any data
+    dir holding it has it on duty, ``since`` the latest switch among those
+    data dirs. The estimator reads such an account from these instead of
+    this profile's own switch, so every window shows it the same forecast.
+    Slots this profile alone holds are left out."""
+    own = str(data_dir)
+    out: dict[str, tuple[bool, float | None]] = {}
+    for num, identity in identities.items():
+        key = _identity_key(identity)
+        holders = {
+            owner: record for owner, record in duty.items()
+            if key in record.get("members", ()) or record.get("active") == key
+        }
+        if not set(holders) - {own}:
+            continue
+        on_duty = any(record.get("active") == key for record in holders.values())
+        stamps = [
+            float(record["since"]) for record in holders.values()
+            if isinstance(record.get("since"), (int, float))
+            and not isinstance(record.get("since"), bool)
+        ]
+        out[num] = (on_duty, max(stamps) if stamps else None)
+    return out
+
+
+def _rows_of(raw: dict) -> dict[str, dict]:
+    """The identity-keyed rows of a history file of either schema: a
+    version-1 (slot-keyed, one per profile) file is re-keyed, rows of one
+    account merged."""
+    rows = raw.get("accounts")
+    if not isinstance(rows, dict):
+        return {}
+    version = raw.get("schemaVersion")
+    if version == SCHEMA_VERSION:
+        return rows
+    if version != 1:
+        return {}
+    out: dict[str, dict] = {}
+    for row in rows.values():
+        if isinstance(row, dict) and isinstance(row.get("email"), str):
+            key = _identity_key((row["email"], row.get("organizationUuid", "") or ""))
+            _merge_row(out, key, row)
+    return out
+
+
+def _duty_of(raw: dict) -> dict[str, dict]:
+    table = raw.get("duty") if raw.get("schemaVersion") == SCHEMA_VERSION else None
+    if not isinstance(table, dict):
+        return {}
+    return {k: v for k, v in table.items() if isinstance(v, dict)}
+
+
+def _clean_row(row: dict) -> None:
+    samples = row.get("samples")
+    row["samples"] = [s for s in samples if _valid_sample(s)] if isinstance(samples, list) else []
+    attempts = row.get("attempts")
+    row["attempts"] = (
+        [a for a in attempts if isinstance(a, (int, float)) and not isinstance(a, bool)]
+        if isinstance(attempts, list)
+        else []
+    )
+
+
+def _latest_t(row: dict) -> float:
+    value = row.get("latest")
+    if isinstance(value, list) and value and isinstance(value[0], (int, float)):
+        return float(value[0])
+    return float("-inf")
+
+
+def _merge_row(rows: dict, key: str, row: dict) -> None:
+    """Merge one account's row into ``rows[key]``: samples and attempts by
+    time, the newer ``latest``, and the earlier ``foldedHour`` (folding a
+    sample twice is harmless: the long-term file keeps peaks)."""
+    if not isinstance(row, dict) or not isinstance(row.get("email"), str):
+        return
+    row = dict(row)
+    _clean_row(row)
+    mine = rows.get(key)
+    if not isinstance(mine, dict):
+        rows[key] = {
+            k: v for k, v in row.items()
+            if k in ("email", "organizationUuid", "samples", "attempts", "foldedHour", "latest")
+        }
+        return
+    _clean_row(mine)
+    by_t = {s[0]: s for s in mine["samples"]}
+    for sample in row["samples"]:
+        by_t.setdefault(sample[0], sample)
+    mine["samples"] = sorted(by_t.values(), key=lambda s: s[0])[-MAX_SAMPLES:]
+    mine["attempts"] = sorted(set(mine["attempts"]) | set(row["attempts"]))
+    folded = [h for h in (mine.get("foldedHour"), row.get("foldedHour"))
+              if isinstance(h, int) and not isinstance(h, bool)]
+    if folded:
+        mine["foldedHour"] = min(folded)
+    if _latest_t(row) > _latest_t(mine):
+        mine["latest"] = row["latest"]
+
+
+def _read_long_file(path: Path) -> dict[str, dict]:
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+        return {}
+    if not isinstance(raw, dict) or raw.get("schemaVersion") != LONG_SCHEMA_VERSION:
+        return {}
+    accounts = raw.get("accounts")
+    return accounts if isinstance(accounts, dict) else {}
+
+
+def _merge_long_account(accounts: dict, key: str, theirs: object, cutoff: int) -> None:
+    """Merge one account's long-term entry: per label, the higher hourly
+    peak and every window's higher peak."""
+    if not isinstance(theirs, dict) or not isinstance(theirs.get("w"), dict):
+        return
+    account = accounts.get(key)
+    if not isinstance(account, dict) or not isinstance(account.get("w"), dict):
+        accounts[key] = {"w": dict(theirs["w"])}
+        return
+    labels = account["w"]
+    for label, entry in theirs["w"].items():
+        hours, peaks = _decode(labels.get(label))
+        their_hours, their_peaks = _decode(entry)
+        for hour, pct in their_hours.items():
+            hours[hour] = max(hours.get(hour, 0.0), pct)
+        for resets_at, pct in their_peaks:
+            _merge_window(peaks, resets_at, pct)
+        merged = _encode(hours, peaks, cutoff)
+        if merged:
+            labels[label] = merged
 
 
 def _hour(t: float) -> int:
@@ -431,18 +704,6 @@ def _folded_hour(row: dict) -> int:
     if isinstance(value, bool) or not isinstance(value, int):
         return 0
     return value
-
-
-def _retiring(row: object, identity: Identity) -> bool:
-    """Whether ``row`` belongs to an account other than ``identity`` and
-    still has samples worth folding."""
-    return (
-        isinstance(row, dict)
-        and isinstance(row.get("email"), str)
-        and isinstance(row.get("samples"), list)
-        and bool(row["samples"])
-        and not UsageHistory._matches(row, identity)
-    )
 
 
 def _identity_key(identity: Identity) -> str:
