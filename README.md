@@ -42,7 +42,8 @@ Windows.
   with a token refresh, and the active token is never refreshed while a
   claude is running.
 - One auto engine per data dir: a second rota on the same data dir is
-  view-only and says which process (and whether it runs older code) owns it.
+  view-only, shows the engine's own verdict and forecast, and says when the
+  engine runs older code.
 - Log accounts in from the TUI without touching the account you are using,
   including a fresh login for the active account. Idle accounts' tokens are
   refreshed ahead of expiry only when `accounts.proactiveTokenRefresh` is on.
@@ -139,6 +140,11 @@ under the service `rota`.
 Set `ROTA_HOME` to run a separate profile with its own accounts and
 settings. Its Keychain service is `rota-<8 hex>` (the start of the SHA-256
 of the directory's absolute path), so profiles never collide.
+Usage history belongs to the account, not the profile: it lives in
+`~/.rota/cache` (or `$ROTA_SHARED_HOME/cache`) for every profile, so an
+account two profiles hold is polled by one of them, counts its requests
+once, and shows the same forecast in both. Each profile still switches only
+its own Claude config dir's login.
 Two settings on the Profile section of the config page (`c`) suit such a
 profile: `run.shareDefault` (off: `rota run` keeps the main `~/.claude`
 settings, CLAUDE.md and skills out of its sessions unless told `--share`)
