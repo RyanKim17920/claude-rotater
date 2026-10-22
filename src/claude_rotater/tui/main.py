@@ -784,24 +784,23 @@ def forecast(
     # Too little history to say: the cell stays blank rather than guess.
     if est is None or not est.windows:
         return None
-    # The binding limit: whichever window gets there first, before its reset.
-    hit = first_crossing(
-        (
-            _at_measured_reset(west, pcts.get(west.window, (0.0, None))[1])
-            for west in est.windows.values()
-        ),
-        threshold, now,
-    )
+    windows = [
+        _at_measured_reset(west, pcts.get(west.window, (0.0, None))[1])
+        for west in est.windows.values()
+    ]
+    # The binding limit: whichever window gets there first, before its reset,
+    # among the estimates trusted enough for a number: the same ones the
+    # charts title (chart_title), so the row never hides what a chart says.
+    hit = first_crossing((w for w in windows if w.confidence in _TRUSTED), threshold, now)
     if hit:
         eta, west = hit
-        if west.confidence not in _TRUSTED:
-            return None
         mark, name = ESTIMATE_MARK, west.window
         if eta <= 0:
             return Forecast(f"{mark}{name} at limit", f"{mark}{name} limit", "crit", True)
         when = rough_duration(eta)
         return Forecast(f"{mark}{name} limit in {when}", f"{mark}{name} in {when}", "crit", True)
-    if any(w.rate_pct_per_h is None for w in est.windows.values()):
+    # "ok" only when every window is known to stay under.
+    if any(w.rate_pct_per_h is None or w.eta_s(threshold, now) is not None for w in windows):
         return None
     # Stays under: "ok" is always the same green; how close it lands is the
     # bar's and the chart's to say.

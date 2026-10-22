@@ -1389,6 +1389,63 @@ class TestForecast:
         est = self._multi(("5h", 30.0, 2.0, 0.0, 7200), ("7d", 40.0, 0.5, 0.0, 3 * 86400), now=now)
         assert self._fc(est, now=now, entry=make_entry(30.0, 40.0)).text == "ok"
 
+    @staticmethod
+    def _graded(*wins, now):
+        """Like :meth:`_multi` with a confidence per window:
+        ``(label, last, rate, resets_in, confidence)``."""
+        from claude_rotater.estimator import AccountEstimate, WindowEstimate
+
+        ws = {
+            label: WindowEstimate(label, last, now, now + resets_in, rate, conf, ())
+            for label, last, rate, resets_in, conf in wins
+        }
+        return AccountEstimate(ws, next(iter(ws.values())), None, None, "high")
+
+    def test_thin_first_crossing_leaves_the_trusted_one_named(self):
+        # Real case (work profile): 5h too thin to trust but crossing first,
+        # 7d trusted; the 7d chart said "limit in 12h" while the row was blank.
+        now = time.time()
+        est = self._graded(
+            ("5h", 60.0, 30.0, 7200, "low"), ("7d", 80.0, 2.0, 3 * 86400, "medium"), now=now,
+        )
+        assert self._fc(est, now=now, entry=make_entry(60.0, 80.0)).text == "~7d limit in 5h"
+
+    def test_thin_crossing_is_never_called_ok(self):
+        now = time.time()
+        est = self._graded(
+            ("5h", 60.0, 30.0, 7200, "low"), ("7d", 40.0, 0.1, 3 * 86400, "high"), now=now,
+        )
+        assert self._fc(est, now=now, entry=make_entry(60.0, 40.0)) is None
+
+    @pytest.mark.parametrize("conf5,conf7", [
+        ("high", "high"), ("low", "medium"), ("medium", "low"), ("low", "low"),
+    ])
+    @pytest.mark.parametrize("rate5,rate7", [(30.0, 2.0), (5.0, 40.0), (2.0, 0.1)])
+    def test_row_names_the_earliest_limit_any_chart_titles(self, conf5, conf7, rate5, rate7):
+        from claude_rotater.tui.main import chart_blocks
+
+        now = time.time()
+        est = self._graded(
+            ("5h", 60.0, rate5, 7200, conf5), ("7d", 80.0, rate7, 3 * 86400, conf7), now=now,
+        )
+        acc = make_account(1, entry=make_entry(60.0, 80.0))
+        fc = self._fc(est, acc=acc, now=now)
+        titled = [
+            (label, title.plain.split("limit in ", 1)[1])
+            for title, _render in chart_blocks(
+                acc, est, {}, now=now, threshold=90.0, palette=Palette.DARK
+            )
+            if "limit in " in title.plain
+            for label in [title.plain.split(" ", 1)[0]]
+        ]
+        if not titled:
+            assert fc is None or not fc.text.startswith("~")
+            return
+        hit = min(
+            ((est.windows[label].eta_s(90.0, now), label, when) for label, when in titled),
+        )
+        assert fc.text == f"~{hit[1]} limit in {hit[2]}"
+
     def test_nothing_to_forecast(self):
         est, now = window_est()
         assert self._fc(est, threshold=None) is None
