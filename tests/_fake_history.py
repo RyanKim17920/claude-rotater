@@ -42,6 +42,10 @@ class FakeHistory:
                 out[num] = self._series[num]
         return out
 
+    def duty(self) -> dict[str, dict]:
+        """No other profile shares an account with the canned one."""
+        return {}
+
     def _points(self, identity: tuple[str, str], label: str) -> list[Point]:
         if self.fail:
             raise OSError("history unreadable")

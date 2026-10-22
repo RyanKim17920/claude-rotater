@@ -352,19 +352,35 @@ def estimate_fleet(
     threshold: float,
     now: float,
     since: float | None = None,
+    shared: dict[str, tuple[bool, float | None]] | None = None,
 ) -> dict[str, AccountEstimate]:
     """Every account's estimate, ``series`` by slot: the account on duty
     (``active``) with the user's burn carried over a fresh switch, every
     other account from its own recent readings (see the module docstring).
-    The one entry point the TUI, the poll planner and the engine share."""
+    The one entry point the TUI, the poll planner and the engine share.
+
+    ``shared`` maps the slots whose account another profile on this machine
+    also holds to ``(on_duty, since)`` as every such profile reads them
+    (``usage_history.shared_duty``): those are estimated from that instead
+    of this profile's ``active`` and ``since``, and carry no burn (what this
+    profile's other accounts showed is not the other profile's user), so
+    every profile shows the account one forecast."""
+    shared = shared or {}
     carried = carried_burn(
         (s for num, s in series.items() if num != active), since=since
     ) if active is not None else {}
-    return {
-        num: estimate_account(
+
+    def one(num: str, s: dict[str, list[Point]]) -> AccountEstimate:
+        if num in shared:
+            on_duty, shared_since = shared[num]
+            return estimate_account(
+                s, models=models, threshold=threshold, now=now, since=shared_since,
+                on_duty=on_duty,
+            )
+        return estimate_account(
             s, models=models, threshold=threshold, now=now, since=since,
             on_duty=None if active is None else num == active,
             carried=carried if num == active else None,
         )
-        for num, s in series.items()
-    }
+
+    return {num: one(num, s) for num, s in series.items()}

@@ -434,7 +434,9 @@ class FeedIngestor:
         if last is not None and t <= last[0]:
             return
         try:
-            self.switcher.usage_history.record({slot: usage}, ident, t)
+            self.switcher.usage_history.record(
+                {slot: usage}, ident, t, by=self.switcher.backup_dir
+            )
         except Exception as e:
             _logger.warning(f"Usage history record (feed) failed: {e!r}")
             return

@@ -86,12 +86,12 @@ from claude_rotater.paths import (
     get_credentials_path,
     get_default_claude_config_home,
     get_global_config_path,
+    get_shared_cache_dir,
     is_inside_sessions_dir,
 )
 from claude_rotater.legacy_import import import_legacy_data
 from claude_rotater.process_detection import get_running_instances
 from claude_rotater import poll_policy, process_detection
-from claude_rotater.estimator import estimate_fleet
 from claude_rotater.usage_history import UsageHistory
 from claude_rotater.settings import (
     load_accounts_settings,
@@ -342,8 +342,12 @@ class ClaudeAccountSwitcher:
         # tightens poll plans near the threshold, and the TUI's plots).
         # The clock is read through the store at call time, so a store clock
         # swapped in later (tests, simulations) governs retention too.
+        # Keyed by account and shared by every profile on the machine, so an
+        # account two profiles hold has one history and one request budget.
         self.usage_history = UsageHistory(
-            self.backup_dir / "cache", clock=lambda: self._usage_store.clock()
+            get_shared_cache_dir(),
+            clock=lambda: self._usage_store.clock(),
+            legacy_dirs=(self.backup_dir / "cache",),
         )
         # (settings mtime, cadence) — see _poll_cadence.
         self._poll_cadence_cache: tuple[float | None, poll_policy.PollCadence] | None = None
@@ -4591,6 +4595,9 @@ class ClaudeAccountSwitcher:
             for num in info_by_num
             if num not in sentinels and (fetch is None or num in fetch)
         ]
+        self._publish_duty(info_by_num, identities)
+        if self._adopt_shared_readings(requested, identities, entries):
+            entries = store.entries(identities, models)
         if fetch is None:
             # Repair reset-parked plans written by releases that stopped
             # polling exhausted accounts until their advertised reset. The
@@ -4670,6 +4677,71 @@ class ClaudeAccountSwitcher:
             for num in info_by_num
         }
 
+    # An adopted reading is the other profile's to renew: this one waits this
+    # long past its own next poll, so the profile already polling stays the
+    # only one that does.
+    SHARED_READING_GRACE_S = 30.0
+
+    def _adopt_shared_readings(
+        self,
+        nums: list[str],
+        identities: dict[str, tuple[str, str]],
+        entries: dict[str, UsageEntry],
+    ) -> bool:
+        """Take a newer reading another profile on this machine recorded for
+        the same account (``UsageHistory.latest``) instead of fetching it
+        again: adopt it, and push this slot's next poll to one of its own
+        intervals past that reading (plus a grace), so of two profiles
+        holding one account only the one already polling it keeps polling,
+        and the other takes over when that one stops. Best effort; returns
+        whether anything was adopted."""
+        if not nums:
+            return False
+        try:
+            latest = self.usage_history.latest({num: identities[num] for num in nums})
+        except Exception as e:
+            self._logger.warning(f"Shared usage read failed: {e!r}")
+            return False
+        store = self._usage_store
+        own = str(self.backup_dir)
+        now = store.clock()
+        spare_s = self._poll_cadence().spare_s
+        adopted = False
+        for num, reading in latest.items():
+            entry = entries.get(num)
+            if reading.by == own or reading.t > now:
+                continue
+            if entry is not None and entry.fetched_at is not None and reading.t <= entry.fetched_at:
+                continue
+            interval = (entry.poll_interval_s if entry is not None else None) or spare_s
+            next_at = reading.t + interval + self.SHARED_READING_GRACE_S
+            ident = {num: identities[num]}
+            store.adopt({num: (reading.usage, now - reading.t)}, ident, hold_s=max(0.0, next_at - now))
+            store.set_poll_plan({num: (next_at, interval)}, ident)
+            adopted = True
+        return adopted
+
+    def _publish_duty(
+        self,
+        info_by_num: dict[str, tuple],
+        identities: dict[str, tuple[str, str]],
+    ) -> None:
+        """Tell the other profiles on this machine which account this one
+        has on duty and since when (``UsageHistory.set_duty``), so an
+        account they share is forecast the same in each. Best effort."""
+        from claude_rotater.feed_ingest import read_last_switch_at
+
+        try:
+            active = next((num for num, info in info_by_num.items() if info[4]), None)
+            self.usage_history.set_duty(
+                self.backup_dir,
+                active=identities.get(active) if active is not None else None,
+                since=read_last_switch_at(self.backup_dir),
+                members=identities.values(),
+            )
+        except Exception as e:
+            self._logger.warning(f"Usage duty publish failed: {e!r}")
+
     def _entry_token_dead(
         self,
         entry: UsageEntry,
@@ -4735,6 +4807,7 @@ class ClaudeAccountSwitcher:
                 },
                 identities,
                 at,
+                by=self.backup_dir,
             )
             self.usage_history.record_attempts(
                 [num for num, rec in records.items() if rec.sentinel is None],
@@ -4769,18 +4842,16 @@ class ClaudeAccountSwitcher:
         ]
         estimates: dict = {}
         if identities and successes:
-            from claude_rotater.feed_ingest import read_last_switch_at
-
             # The burn before the last switch was the previous duty's, and it
             # carries over to the account on duty: every account's history,
             # not just this pass's (estimate_fleet).
             active = next((num for num, info in info_by_num.items() if info[4]), None)
             try:
-                series = self.usage_history.series(identities)
-                estimates = estimate_fleet(
-                    {num: series.get(num, {}) for num in identities},
+                from claude_rotater.forecast import fleet_estimates
+
+                estimates, _series = fleet_estimates(
+                    self.usage_history, self.backup_dir, identities,
                     active=active, models=models, threshold=threshold, now=now,
-                    since=read_last_switch_at(self.backup_dir),
                 )
             except Exception as e:
                 self._logger.warning(f"Usage estimate failed: {e!r}")

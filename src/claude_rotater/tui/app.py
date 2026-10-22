@@ -38,7 +38,8 @@ from claude_rotater.autoswitch import (
     AutoSwitchEvent,
     SwitchEvent,
 )
-from claude_rotater.estimator import AccountEstimate, estimate_fleet
+from claude_rotater.estimator import AccountEstimate
+from claude_rotater.forecast import fleet_estimates
 from claude_rotater import statusline_setup
 from claude_rotater.exceptions import ClaudeSwitchError, LoginError
 from claude_rotater.instance import EngineLock, warn_if_not_owner
@@ -498,11 +499,9 @@ class RotaApp(App):
         now = time.time()
         threshold = self.settings.threshold
         try:
-            series = history.series(identities)
-            estimates = estimate_fleet(
-                {num: series.get(num, {}) for num in identities},
-                active=stamps["active"], models=self.models, threshold=threshold,
-                now=now, since=last_switch_at,
+            estimates, series = fleet_estimates(
+                history, self.switcher.backup_dir, identities,
+                active=stamps["active"], models=self.models, threshold=threshold, now=now,
             )
             long_term = (
                 self._long_term_for(history, identities, now) if self.long_view else None
