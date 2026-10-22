@@ -67,9 +67,8 @@ from claude_rotater.autoswitch import (
     ALERT_REASONS,
     AutoSwitchEvent,
     Decision,
-    NoSwitchEvent,
     SwitchEvent,
-    decision_from_event,
+    headline,
     pct_label,
 )
 from claude_rotater.estimator import (
@@ -208,8 +207,11 @@ class AutoStatus:
     mode: str = "auto"
     limit_guard: bool = True
     # Set when another rota on this data dir runs the engine (this one only
-    # shows): "another rota is running (pid 4242, older code)".
+    # shows): "another rota is running (pid 4242, older code)". The header
+    # then shows the engine's own published verdict (``decision``), and this
+    # line in its place only when that rota runs older code (``view_older``).
     view_only: str = ""
+    view_older: bool = False
 
 
 FEED_LABELS = {
@@ -265,14 +267,10 @@ def switch_note(status: AutoStatus, *, now: float, over_threshold: bool) -> str:
 
 
 def header_decision(event: AutoSwitchEvent) -> Decision | None:
-    """The verdict the header shows for an event, or None to keep the last.
-
-    Switches and the strategy's own "stay: ..." lines; a machine outcome
-    ("no switch: cooldown") is the held-switch note's job, which shows it
-    only when it actually holds something."""
-    if isinstance(event, SwitchEvent) or (isinstance(event, NoSwitchEvent) and event.self_explained):
-        return decision_from_event(event)
-    return None
+    """The verdict the header shows for an event, or None to keep the last
+    (:func:`claude_rotater.autoswitch.headline`, the one a view-only window
+    reads back from the engine)."""
+    return headline(event)
 
 
 def switch_flash(event: SwitchEvent) -> str:
@@ -360,7 +358,10 @@ def status_text(
         style = getattr(palette, role)
         tail.append(f"   {glyph} ", style=style)
         tail.append(words, style=style if role == "sev_warn" else palette.muted)
-    note = status.view_only or switch_note(status, now=now, over_threshold=over_threshold)
+    note = (
+        status.view_only if status.view_older
+        else switch_note(status, now=now, over_threshold=over_threshold)
+    )
     if login_note:
         room = width - head.cell_len - tail.cell_len - 3
         if room < MIN_DECISION_W:  # the freshness label gives way first
@@ -373,7 +374,7 @@ def status_text(
     elif note:
         if head.cell_len + tail.cell_len + 3 + len(note) <= width:
             tail.append(f"   {note}", style=palette.sev_warn)
-    elif status.running and status.decision is not None:
+    elif (status.running or status.view_only) and status.decision is not None:
         # A held switch's note already says the latest verdict, louder.
         room = width - head.cell_len - tail.cell_len - len(DECISION_SEP)
         if room >= MIN_DECISION_W:

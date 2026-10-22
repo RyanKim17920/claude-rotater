@@ -36,7 +36,9 @@ from claude_rotater.autoswitch import (
     ALERT_REASONS,
     STATE_FILENAME,
     AutoSwitchEvent,
+    Decision,
     SwitchEvent,
+    read_published_decision,
 )
 from claude_rotater.estimator import AccountEstimate
 from claude_rotater.forecast import fleet_estimates
@@ -230,9 +232,6 @@ class RotaApp(App):
         printer.set_theme(resolved)
         self.push_screen(self.main_screen)
         self._claim_engine()
-        # Opt-in only (accounts.proactiveTokenRefresh): see AccountsSettings.
-        if load_accounts_settings(self.switcher.backup_dir).proactive_token_refresh:
-            self._start_refresher()
         # The only timer: the store read. Status text is recomputed whenever
         # a refresh starts or lands, so it needs no clock of its own.
         self.set_interval(self.POLL_INTERVAL_S, self._tick)
@@ -284,13 +283,23 @@ class RotaApp(App):
         if holder is None:
             if self.auto_status.view_only:
                 self.say("auto on: the other rota is gone, this one runs auto now", "ok")
-            self.auto_status = replace(self.auto_status, view_only="")
+            self.auto_status = replace(self.auto_status, view_only="", view_older=False)
             self._start_engine()
+            # Opt-in only (accounts.proactiveTokenRefresh): see
+            # AccountsSettings. Like the engine, only the owner runs it: two
+            # refreshers would each rotate the same refresh tokens.
+            if (
+                self.refresher is None
+                and load_accounts_settings(self.switcher.backup_dir).proactive_token_refresh
+            ):
+                self._start_refresher()
             return
         if self.auto_status.view_only:
             return  # already said; keep waiting
         line = warn_if_not_owner(holder)
-        self.auto_status = replace(self.auto_status, running=False, view_only=line)
+        self.auto_status = replace(
+            self.auto_status, running=False, view_only=line, view_older=holder.older_code,
+        )
         # At mount the prompt line is not composed yet: say it once it is.
         self.call_after_refresh(self.say, line, "error")
 
@@ -383,6 +392,8 @@ class RotaApp(App):
             return
         self._load_settings()
         # Engines are single-use: stop this one, start one on fresh settings.
+        # Only the lock holder runs one: a view-only window that started an
+        # engine here would be a second engine on the data dir.
         self._stop_engine()
         try:
             self.switcher.set_poll_policy_inputs(self.settings.threshold, self.models)
@@ -390,7 +401,8 @@ class RotaApp(App):
             pass
         with self._estimate_lock:
             self._estimate_stamps = None  # models may have changed
-        self._start_engine()
+        if self.engine_lock.held:
+            self._start_engine()
         self.request_refresh()
 
     def on_config_view_setting_changed(self, message: ConfigView.SettingChanged) -> None:
@@ -459,8 +471,13 @@ class RotaApp(App):
         last_switch_at = self._read_last_switch_at()
         estimates = self._estimates_for(snap, last_switch_at)
         feed = statusline_setup.status(self.switcher.backup_dir)
+        headline = (
+            read_published_decision(self.switcher.backup_dir)
+            if self.auto_status.view_only else None
+        )
         self.call_from_thread(
-            self._apply_snapshot, generation, lane, snap, estimates, last_switch_at, feed
+            self._apply_snapshot, generation, lane, snap, estimates, last_switch_at, feed,
+            headline,
         )
 
     def _estimates_for(
@@ -565,7 +582,14 @@ class RotaApp(App):
         estimates=None,
         last_switch_at: float | None = None,
         feed: statusline_setup.StatuslineStatus | None = None,
+        headline: Decision | None = None,
     ) -> None:
+        if headline is not None and self.auto_status.view_only and not same_verdict(
+            headline, self.auto_status.decision
+        ):
+            # The engine's verdict, as it published it: a view-only window
+            # never decides anything of its own.
+            self.auto_status = replace(self.auto_status, decision=headline)
         if estimates is not None:
             self.series = estimates[1]
             self.estimates = estimates[0]

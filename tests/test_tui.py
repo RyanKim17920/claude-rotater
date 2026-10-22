@@ -2420,6 +2420,19 @@ class TestRefresherHosting:
 
         set_setting(tmp_path, "accounts.proactiveTokenRefresh", "true")
 
+    async def test_not_started_in_a_view_only_window(self, tmp_path, fake_refresher, fake_engine):
+        from claude_rotater.instance import EngineLock
+
+        other = EngineLock(tmp_path)
+        assert other.acquire() is None
+        try:
+            app = make_app(three_accounts(tmp_path))
+            async with app.run_test(size=(120, 40)) as pilot:
+                await settle(pilot)
+                assert fake_refresher.instances == []
+        finally:
+            other.release()
+
     async def test_not_started_without_the_opt_in(self, tmp_path, fake_refresher):
         from claude_rotater.settings import unset_setting
 
@@ -2627,7 +2640,9 @@ class TestEngineHosting:
             assert fake_engine.instances == []  # no second engine
             status = painted(app, "#status")
             assert "auto view-only" in status
-            assert f"another rota is running (pid {os.getpid()}" in status
+            # Said once on the prompt line; the header keeps the verdict's
+            # place for the engine's own (it runs the same code).
+            assert f"another rota is running (pid {os.getpid()}" in prompt_plain(app)
             other.release()
             app._engine_claimed_at = 0.0  # the retry interval has passed
             app._tick()
@@ -2635,6 +2650,80 @@ class TestEngineHosting:
             assert len(fake_engine.instances) == 1
             assert "auto on" in painted(app, "#status")
         assert EngineLock(tmp_path).acquire() is None  # released on exit
+
+    async def test_view_only_window_never_starts_an_engine_on_a_settings_change(
+        self, tmp_path, fake_engine
+    ):
+        from claude_rotater.instance import EngineLock
+
+        other = EngineLock(tmp_path)
+        assert other.acquire() is None
+        try:
+            app = make_app(three_accounts(tmp_path))
+            async with app.run_test(size=(160, 30)) as pilot:
+                await settle(pilot)
+                app.on_settings_changed("autoswitch.threshold")
+                await settle(pilot)
+                assert fake_engine.instances == []
+                assert app.engine is None
+        finally:
+            other.release()
+
+    async def test_view_only_window_shows_what_the_engine_shows(self, tmp_path, fake_engine):
+        """The engine's window and a view-only one on the same data dir
+        render the same rows (forecasts included) and the same verdict: the
+        viewer reads the headline the engine published, and computes the
+        forecast from the same files."""
+        from claude_rotater.autoswitch import DECISION_FILENAME, headline
+        from claude_rotater.instance import EngineLock
+
+        now = time.time()
+        event = NoSwitchEvent(
+            reason="stay", detail="stay: #1's 5h resets in 47m with 99% left — using it first",
+        )
+
+        def world() -> FakeSwitcher:
+            fake = three_accounts(tmp_path)
+            with_history(fake, burn_history(now))
+            return fake
+
+        engine_app = make_app(world())
+        async with engine_app.run_test(size=(160, 30)) as pilot:
+            await settle(pilot)
+            await emit(fake_engine.instances[0], event)
+            await settle(pilot)
+            engine_rows = [row_plain(engine_app, n) for n in ("1", "2")]
+            engine_status = painted(engine_app, "#status")
+            # What the real engine writes for the event (AutoSwitchEngine._emit).
+            (tmp_path / DECISION_FILENAME).write_text(json.dumps(headline(event).to_json()))
+        lock = EngineLock(tmp_path)
+        assert lock.acquire() is None  # the engine keeps running beside the viewer
+
+        fake_engine.instances = []
+        try:
+            viewer = make_app(world())
+            async with viewer.run_test(size=(160, 30)) as pilot:
+                await settle(pilot)
+                viewer._tick()
+                await settle(pilot)
+                assert fake_engine.instances == []
+                assert [row_plain(viewer, n) for n in ("1", "2")] == engine_rows
+                assert "~5h limit in" in engine_rows[0]
+                status = painted(viewer, "#status")
+                assert "auto view-only" in status
+                line = "stay: #1's 5h resets in 47m with 99% left"
+                assert line in engine_status and line in status
+        finally:
+            lock.release()
+
+    async def test_view_only_window_beside_older_code_says_so(self, tmp_path, fake_engine, monkeypatch):
+        from claude_rotater.instance import EngineLock, Holder
+
+        monkeypatch.setattr(EngineLock, "acquire", lambda self: Holder(pid=4242, legacy=True))
+        app = make_app(three_accounts(tmp_path))
+        async with app.run_test(size=(160, 30)) as pilot:
+            await settle(pilot)
+            assert "another rota is running (pid 4242, older code)" in painted(app, "#status")
 
     async def test_auto_pause_shows_in_header_and_on_the_prompt_once(self, tmp_path, fake_engine):
         line = "auto paused: too many switches (4 in the last hour); resumes in 41m"

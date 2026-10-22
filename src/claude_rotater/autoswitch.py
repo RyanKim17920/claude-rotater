@@ -612,6 +612,36 @@ def decision_from_event(event: AutoSwitchEvent) -> Decision | None:
     return None
 
 
+def headline(event: AutoSwitchEvent) -> Decision | None:
+    """The verdict a UI headlines for an event, or None to keep the last:
+    switches and the strategy's own "stay: ..." lines. A machine outcome
+    ("no switch: cooldown") is the held-switch note's job instead."""
+    if isinstance(event, SwitchEvent) or (
+        isinstance(event, NoSwitchEvent) and event.self_explained
+    ):
+        return decision_from_event(event)
+    return None
+
+
+# The engine's latest headline, for the view-only windows beside it.
+DECISION_FILENAME = "decision.json"
+
+
+def read_published_decision(backup_dir: Path) -> Decision | None:
+    """The headline the engine on ``backup_dir`` last published, or None
+    (no engine yet, unreadable file). Lock-free: written atomically."""
+    try:
+        raw = json.loads((Path(backup_dir) / DECISION_FILENAME).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(raw, dict):
+        return None
+    action, line, ts, target = (raw.get(k) for k in ("action", "line", "ts", "target"))
+    if not (isinstance(action, str) and isinstance(line, str) and isinstance(ts, str)):
+        return None
+    return Decision(action, line, ts, target if isinstance(target, str) else None)
+
+
 # ---------------------------------------------------------------------------
 # Engine
 # ---------------------------------------------------------------------------
@@ -920,6 +950,7 @@ class AutoSwitchEngine:
         # The latest switch/no-switch verdict (see Decision); None until the
         # first tick decides something.
         self.last_decision: Decision | None = None
+        self._published_headline: tuple | None = None
         # The last stop logged, so a held stop is logged once, not per tick.
         self._halt_logged: tuple[str, str] | None = None
         self._paused_logged_until: float | None = None
@@ -3137,7 +3168,26 @@ class AutoSwitchEngine:
             # One reference assignment of a frozen object: a UI thread reading
             # last_decision sees the old verdict or the new one, never half.
             self.last_decision = decision
+        self._publish_headline(event)
         self.on_event(event)
+
+    def _publish_headline(self, event: AutoSwitchEvent) -> None:
+        """Write the headline for the view-only windows on this data dir, so
+        they show the engine's verdict rather than one of their own; only
+        when it changed. A dry run publishes nothing. Best effort."""
+        decision = headline(event)
+        if decision is None or self.dry_run:
+            return
+        key = (decision.action, decision.line, decision.target)
+        if key == self._published_headline:
+            return
+        try:
+            atomic_write_json(
+                self.switcher.backup_dir / DECISION_FILENAME, decision.to_json(), compact=True
+            )
+            self._published_headline = key
+        except Exception as e:
+            _logger.debug("headline publish failed: %r", e)
 
     def _ingest_feed(self) -> None:
         """Adopt new statusline feed readings before deciding. A failure
