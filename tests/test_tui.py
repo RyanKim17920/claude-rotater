@@ -334,6 +334,15 @@ class FakeRefresher:
 
 
 @pytest.fixture(autouse=True)
+def same_code(monkeypatch):
+    """An engine lock this test process takes runs the current code. Without
+    this, a source file saved (or checked out) after the pytest worker started
+    makes the holder "older code", and a view-only window shows that warning
+    in place of the engine's verdict."""
+    monkeypatch.setattr("claude_rotater.instance.newest_source_mtime", lambda: None)
+
+
+@pytest.fixture(autouse=True)
 def fake_refresher(monkeypatch):
     """A real refresher would read credentials off the FakeSwitcher."""
     FakeRefresher.instances = []
