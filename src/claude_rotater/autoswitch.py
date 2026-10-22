@@ -398,6 +398,14 @@ class PollEvent(AutoSwitchEvent):
         )
 
 
+def reason_detail(trigger: str, reason: str) -> str:
+    """``reason`` without a leading ``"<trigger>: "``: the reasons that name
+    their own trigger ("pre-empt: ~100.4% ...") read whole on their own, and
+    lose the name where the trigger is already said beside them."""
+    head = f"{trigger}:"
+    return reason[len(head):].lstrip() if reason.startswith(head) else reason
+
+
 @dataclass(frozen=True)
 class SwitchEvent(AutoSwitchEvent):
     kind: ClassVar[str] = "switch"
@@ -435,7 +443,8 @@ class SwitchEvent(AutoSwitchEvent):
             else "?"
         )
         prefix = "[dry-run] would switch" if self.dry_run else "Switched"
-        tail = f": {self.reason}" if self.reason else ""
+        detail = reason_detail(self.trigger, self.reason)
+        tail = f": {detail}" if detail else ""
         return f"{prefix} {src} -> {dst} ({self.trigger}{tail})"
 
 
@@ -2904,7 +2913,7 @@ class AutoSwitchEngine:
             trigger,
             state["lastSwitchFrom"],
             number,
-            reason or trigger,
+            reason_detail(trigger, reason) or trigger,
         )
         self._emit(
             SwitchEvent(

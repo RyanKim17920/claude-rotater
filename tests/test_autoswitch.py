@@ -2244,6 +2244,23 @@ class TestEventsShape:
         assert payload["from"] == {"number": 1, "email": "a@example.com"}
         assert payload["to"] == {"number": 2, "email": "b@example.com"}
 
+    def test_switch_line_names_its_trigger_once(self):
+        # A reason that names its own trigger ("pre-empt: ~100.0% ...") read
+        # "(pre-empt: pre-empt: ~100.0% ...)" in the switch line.
+        event = SwitchEvent(
+            trigger="pre-empt",
+            from_ref={"number": 4, "email": "d@example.com"},
+            to_ref={"number": 1, "email": "a@example.com"},
+            reason="pre-empt: ~100.0% by next reading in ~3m (burn +5.9%/h, turn 2%)",
+        )
+        assert event.human() == (
+            "Switched Account-4 -> Account-1 (a@example.com) "
+            "(pre-empt: ~100.0% by next reading in ~3m (burn +5.9%/h, turn 2%))"
+        )
+        plain = replace(event, trigger="pace", reason="switch → #1: needs 2.0×")
+        assert plain.human().endswith("(pace: switch → #1: needs 2.0×)")
+        assert replace(event, reason="").human().endswith("(pre-empt)")
+
     def test_poll_event_human_line(self, harness):
         harness.tick_with_usage({"1": _usage(42), "2": _usage(10), "3": None})
         poll = next(e for e in harness.events if isinstance(e, PollEvent))
