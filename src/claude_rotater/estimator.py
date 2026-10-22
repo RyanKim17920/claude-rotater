@@ -126,22 +126,39 @@ class WindowEstimate:
 
 def _segment(points: Sequence[Point], newest: Point, lookback_start: float) -> list[Point]:
     """The newest point plus every older point in the same window instance,
-    within the lookback, oldest first."""
+    within the lookback, oldest first, without lagging readings.
+
+    A drop marks a reset only where the reset times can't say: two points
+    that name the same reset are one window, and usage inside one window
+    never falls, so a later one well below an earlier one lags (a chat
+    showing an older response, a reading dated too early). It is left out,
+    so the fit follows what the window actually reached."""
     seg = [newest]
     for p in reversed(points[:-1]):
         nxt = seg[0]
         if p.t < lookback_start:
             break
-        if (
-            p.resets_at is not None
-            and newest.resets_at is not None
-            and abs(p.resets_at - newest.resets_at) > RESET_MATCH_S
-        ):
+        known = p.resets_at is not None and newest.resets_at is not None
+        if known and abs(p.resets_at - newest.resets_at) > RESET_MATCH_S:
             break
-        if p.pct > nxt.pct + RESET_DROP_PCT:
+        if p.pct > nxt.pct + RESET_DROP_PCT and not known:
             break
         seg.insert(0, p)
-    return seg
+    kept: list[Point] = []
+    peak = -math.inf
+    for p in seg:
+        if p.resets_at is not None and p.pct < peak - RESET_DROP_PCT:
+            continue  # integer jitter stays: the fit absorbs it as noise
+        kept.append(p)
+        peak = max(peak, p.pct)
+    return kept
+
+
+def current_window(points: Iterable[Point]) -> list[Point]:
+    """The readings of the newest window instance, oldest first, without
+    lagging ones: the one reading of a window every caller shares."""
+    pts = sorted(points, key=lambda p: p.t)
+    return _segment(pts, pts[-1], -math.inf) if pts else []
 
 
 def _ewls(seg: list[Point], now: float, half_life_s: float) -> tuple[float, float] | None:
@@ -244,8 +261,9 @@ def estimate_window(
         if elapsed >= MIN_FALLBACK_ELAPSED_S and (since is None or since <= opened):
             rate = _clamp_rate(newest.pct / elapsed * 3600.0)
             confidence = "low"
+    anchor = seg[-1]  # the newest point, unless it lags behind the window
     return WindowEstimate(
-        window=window, last_pct=newest.pct, last_t=newest.t,
+        window=window, last_pct=anchor.pct, last_t=anchor.t,
         resets_at=newest.resets_at, rate_pct_per_h=rate,
         confidence=confidence, points=tuple(seg),
     )

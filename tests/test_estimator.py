@@ -107,6 +107,26 @@ class TestSegmentation:
         w = estimate_window(pts, window="7d", now=NOW)
         assert len(w.points) == 30
 
+    def test_lagging_reading_in_the_same_window_is_not_a_reset(self):
+        # Same reset time: a lower, later reading lags (a chat behind, a
+        # reading dated too early). It is left out, not read as a reset.
+        pts = [Point(NOW - 900, 30.0, RESET), Point(NOW - 600, 40.0, RESET),
+               Point(NOW - 300, 34.0, RESET), Point(NOW, 45.0, RESET)]
+        w = estimate_window(pts, window="5h", now=NOW)
+        assert [p.pct for p in w.points] == [30.0, 40.0, 45.0]
+
+    def test_lagging_newest_reading_leaves_the_window_where_it_got(self):
+        pts = [Point(NOW - 600, 40.0, RESET), Point(NOW - 300, 47.0, RESET),
+               Point(NOW, 42.0, RESET)]
+        w = estimate_window(pts, window="5h", now=NOW)
+        assert (w.last_pct, w.last_t) == (47.0, NOW - 300)
+
+    def test_drop_without_reset_times_still_marks_a_reset(self):
+        pts = [Point(NOW - 600, 40.0, None), Point(NOW - 300, 47.0, None),
+               Point(NOW, 42.0, None)]
+        w = estimate_window(pts, window="5h", now=NOW)
+        assert w.points == (Point(NOW, 42.0, None),)
+
     def test_window_already_rolled_over(self):
         pts = [Point(NOW - 600, 70.0, NOW - 10), Point(NOW - 300, 80.0, NOW - 10)]
         w = estimate_window(pts, window="5h", now=NOW)
@@ -507,3 +527,28 @@ def test_params_constants_match_spec():
     assert est.PARAMS_5H == est.WindowParams(5400, 1800, 1800)
     assert est.PARAMS_WEEK == est.WindowParams(86400, 21600, 10800)
     assert math.isclose(est.MIN_SPAN_S, 240.0)
+
+
+class TestRealReplays:
+    def test_long_turn_back_dated_reading_keeps_the_whole_duty(self):
+        """Work profile, Oct 22: an account on duty from 16:29 climbed ~48%
+        in an hour. A statusline reading back-dated by a long turn put 47%
+        just before a poll that read 42% (same reset). Read as a reset, the
+        5h fit kept two points and went untrusted: no 5h estimate, and the
+        row blank. Times are seconds after the switch."""
+        switch = NOW - 3866  # 16:29:34, with NOW at 17:34:00
+        reset = switch + 18026  # 21:30
+        readings = [
+            (-1, 0), (181, 3), (699, 8), (807, 9), (1079, 14), (1967, 17),
+            (2283, 22), (2317, 22), (2508, 25), (2584, 26), (2622, 27),
+            (2644, 28), (2670, 29), (2718, 30), (2794, 31), (2852, 32),
+            (2862, 34), (2887, 33), (3010, 34), (3027, 36), (3212, 37),
+            (3217, 40), (3451, 41), (3458, 47), (3491, 42), (3813, 48),
+        ]
+        pts = [Point(switch + dt, float(pct), reset) for dt, pct in readings]
+        w = estimate_window(pts, window="5h", now=NOW, since=switch, on_duty=True)
+        assert 42.0 not in [p.pct for p in w.points]
+        assert w.confidence in ("medium", "high")
+        assert 40.0 <= w.rate_pct_per_h <= 60.0
+        eta = w.eta_s(100.0, NOW)
+        assert 50 * 60 <= eta <= 80 * 60  # ~18:40, well before the 21:30 reset
