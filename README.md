@@ -21,13 +21,17 @@ Windows.
   with ←/→: all history, 30 days, the last week and the last day, bars by
   model with dashed lines at round dollar values (the top one at or above
   the tallest bar), then each account's ~$ per 1% of its 5h and of its 7d
-  window over time. That figure is taken window by window (spend summed over
-  every profile that holds the account) and kept; each account gets its own
-  series and trendline, flat and "steady" unless the change stands out from
-  its noise, and a falling line reads "limit shrinking" (a 1% buys less).
-  Windows that rose with no local spend (other machines, claude.ai) are
-  hollow points or left out, and a trend on little data says it is
-  provisional. Without `ccusage`, `bunx` or `npx` the page says so.
+  window over time. That figure is sampled every few points the reading
+  climbs (4 for 5h, 6 for 7d: whole-percent readings are too coarse for
+  less), the spend over each climb summed over every profile that holds the
+  account, so a busy day gives dozens of points; they are kept, and fold
+  into one a day after five weeks. Each account gets its own series (the
+  median per column over a faint quartile spread) and a robust trendline,
+  flat and "steady" unless the change stands out from its noise; a falling
+  line reads "limit shrinking" (a 1% buys less). Climbs with no local spend
+  (other machines, claude.ai) are hollow points or left out, and a trend on
+  little data says it is provisional and gives its change over the days it
+  saw, not stretched to 4 weeks. Without `ccusage`, `bunx` or `npx` the page says so.
 - Automatic switching while the TUI is open, or headless with `rota auto`.
   By default (`pace`) it spreads usage while every account's weekly quota is
   safe, moving only when the 5-hour window gets tight and keeping a fresh
