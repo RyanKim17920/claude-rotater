@@ -29,7 +29,6 @@ import logging
 import math
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
-from datetime import datetime
 from pathlib import Path
 from typing import Protocol
 
@@ -54,7 +53,7 @@ TREND_S = 35 * DAY_S
 TREND_MIN_N = 3
 TREND_MIN_SPAN_S = 14 * DAY_S  # shorter extrapolates a few noisy days to a month
 TREND_HORIZON_S = 28 * DAY_S  # the change is reported per 4 weeks
-SPARK_BINS = 8
+FLAT_CHANGE = 0.05  # under 5% per 4 weeks reads steady, noise or not
 
 STORE_FILENAME = "dollar_per_pct.json"
 STORE_SCHEMA = 1
@@ -184,28 +183,44 @@ def window_costs(
 
 
 @dataclass(frozen=True)
-class PerPct:
-    """An account's $ per 1% of one window kind, and how it moves."""
+class Fit:
+    """A weighted fit of log $ per 1% over time: one account, one window kind.
 
-    dollars: float
-    sure: bool  # enough recent windows not used elsewhere
-    trend: float | None  # change per 4 weeks (0.1 = +10%); None: too little data
-    steady: bool  # the trend is within its own noise
-    spark: tuple[float, ...]  # $/1% per day (5h) or per window (7d), oldest first
+    ``steady`` when the slope is within two standard errors of none (or
+    under :data:`FLAT_CHANGE` per 4 weeks): the line is then flat at the
+    mean, a noisy slope read as no change. ``provisional`` when it rests on
+    too little (under :data:`TREND_MIN_N` windows or :data:`TREND_MIN_SPAN_S`)
+    or on windows partly used elsewhere.
+    """
+
+    t0: float  # the weighted mean time
+    level: float  # log $ per 1% at t0
+    slope: float  # log change per day
+    steady: bool
+    provisional: bool
+    n: int
+    span_s: float
+
+    @property
+    def change(self) -> float:
+        """Change per 4 weeks (0.1 = +10%); 0 when steady."""
+        return 0.0 if self.steady else math.exp(self.slope * TREND_HORIZON_S / DAY_S) - 1
+
+    def at(self, t: float) -> float:
+        """$ per 1% on the line at ``t``."""
+        return math.exp(self.level + (0.0 if self.steady else self.slope * (t - self.t0) / DAY_S))
 
 
-def _ratio(windows: Iterable[WindowCost]) -> float:
-    windows = list(windows)
-    pct = sum(w.pct for w in windows)
-    return sum(w.usd for w in windows) / pct if pct else 0.0
-
-
-def _trend(windows: Sequence[WindowCost], now: float) -> tuple[float | None, bool]:
-    """Weighted fit of log $/1% over time: change per 4 weeks, and whether
-    it is within two standard errors of none."""
-    pts = [w for w in windows if w.resets_at >= now - TREND_S and w.ratio > 0]
-    if len(pts) < TREND_MIN_N or pts[-1].resets_at - pts[0].resets_at < TREND_MIN_SPAN_S:
-        return None, True
+def fit(windows: Iterable[WindowCost], now: float) -> Fit | None:
+    """The trend over the last :data:`TREND_S`: sure windows when there are
+    two, else every window not left out (provisional); None under two."""
+    recent = sorted((w for w in windows
+                     if w.resets_at >= now - TREND_S and w.ratio > 0 and w.grade != "out"),
+                    key=lambda w: w.resets_at)
+    sure = [w for w in recent if w.grade == "sure"]
+    pts = sure if len(sure) >= 2 else recent
+    if len(pts) < 2:
+        return None
     n = len(pts)
     total = sum(w.pct for w in pts)
     v = [w.pct * n / total for w in pts]  # weights averaging 1
@@ -214,38 +229,64 @@ def _trend(windows: Sequence[WindowCost], now: float) -> tuple[float | None, boo
     xm = sum(vi * xi for vi, xi in zip(v, x)) / n
     ym = sum(vi * yi for vi, yi in zip(v, y)) / n
     sxx = sum(vi * (xi - xm) ** 2 for vi, xi in zip(v, x))
-    if sxx <= 0:
-        return None, True
-    slope = sum(vi * (xi - xm) * (yi - ym) for vi, xi, yi in zip(v, x, y)) / sxx
+    slope = (sum(vi * (xi - xm) * (yi - ym) for vi, xi, yi in zip(v, x, y)) / sxx
+             if sxx > 0 else 0.0)
     resid = sum(vi * (yi - ym - slope * (xi - xm)) ** 2 for vi, xi, yi in zip(v, x, y))
-    se = math.sqrt(resid / (n - 2) / sxx) if n > 2 else math.inf
+    se = math.sqrt(resid / (n - 2) / sxx) if n > 2 and sxx > 0 else math.inf
     change = math.exp(slope * TREND_HORIZON_S / DAY_S) - 1
-    return change, abs(slope) <= 2 * se
+    span = pts[-1].resets_at - pts[0].resets_at
+    return Fit(
+        t0=xm * DAY_S,
+        level=ym,
+        slope=slope,
+        steady=abs(slope) <= 2 * se or abs(change) < FLAT_CHANGE,
+        provisional=(pts is not sure or n < TREND_MIN_N or span < TREND_MIN_SPAN_S),
+        n=n,
+        span_s=span,
+    )
 
 
-def _spark(windows: Sequence[WindowCost], label: str) -> tuple[float, ...]:
-    if label == "7d":
-        return tuple(w.ratio for w in windows[-SPARK_BINS:])
-    days: dict[object, list[WindowCost]] = {}
-    for w in windows:
-        days.setdefault(datetime.fromtimestamp(w.resets_at).date(), []).append(w)
-    return tuple(_ratio(ws) for _, ws in sorted(days.items())[-SPARK_BINS:])
+Point = tuple[float, float, bool]  # (resets_at, $ per 1%, sure)
+
+
+@dataclass(frozen=True)
+class PerPct:
+    """An account's $ per 1% of one window kind, and how it moves."""
+
+    dollars: float
+    sure: bool  # enough recent windows not used elsewhere
+    fit: Fit | None = None
+    points: tuple[Point, ...] = ()  # every window of the trend span not left out
+
+    @property
+    def trend(self) -> float | None:
+        """Change per 4 weeks of a fit that is not provisional, else None."""
+        return None if self.fit is None or self.fit.provisional else self.fit.change
+
+    @property
+    def steady(self) -> bool:
+        return self.fit is None or self.fit.provisional or self.fit.steady
+
+
+def _ratio(windows: Iterable[WindowCost]) -> float:
+    windows = list(windows)
+    pct = sum(w.pct for w in windows)
+    return sum(w.usd for w in windows) / pct if pct else 0.0
 
 
 def summarize(windows: Iterable[WindowCost], label: str, now: float) -> PerPct | None:
     """The figure to show: sure recent windows if there are enough, else
     every recent window not left out (marked unsure); None without any."""
     ordered = sorted(windows, key=lambda w: w.resets_at)
-    sure = [w for w in ordered if w.grade == "sure"]
     usable = [w for w in ordered if w.grade != "out"]
-    recent_sure = [w for w in sure if w.resets_at >= now - RECENT_S]
+    recent_sure = [w for w in usable if w.grade == "sure" and w.resets_at >= now - RECENT_S]
     recent = [w for w in usable if w.resets_at >= now - RECENT_S]
     if not recent:
         return None
     is_sure = len(recent_sure) >= SURE_WINDOWS.get(label, 1)
-    trend, steady = _trend(sure, now)
-    return PerPct(_ratio(recent_sure if is_sure else recent), is_sure, trend, steady,
-                  _spark(sure, label))
+    points = tuple((w.resets_at, w.ratio, w.grade == "sure")
+                   for w in usable if w.resets_at >= now - TREND_S)
+    return PerPct(_ratio(recent_sure if is_sure else recent), is_sure, fit(usable, now), points)
 
 
 # -- the store ----------------------------------------------------------------------

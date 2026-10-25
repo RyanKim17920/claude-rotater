@@ -6,7 +6,6 @@ from __future__ import annotations
 
 import json
 import math
-from datetime import datetime
 
 import pytest
 
@@ -148,13 +147,57 @@ class TestSummarize:
         got = dpp.summarize(windows, "5h", NOW)
         assert got.trend == pytest.approx(0.0, abs=1e-9)
 
-    def test_sparkline_is_per_day_for_5h_and_per_window_for_7d(self):
-        midnight = datetime.combine(datetime.fromtimestamp(NOW).date(), datetime.min.time())
-        days_ago = (NOW - midnight.timestamp()) / DAY + 1  # yesterday's midnight
-        windows = [window(days_ago - 2 / 24, 2.0), window(days_ago - 3 / 24, 4.0),
-                   window(days_ago - 1, 3.0)]  # two yesterday, one today
-        assert dpp.summarize(windows, "5h", NOW).spark == pytest.approx((3.0, 3.0))
-        assert dpp.summarize(windows, "7d", NOW).spark == pytest.approx((2.0, 4.0, 3.0))
+    def test_points_are_every_usable_window_of_the_trend_span_marked_sure_or_not(self):
+        windows = [window(40, 9.0), window(3, 2.0), window(2, 1.0, elsewhere=0.3),
+                   window(1, 3.0, pct=5)]  # 40 days: past the span; 5%: left out
+        got = dpp.summarize(windows, "5h", NOW)
+        assert got.points == ((NOW - 3 * DAY, pytest.approx(2.0), True),
+                              (NOW - 2 * DAY, pytest.approx(1.0), False))
+
+
+class TestFit:
+    def test_a_significant_fall_slopes_and_reads_its_change(self):
+        windows = [window(d, 5.0 * 0.98 ** (21 - d)) for d in range(21, 0, -1)]
+        f = dpp.fit(windows, NOW)
+        assert not f.steady and not f.provisional and f.n == 21
+        assert f.change == pytest.approx(0.98 ** 28 - 1, rel=1e-6)
+        assert f.at(NOW - 21 * DAY) == pytest.approx(5.0, rel=1e-6)  # on the line at both ends
+        assert f.at(NOW - DAY) == pytest.approx(5.0 * 0.98 ** 20, rel=1e-6)
+
+    def test_noise_without_drift_is_a_flat_line_at_the_mean(self):
+        windows = [window(d, 5.0 * (1.2 if d % 2 else 0.8)) for d in range(20, 0, -1)]
+        f = dpp.fit(windows, NOW)
+        assert f.steady and f.change == 0.0
+        assert f.at(NOW - 20 * DAY) == f.at(NOW)  # flat
+        mean = math.exp((10 * math.log(6.0) + 10 * math.log(4.0)) / 20)
+        assert f.at(NOW) == pytest.approx(mean, rel=1e-6)
+
+    def test_a_tiny_but_clean_drift_still_reads_steady(self):
+        # 1% per 4 weeks with no noise at all: real, but too small to call
+        windows = [window(d, 5.0 * 1.01 ** ((21 - d) / 28)) for d in range(21, 0, -1)]
+        assert dpp.fit(windows, NOW).steady
+
+    def test_two_windows_give_a_provisional_flat_line(self):
+        f = dpp.fit([window(5, 4.0), window(1, 6.0)], NOW)
+        assert f.provisional and f.steady and f.n == 2
+        assert f.span_s == pytest.approx(4 * DAY)
+        assert dpp.fit([window(1, 6.0)], NOW) is None
+
+    def test_a_short_or_unsure_trend_is_provisional_but_still_drawn(self):
+        short = [window(d, 5.0 - 0.3 * (8 - d)) for d in range(8, 0, -1)]  # a week, falling
+        f = dpp.fit(short, NOW)
+        assert f.provisional and not f.steady and f.change < 0
+        assert dpp.summarize(short, "5h", NOW).trend is None  # the table does not quote it
+        unsure = [window(d, 5.0, elsewhere=0.3) for d in (20, 10, 1)]
+        assert dpp.fit(unsure, NOW).provisional  # only unsure windows: provisional
+        mixed = unsure + [window(d, 4.0) for d in (18, 9, 2)]
+        f = dpp.fit(mixed, NOW)
+        assert not f.provisional and f.n == 3  # the sure ones alone carry it
+
+    def test_left_out_windows_never_enter_the_fit(self):
+        windows = [window(d, 5.0) for d in (20, 10, 1)] + [window(5, 0.2, elsewhere=0.9)]
+        f = dpp.fit(windows, NOW)
+        assert f.n == 3 and f.steady
 
 
 # -- the store -----------------------------------------------------------------------

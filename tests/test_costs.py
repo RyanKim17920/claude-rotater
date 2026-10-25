@@ -13,7 +13,6 @@ import json
 import os
 import stat
 import sys
-import time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -606,22 +605,35 @@ class TestBuildReport:
         assert [(a.number, round(a.cost, 3)) for a in report.accounts] == [("1", 60.001), ("2", 40.0)]
         assert report.unattributed == pytest.approx(0.0, abs=1e-6)
 
-    def test_hours_hold_the_last_day_by_model_and_who_was_on_duty(self, now):
+    def test_hours_hold_the_last_week_by_model_and_who_was_on_duty(self, now):
         now += 1200  # 20 minutes into the hour
         hour = int(now // HOUR * HOUR)
         rows = [costs.Row("s0", hour - 3600, "claude-opus-4-7", 4.0, 0, 0, 0, 0),
                 costs.Row("s0", hour - 2700, "claude-sonnet-4-5", 1.0, 0, 0, 0, 0),
-                costs.Row("s0", hour - 30 * 3600, "claude-opus-4-7", 9.0, 0, 0, 0, 0)]
+                costs.Row("s0", hour - 30 * 3600, "claude-opus-4-7", 9.0, 0, 0, 0, 0),
+                costs.Row("s0", hour - 8 * 86400, "claude-opus-4-7", 7.0, 0, 0, 0, 0)]
         spans = [(now - 40 * HOUR, hour - 1800, "1"), (hour - 1800, now, "2")]  # switch at :30
         report = cr.build_report(make_cache(rows, now), [costs.Source("s0", "/a")], spans, now)
         assert len(report.hours) == cr.RECENT_HOURS and report.hours[-1][0] == hour
         assert report.hours[-2][1] == {"Opus 4.7": 4.0, "Sonnet 4.5": 1.0}
-        assert sum(sum(h.values()) for _, h in report.hours) == 5.0  # 30h ago is not in it
+        assert sum(sum(h.values()) for _, h in report.hours) == 14.0  # 8 days ago is not in it
+        assert report.hours[-31][1] == {"Opus 4.7": 9.0}
         assert report.hour_duty[-3:] == ("1", "1", "2")  # the switched hour: a tie goes first-come
-        assert cr.build_report(make_cache(rows, now), [], [], now).hour_duty == (None,) * 24
+        assert cr.build_report(make_cache(rows, now), [], [], now).hour_duty == (None,) * 168
+
+    def test_history_puts_the_folded_days_before_the_range(self, now):
+        cache = make_cache([costs.Row("s0", int(now) // 900 * 900, "claude-opus-4-7", 3.0,
+                                      0, 0, 0, 0)], now)
+        old = costs.day_start(now, 40)
+        cache.archive.update({old: {"claude-opus-4-7": 5.0, "claude-sonnet-4-5": 1.0},
+                              costs.day_start(now): {"claude-opus-4-7": 99.0}})  # in range: ignored
+        report = cr.build_report(cache, [], [], now)
+        assert report.history[0] == (old, {"Opus 4.7": 5.0, "Sonnet 4.5": 1.0})
+        assert report.history[1:] == report.days
+        assert report.history[-1][1] == {"Opus 4.7": 3.0}
 
     def test_accounts_carry_their_figures_even_without_spend(self, now):
-        fig = dpp.PerPct(2.0, True, None, True, ())
+        fig = dpp.PerPct(2.0, True)
         report = cr.build_report(make_cache([], now), [], [], now, {"3": {"5h": fig}})
         assert report.accounts == (cr.AccountLine("3", 0.0, fig, None),)
 

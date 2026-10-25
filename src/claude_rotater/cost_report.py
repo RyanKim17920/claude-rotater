@@ -13,8 +13,9 @@ Three things happen here, all pure functions of their inputs:
   account may sit in two profiles: their transcripts are separate), window
   by window against its peak reading; :mod:`claude_rotater.dollar_per_pct`
   grades the windows and keeps the finished ones for the trend.
-- **Rollups.** Today / 7 days / 30 days, the daily series by model, the
-  last 24 hours by model with who was on duty, the per-model table with a
+- **Rollups.** Today / 7 days / 30 days, the daily series by model (and
+  every older day the cache folded), the last week hour by hour with who
+  was on duty, the per-model table with a
   trend against the week before, and per account.
 """
 
@@ -41,7 +42,7 @@ DAY_S = 86400.0
 HOUR_S = 3600.0
 WEEK_S = 7 * DAY_S
 WINDOW_S = {"5h": 5 * HOUR_S, "7d": WEEK_S}
-RECENT_HOURS = 24
+RECENT_HOURS = 7 * 24  # the hourly series: the weekly and hourly charts
 
 Identity = tuple[str, str]  # (email, organization uuid), as the usage history keys it
 
@@ -318,7 +319,8 @@ class AccountLine:
 class CostReport:
     now: float
     days: tuple[tuple[float, dict[str, float]], ...]  # (local midnight, {model: usd}), oldest first
-    hours: tuple[tuple[float, dict[str, float]], ...]  # last 24 (hour start, {model: usd})
+    history: tuple[tuple[float, dict[str, float]], ...]  # every day known: archive, then days
+    hours: tuple[tuple[float, dict[str, float]], ...]  # last 7 x 24 (hour start, {model: usd})
     hour_duty: tuple[str | None, ...]  # who was on duty most of each of those hours
     today: float
     week: float  # last 7 x 24h
@@ -393,9 +395,16 @@ def build_report(
     accounts.sort(key=lambda a: (-a.cost, a.number))
     attributed = sum(a.cost for a in accounts)
     hour_starts = [first_hour + i * HOUR_S for i in range(RECENT_HOURS)]
+    archived: dict[float, dict[str, float]] = {}
+    for day, raw in cache.archive.items():
+        if day < lo:
+            named = archived.setdefault(day, {})
+            for model, usd in raw.items():
+                named[model_name(model)] = named.get(model_name(model), 0.0) + usd
     return CostReport(
         now=now,
         days=tuple(zip(midnights, days)),
+        history=(*sorted(archived.items()), *zip(midnights, days)),
         hours=tuple(zip(hour_starts, hours)),
         hour_duty=tuple(majority(spans, h, h + HOUR_S) for h in hour_starts),
         today=today,

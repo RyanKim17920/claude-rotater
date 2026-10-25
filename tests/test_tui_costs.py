@@ -7,6 +7,7 @@ data. Every page check runs at 80x24, 120x40 and 160x50, in both themes.
 
 from __future__ import annotations
 
+import math
 import threading
 import time
 
@@ -19,7 +20,7 @@ from claude_rotater.cost_report import (
     CostResult,
     ModelLine,
 )
-from claude_rotater.dollar_per_pct import PerPct
+from claude_rotater.dollar_per_pct import Fit, PerPct
 from claude_rotater.settings import set_setting
 from claude_rotater.tui import costs as view
 from claude_rotater.tui.main import MainScreen
@@ -35,7 +36,21 @@ from tests.test_tui import (  # noqa: F401  (autouse fixtures)
 SIZES = [(80, 24), (120, 40), (160, 50)]
 
 
-def report(now: float | None = None, *, n_models: int = 3, n_accounts: int = 2) -> CostReport:
+def trend_fig(dollars: float, *, sure: bool = True, change: float = 0.0, steady: bool = True,
+              provisional: bool = False, days: int = 20, n: int = 6) -> PerPct:
+    """A $ per 1% figure with ``n`` windows over ``days`` on a known line."""
+    now = time.time()
+    slope = math.log1p(change) / 28 if not steady else 0.0
+    t0 = now - days * 86400 / 2
+    fit = Fit(t0, math.log(dollars), slope, steady, provisional, n, days * 86400.0)
+    points = tuple((now - days * 86400 + i * days * 86400 / max(1, n - 1),
+                    fit.at(now - days * 86400 + i * days * 86400 / max(1, n - 1)), sure or i % 2 == 0)
+                   for i in range(n))
+    return PerPct(dollars, sure, fit, points)
+
+
+def report(now: float | None = None, *, n_models: int = 3, n_accounts: int = 2,
+           archive_days: int = 0) -> CostReport:
     now = now or time.time()
     names = ["Opus 4.7", "Sonnet 4.5", "Haiku 4.5", "Opus 4.1", "Sonnet 4", "Haiku 3.5", "Opus 4"]
     models = tuple(
@@ -43,24 +58,27 @@ def report(now: float | None = None, *, n_models: int = 3, n_accounts: int = 2) 
                   2_100_000_000, [0.18, -0.4, None, 0.02, None, None, None][i])
         for i in range(n_models)
     )
-    days = tuple(
-        (costs.day_start(now, back), {m.name: (back % 5 + 1) * 3.0 / (j + 1) for j, m in enumerate(models)})
-        for back in range(costs.RANGE_DAYS - 1, -1, -1)
-    )
-    first_hour = (now // 3600 - 23) * 3600
+    def spread(back: int) -> dict[str, float]:
+        return {m.name: (back % 5 + 1) * 3.0 / (j + 1) for j, m in enumerate(models)}
+
+    days = tuple((costs.day_start(now, back), spread(back))
+                 for back in range(costs.RANGE_DAYS - 1, -1, -1))
+    older = tuple((costs.day_start(now, back), spread(back))
+                  for back in range(costs.RANGE_DAYS + archive_days - 1, costs.RANGE_DAYS - 1, -1))
+    first_hour = (now // 3600 - 167) * 3600
     hours = tuple((first_hour + h * 3600, {m.name: (h % 6) * 1.5 / (j + 1) for j, m in enumerate(models)})
-                  for h in range(24))
-    duty = tuple("1" if h < 16 else "2" for h in range(24))
+                  for h in range(168))
+    duty = tuple("1" if h < 160 else "2" for h in range(168))
     accounts = tuple(
         AccountLine(str(i + 1), 80.0 / (i + 1),
-                    PerPct(3.1, True, -0.12, False, (3.4, 3.3, 3.2, 3.1)) if i == 0
-                    else PerPct(1.8, False, None, True, ()),
-                    PerPct(9.4, True, 0.03, True, (9.3, 9.5)) if i == 0 else None)
+                    trend_fig(3.1, change=-0.12, steady=False) if i == 0
+                    else PerPct(1.8, False),
+                    trend_fig(9.4) if i == 0 else None)
         for i in range(n_accounts)
     )
-    return CostReport(now=now, days=days, hours=hours, hour_duty=duty, today=12.3, week=245.0,
-                      month=1020.0, week_change=0.18, models=models, accounts=accounts,
-                      unattributed=0.0, built_at=now - 120, took_s=1.2)
+    return CostReport(now=now, days=days, history=older + days, hours=hours, hour_duty=duty,
+                      today=12.3, week=245.0, month=1020.0, week_change=0.18, models=models,
+                      accounts=accounts, unattributed=0.0, built_at=now - 120, took_s=1.2)
 
 
 class FakeCosts:
@@ -110,29 +128,36 @@ def test_tokens(n, text):
 
 
 def test_per_pct_figures_are_approximate_and_say_when_unsure():
-    assert view.per_pct_value(PerPct(3.104, True, None, True, ())) == "~$3.10"
-    assert view.per_pct_value(PerPct(3.1, False, None, True, ())) == "~$3.10?"
+    assert view.per_pct_value(PerPct(3.104, True)) == "~$3.10"
+    assert view.per_pct_value(PerPct(3.1, False)) == "~$3.10?"
     assert view.per_pct_value(None) == "–"
 
 
-def test_per_pct_trend_is_per_four_weeks_and_steady_within_the_noise():
-    assert view.per_pct_trend(PerPct(3.1, True, -0.123, False, ())) == "↓12%/4w"
-    assert view.per_pct_trend(PerPct(3.1, True, 0.08, False, ())) == "↑8%/4w"
-    assert view.per_pct_trend(PerPct(3.1, True, 0.3, True, ())) == "steady"
-    assert view.per_pct_trend(PerPct(3.1, True, None, True, ())) == ""
-    assert view.per_pct_trend(None) == ""
+P = Palette.DARK
 
 
-def test_spark_spans_lowest_to_highest():
-    assert view.spark([1.0, 2.0, 3.0]) == "▁▅█"
-    assert view.spark([2.0, 2.0]) == "▄▄"
+@pytest.mark.parametrize("fig,words,style", [
+    (trend_fig(3.0), "steady", P.foreground),
+    (trend_fig(3.0, change=-0.12, steady=False), "↓12%/4w limit shrinking", P.sev_warn),
+    (trend_fig(3.0, change=-0.30, steady=False), "↓30%/4w limit shrinking", P.sev_crit),
+    (trend_fig(3.0, change=0.08, steady=False), "↑8%/4w more room", P.sev_ok),
+    (trend_fig(3.0, provisional=True, days=8), "~ steady, provisional: 8 days of data",
+     f"dim {P.foreground}"),
+    (trend_fig(3.0, change=-0.3, steady=False, provisional=True, days=1),
+     "~ ↓30%/4w limit shrinking, provisional: 1 day of data", f"dim {P.sev_crit}"),
+    (PerPct(3.0, True, None, ((1.0, 3.0, True),)), "one window so far", P.muted),
+    (None, "no windows yet", P.muted),
+])
+def test_verdict_names_the_direction_and_how_sure_it_is(fig, words, style):
+    assert view.verdict(fig, P) == (words, style)
 
 
-@pytest.mark.parametrize("peak,step", [(7, 2), (140, 50), (3400, 1000), (1415, 500),
-                                       (99, 20), (0.3, 0.1), (25, 10), (4, 1)])
-def test_nice_step_puts_one_to_four_lines_under_the_peak(peak, step):
-    assert view.nice_step(peak) == pytest.approx(step)
-    assert 1 <= peak // view.nice_step(peak) <= view.MAX_GRID_LINES
+@pytest.mark.parametrize("peak,step,top", [(7, 2, 8), (140, 50, 150), (3400, 1000, 4000),
+                                           (2600, 1000, 3000), (175, 50, 200), (99, 50, 100),
+                                           (0.3, 0.1, 0.3), (25, 10, 30), (4, 1, 4)])
+def test_the_top_is_a_round_value_at_or_above_the_peak(peak, step, top):
+    assert view.nice_top(peak) == (pytest.approx(step), pytest.approx(top))
+    assert top >= peak and 1 <= round(top / step) <= view.MAX_GRID_LINES
 
 
 @pytest.mark.parametrize("usd,text", [(0.5, "$0.5"), (20, "$20"), (500, "$500"), (1000, "$1k"),
@@ -141,11 +166,12 @@ def test_short_money(usd, text):
     assert view.short_money(usd) == text
 
 
-def test_grid_rows_sit_where_their_value_reaches_and_never_share_a_row():
-    assert view.grid_rows(3400, 10) == {2: "$1k", 5: "$2k", 8: "$3k"}
-    assert view.grid_rows(140, 7) == {2: "$50", 4: "$100"}
-    assert view.grid_rows(100, 2) == {1: "$100"}  # a short chart gets one line
-    assert view.grid_rows(0, 5) == {}
+def test_grid_rows_top_out_at_a_labelled_line_and_never_share_a_row():
+    assert view.grid_rows(3400, 10) == (4000, {2: "$1k", 4: "$2k", 7: "$3k", 9: "$4k"})
+    assert view.grid_rows(2600, 9) == (3000, {2: "$1k", 5: "$2k", 8: "$3k"})
+    assert view.grid_rows(140, 7) == (150, {2: "$50", 4: "$100", 6: "$150"})
+    assert view.grid_rows(100, 2) == (100, {1: "$100"})  # a short chart gets one line
+    assert view.grid_rows(0, 5) == (0.0, {})
 
 
 def test_trend_words():
@@ -164,123 +190,243 @@ def test_summary_line_is_one_sentence_of_numbers():
 # -- layout -------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("width,height", [(78, 20), (118, 36), (158, 46), (60, 16), (78, 8)])
-def test_page_fits_and_keeps_the_essentials(width, height):
-    rep = report(n_models=7, n_accounts=4)
-    lines = view.costs_lines(rep, width=width, height=height, names={}, palette=Palette.DARK)
+@pytest.mark.parametrize("v", view.VIEWS)
+@pytest.mark.parametrize("width,height", [(78, 20), (118, 36), (158, 46), (60, 16), (40, 16),
+                                          (78, 8)])
+def test_every_view_fits_and_keeps_the_essentials(v, width, height):
+    rep = report(n_models=7, n_accounts=4, archive_days=60)
+    lines = view.costs_lines(rep, width=width, height=height, names={}, palette=P, view=v)
     text = "\n".join(line.plain for line in lines)
     assert len(lines) <= height
     assert all(line.cell_len <= width for line in lines[1:])  # the summary may ellipsize
     assert lines[0].plain.startswith("today $12.3")
-    assert "$/1% 5h" in text and "#1" in text  # the accounts always stay
+    if v in view.TREND_VIEWS:
+        assert "$/1% 5h" not in text.split("\n")[1:2]  # no table header: the legend names them
+    else:
+        assert "$/1% 5h" in text and "#1" in text  # the accounts always stay
+
+
+def test_one_chart_at_a_time_titled_with_its_view_and_the_key():
+    rep = report()
+    for v in view.VIEWS:
+        text = "\n".join(line.plain for line in view.costs_lines(
+            rep, width=118, height=36, names={}, palette=P, view=v))
+        assert f"‹ {v} ›  ←/→" in text
+        assert text.count("‹") == 1
 
 
 def test_the_freshness_note_goes_first_when_the_summary_is_too_wide():
     rep = report()
-    wide = view.costs_lines(rep, width=118, height=36, names={}, palette=Palette.DARK,
+    wide = view.costs_lines(rep, width=118, height=36, names={}, palette=P,
                             status="updated 2m ago")
     assert wide[0].plain.endswith("updated 2m ago")
-    narrow = view.costs_lines(rep, width=60, height=36, names={}, palette=Palette.DARK,
+    narrow = view.costs_lines(rep, width=60, height=36, names={}, palette=P,
                               status="updated 2m ago")
     assert "updated" not in narrow[0].plain and narrow[0].cell_len <= 60
 
 
 def test_the_note_and_gaps_go_before_the_chart_shrinks():
     rep = report(n_models=3, n_accounts=2)
-    roomy = view.costs_lines(rep, width=118, height=36, names={}, palette=Palette.DARK)
+    roomy = view.costs_lines(rep, width=118, height=36, names={}, palette=P, view="hourly")
     assert roomy[-1].plain.startswith("~ estimate")
     assert any(line.plain == "" for line in roomy)
-    tight = view.costs_lines(rep, width=78, height=13, names={}, palette=Palette.DARK)
+    tight = view.costs_lines(rep, width=78, height=17, names={}, palette=P, view="hourly")
     assert not tight[-1].plain.startswith("~ estimate")
-    assert "hourly" in "\n".join(line.plain for line in tight)
-    tiny = view.costs_lines(rep, width=78, height=8, names={}, palette=Palette.DARK)
-    assert "daily" not in "\n".join(line.plain for line in tiny)  # chart gone first
+    assert "24 hours" in "\n".join(line.plain for line in tight)
+    tiny = view.costs_lines(rep, width=78, height=8, names={}, palette=P, view="hourly")
+    assert "24 hours" not in "\n".join(line.plain for line in tiny)  # chart gone first
 
 
 def test_many_models_fold_into_one_other_row():
-    lines = view.model_lines(report(n_models=7), 118, view.MODEL_ROWS, Palette.DARK)
+    lines = view.model_lines(report(n_models=7), 118, view.MODEL_ROWS, P)
     assert len(lines) == 1 + view.MODEL_ROWS
     assert "3 other" in lines[-1].plain
 
 
-def test_chart_bars_follow_the_daily_totals_and_model_colors():
+# -- the money views ------------------------------------------------------------------
+
+
+def test_group_sums_runs_aligned_to_the_end():
+    series = [(float(i), {"a": 1.0, "b": float(i)}) for i in range(7)]
+    assert view.group(series, 3) == [(1.0, {"a": 3.0, "b": 6.0}), (4.0, {"a": 3.0, "b": 15.0})]
+    assert view.group(series, 1) == series
+    assert view.group(series[:2], 3) == [(0.0, {"a": 2.0, "b": 1.0})]  # one short run stays
+    assert view.group_duty(["1", "1", "2", None, "2", "2", "3"], 3) == ["1", "2"]
+    assert view.group_duty([None] * 3, 3) == [None]
+
+
+def test_fill_days_puts_empty_days_in_the_gaps():
+    now = time.time()
+    d0, d3 = costs.day_start(now, 3), costs.day_start(now)
+    days = view.fill_days([(d0, {"a": 1.0}), (d3, {"a": 2.0})])
+    assert [d for d, _ in days] == [costs.day_start(now, b) for b in (3, 2, 1, 0)]
+    assert [m for _, m in days] == [{"a": 1.0}, {}, {}, {"a": 2.0}]
+    assert view.fill_days([]) == []
+
+
+@pytest.mark.parametrize("v,width,bars,unit", [
+    ("monthly", 118, 30, "30 days"),
+    ("weekly", 158, 56, "7 days, 3h bars"),
+    ("weekly", 78, 28, "7 days, 6h bars"),
+    ("hourly", 78, 24, "24 hours"),
+    ("hourly", 40, 12, "12 hours"),
+    ("total", 158, 30 + 40, "all, daily"),
+    ("total", 78, 10, "all, weekly"),
+])
+def test_each_money_view_buckets_to_fit_the_width(v, width, bars, unit):
+    rep = report(archive_days=40)
+    buckets, duty, axis = view.money_series(rep, v, width)
+    assert len(buckets) == bars and axis[1] == unit
+    assert (duty is not None) == (v in ("weekly", "hourly"))
+    assert sum(sum(b.values()) for _, b in buckets) <= sum(
+        sum(m.values()) for _, m in (rep.history if v in ("total", "monthly") else rep.hours))
+
+
+def test_the_total_view_sums_every_known_day_in_its_title():
+    rep = report(archive_days=10)
+    title = view.chart_title(rep, "total", P).plain
+    total = sum(sum(m.values()) for _, m in rep.history)
+    since = time.strftime("%m-%d", time.localtime(rep.history[0][0]))
+    assert f"{view.money(total)} since {since}" in title
+
+
+def test_chart_bars_follow_the_totals_and_model_colors():
     rep = report(n_models=2)
-    lines = view.daily_chart(rep, 98, 6, Palette.DARK)
+    lines = view.money_chart(rep, "monthly", 98, 6, P)
     assert len(lines) == 7 and lines[-1].plain.rstrip().endswith("today")
     colors = {span.style for line in lines[:-1] for span in line.spans}
-    assert Palette.DARK.accent in colors and Palette.DARK.sev_ok in colors
-    # the tallest day reaches the top row; a day of zero draws nothing, not even a gridline
-    flat = report(n_models=1)
-    flat = CostReport(**{**flat.__dict__, "days": tuple((d, {}) for d, _ in flat.days)})
-    empty = view.daily_chart(flat, 98, 4, Palette.DARK)
-    assert all(set(line.plain[3:]) <= {" "} for line in empty[:-1])
+    assert P.accent in colors and P.sev_ok in colors
+    flat = CostReport(**{**rep.__dict__, "days": tuple((d, {}) for d, _ in rep.days)})
+    empty = view.money_chart(flat, "monthly", 98, 4, P)
+    assert all(set(line.plain[3:]) <= {" "} for line in empty[:-1])  # no bars, no gridlines
 
 
-def test_gridlines_are_dashed_dim_and_labelled_in_round_dollars():
-    rep = report(n_models=1)  # days peak at $15: lines at $5, $10, $15
-    lines = view.daily_chart(rep, 98, 9, Palette.DARK)
+def test_the_top_row_is_a_labelled_gridline_at_or_above_the_tallest_bar():
+    rep = report(n_models=1)  # days peak at $15: lines at $5, $10, $15, the top
+    lines = view.money_chart(rep, "monthly", 98, 9, P)
     labelled = [line.plain for line in lines[:-1] if line.plain.strip().startswith("$")]
     assert [p.split()[0] for p in labelled] == ["$15", "$10", "$5"]
+    assert lines[0].plain.lstrip().startswith("$15")  # the top row
     assert all("╌" in p for p in labelled)
     dashes = [span.style for line in lines for span in line.spans
               if "╌" in line.plain[span.start:span.end]]
     assert dashes and all(style.startswith("dim") for style in dashes)
+    # a peak between round values tops out at the next one, never above the last line
+    days = tuple((d, {"Opus 4.7": 26.0 if i == 3 else 4.0}) for i, (d, _) in enumerate(rep.days))
+    tall = CostReport(**{**rep.__dict__, "days": days})
+    top = view.money_chart(tall, "monthly", 98, 8, P)[0].plain
+    assert top.lstrip().startswith("$30")
 
 
-def test_hourly_chart_shows_the_last_day_and_who_was_on_duty():
+def test_the_week_and_the_day_show_who_was_on_duty():
     rep = report(n_models=2)
-    lines = view.hourly_chart(rep, 60, 5, Palette.DARK)
-    assert lines[-1].plain.rstrip().endswith("now") and "hourly" in lines[-1].plain
-    duty = lines[-2].plain
-    assert duty.lstrip().startswith("on #1") and duty.count("#2") == 1  # marks where it changes
-    twelve = view.hourly_chart(rep, 40, 5, Palette.DARK, hours=12)
-    first = time.strftime("%H:00", time.localtime(rep.hours[12][0]))
-    assert first in twelve[-1].plain
+    for v, width in (("hourly", 78), ("weekly", 78)):
+        lines = view.money_chart(rep, v, width, 5, P)
+        assert lines[-1].plain.rstrip().endswith("now")
+        duty = lines[-2].plain
+        assert duty.lstrip().startswith("on #1") and duty.count("#2") == 1
+    assert "on #" not in "".join(x.plain for x in view.money_chart(rep, "monthly", 78, 5, P))
 
 
 def test_duty_marks_never_run_into_each_other_or_off_the_end():
-    row = view._duty_row(["1", "2", "3", "3", "3", "3", "3", "4"], 1, 3, Palette.DARK).plain
+    row = view._duty_row(["1", "2", "3", "3", "3", "3", "3", "4"], 1, 3, P).plain
     assert row == "on #1 #3   "  # #2 had no room; #3 waits for some; #4 would run off the end
 
 
+@pytest.mark.parametrize("v", view.VIEWS)
 @pytest.mark.parametrize("width", [118, 78, 58, 40])
-def test_charts_sit_side_by_side_when_wide_and_stack_when_narrow(width):
-    rep = report(n_models=2)
-    lines = view.chart_lines(rep, width, 4, Palette.DARK)
-    text = "\n".join(line.plain for line in lines)
+def test_chart_rows_counts_what_chart_lines_draws(v, width):
+    rep = report(n_models=2, archive_days=20)
+    lines = view.chart_lines(rep, v, width, 4, {}, P)
+    assert len(lines) == view.chart_rows(rep, v, width, 4)
     assert all(line.cell_len <= width for line in lines)
-    assert len(lines) == view.chart_rows(rep, width, 4, hourly_only=False)
-    if width >= view.SIDE_BY_SIDE_W:
-        assert "daily" in lines[-1].plain and "hourly" in lines[-1].plain  # axes level
-    else:
-        assert text.index("daily") < text.index("hourly")
 
 
-def test_account_names_come_from_the_table_and_unknown_numbers_show_as_such():
-    lines = view.account_lines(report(), 118, 5, {"1": "me@x.com"}, Palette.DARK)
-    assert lines[1].plain.startswith("me@x.com")
-    assert "~$3.10  █▆▃▁ ↓12%/4w" in lines[1].plain
-    assert "~$9.40  steady" in lines[1].plain  # two windows make no sparkline
+# -- the $ per 1% views ------------------------------------------------------------------
+
+
+def trend_report(**figs) -> CostReport:
+    base = report()
+    accounts = tuple(AccountLine(n, 10.0, f, None) for n, f in figs.items())
+    return CostReport(**{**base.__dict__, "accounts": accounts})
+
+
+def test_trend_view_draws_each_account_with_its_own_line_and_verdict():
+    rep = trend_report(**{"1": trend_fig(5.0, change=-0.3, steady=False),
+                          "2": trend_fig(2.0)})
+    lines = view.trend_chart(rep, "5h", 78, 10, {"1": "me@x.com"}, P)
+    legend = [line.plain for line in lines[-2:]]
+    assert legend[0].startswith("● me@x.com") and "↓30%/4w limit shrinking" in legend[0]
+    assert legend[1].startswith("● #2") and legend[1].endswith("steady")
+    plot = lines[:10]
+    colors = view.account_colors(rep, P)
+    styles = {span.style for line in plot for span in line.spans}
+    assert colors["1"] in styles and colors["2"] in styles  # never pooled: one hue each
+    assert "per window" in lines[10].plain and lines[10].plain.rstrip().endswith("now")
+
+
+def test_a_steady_account_gets_a_flat_line_and_a_moving_one_a_slope():
+    rep = trend_report(**{"1": trend_fig(5.0)})
+    plot = [line.plain for line in view.trend_chart(rep, "5h", 78, 10, {}, P)[:10]]
+    flat_rows = [i for i, row in enumerate(plot) if view._FLAT in row]
+    assert len(flat_rows) == 1 and view._SLOPE not in "".join(plot)
+    moving = trend_report(**{"1": trend_fig(5.0, change=-0.5, steady=False, days=30)})
+    plot = [line.plain for line in view.trend_chart(moving, "5h", 78, 10, {}, P)[:10]]
+    slope_rows = [i for i, row in enumerate(plot) if view._SLOPE in row]
+    assert len(slope_rows) > 2 and view._FLAT not in "".join(plot)
+    first = [row.index(view._SLOPE) for row in plot if view._SLOPE in row]
+    assert first == sorted(first)  # falling: the line starts high on the left
+
+
+def test_unsure_points_are_hollow_and_dim_and_a_provisional_line_is_dim():
+    rep = trend_report(**{"1": trend_fig(5.0, sure=False, provisional=True, days=8)})
+    lines = view.trend_chart(rep, "5h", 78, 10, {}, P)
+    plot = lines[:10]
+    text = "".join(line.plain for line in plot)
+    assert "○" in text and "●" in text
+    hollow = [s.style for line in plot for s in line.spans if line.plain[s.start:s.end] == "○"]
+    assert hollow and all(style.startswith("dim") for style in hollow)
+    flat = [s.style for line in plot for s in line.spans if view._FLAT in line.plain[s.start:s.end]]
+    assert flat and all(style.startswith("dim") for style in flat)
+    assert "provisional: 8 days of data" in lines[-1].plain
+
+
+def test_few_points_still_show_with_a_provisional_line():
+    rep = trend_report(**{"1": trend_fig(5.0, provisional=True, days=2, n=2)})
+    lines = view.trend_chart(rep, "5h", 60, 6, {}, P)
+    assert "●" in "".join(line.plain for line in lines[:6])
+    assert "~ steady, provisional: 2 days of data" in lines[-1].plain
+
+
+def test_a_trend_view_with_nothing_to_plot_says_so_in_one_line():
+    rep = trend_report(**{"1": None})
+    lines = view.trend_chart(rep, "7d", 78, 10, {}, P)
+    assert len(lines) == 1 and "no finished 7d window" in lines[0].plain
+    assert view.chart_rows(rep, "$/1% 7d", 78, 10) == 2
+
+
+@pytest.mark.parametrize("width", [40, 60, 78, 158])
+def test_trend_view_fits_narrow_widths(width):
+    rep = trend_report(**{"1": trend_fig(5.0, change=-0.3, steady=False),
+                          "2": trend_fig(20.0, sure=False, provisional=True, days=3)})
+    lines = view.chart_lines(rep, "$/1% 5h", width, 6, {"1": "someone@example.com"}, P)
+    assert all(line.cell_len <= width for line in lines)
+
+
+def test_account_table_shows_the_figures_and_leaves_the_trend_to_its_view():
+    lines = view.account_lines(report(), 118, 5, {"1": "me@x.com"}, P)
+    assert lines[1].plain.startswith("me@x.com") and "~$3.10" in lines[1].plain
+    assert "~$9.40" in lines[1].plain and "4w" not in lines[1].plain
     assert lines[2].plain.startswith("#2") and "~$1.80?" in lines[2].plain and "–" in lines[2].plain
-
-
-def test_an_unsure_figure_is_saffron_and_a_falling_one_warns():
-    lines = view.account_lines(report(), 118, 5, {}, Palette.DARK)
     styles = {lines[2].plain[s.start:s.end].strip(): s.style for s in lines[2].spans}
-    assert styles["~$1.80?"] == Palette.DARK.sev_warn
-    falling = {lines[1].plain[s.start:s.end].strip(): s.style for s in lines[1].spans}
-    assert falling["↓12%/4w"] == Palette.DARK.sev_warn
-
-
-def test_narrow_account_table_drops_the_sparklines_first():
-    lines = view.account_lines(report(), 64, 5, {"1": "me@x.com"}, Palette.DARK)
-    assert "█" not in lines[1].plain and "↓12%/4w" in lines[1].plain
-    assert all(line.cell_len <= 64 for line in lines)
+    assert styles["~$1.80?"] == P.sev_warn
+    assert all(line.cell_len <= 50 for line in view.account_lines(report(), 50, 5, {}, P))
 
 
 def test_plain_page_has_every_part():
     text = view.plain_page(report(), {"1": "me@x.com"})
-    for part in ("today $12.3", "daily", "hourly", "model", "me@x.com", "$/1% 5h", "~ estimate"):
+    for part in ("today $12.3", "30 days", "model", "me@x.com", "$/1% 5h", "~ estimate",
+                 "$ per 1% of 5h", "$ per 1% of 7d", "limit shrinking"):
         assert part in text
 
 
@@ -304,7 +450,7 @@ class TestCostsPage:
             lines = text.splitlines()
             assert lines[0].startswith("today $12.3 · 7d $245 · 30d $1,020")
             assert "me@x.com" in text and "~$3.10" in text
-            assert "daily" in text and "hourly" in text and "Opus 4.7" in text
+            assert "‹ total ›" in text and "Opus 4.7" in text
             costs_view = app.screen.query_one("#costs")
             assert costs_view.render().no_wrap  # a line too long is cut, never wrapped
             screen = ["".join(seg.text for seg in strip)
@@ -314,7 +460,7 @@ class TestCostsPage:
             assert all(len(line) <= size[0] - 2 for line in lines[1:])
             assert app.screen.query_one("#status").region.y == 0  # the header stays
             hint = app.screen.prompt.render().plain
-            assert "r refresh" in hint and "esc back" in hint
+            assert "←/→ chart" in hint and "r refresh" in hint and "esc back" in hint
             assert [c[0] for c in source.calls] == ["cached", "refresh"]
             assert source.calls[0][1]["1"] == ("me@x.com", app.snapshot.accounts[0].org_uuid)
             await pilot.press("escape")
@@ -340,6 +486,29 @@ class TestCostsPage:
             source.gate.set()
             await settle(pilot)
             assert "updated 2m ago" in page(app)
+
+    async def test_arrows_cycle_the_chart_wrap_around_and_the_view_is_kept(self, tmp_path):
+        app = costs_app(tmp_path, FakeCosts())
+        async with app.run_test(size=(120, 40)) as pilot:
+            await settle(pilot)
+            await pilot.press("dollar_sign")
+            await settle(pilot)
+            seen = [view.VIEWS[0]]
+            for _ in view.VIEWS:
+                await pilot.press("right")
+                await pilot.pause()
+                seen.append(app.screen.query_one("#costs").view)
+            assert seen == [*view.VIEWS, view.VIEWS[0]]  # every view once, then around
+            await pilot.press("left")
+            await pilot.pause()
+            assert app.screen.query_one("#costs").view == view.VIEWS[-1]
+            assert f"‹ {view.VIEWS[-1]} ›" in page(app)
+            await pilot.press("escape")
+            await settle(pilot)
+            await pilot.press("dollar_sign")
+            await settle(pilot)
+            assert f"‹ {view.VIEWS[-1]} ›" in page(app)  # reopened on the same chart
+            assert app.screen.costs_shown  # arrows never left the page
 
     async def test_r_reprices_today(self, tmp_path):
         source = FakeCosts()
