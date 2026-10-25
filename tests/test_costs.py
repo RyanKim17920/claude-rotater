@@ -1,4 +1,5 @@
-"""Costs data: the ccusage runner, slicing, cache, attribution, $ per 1%.
+"""Costs data: the ccusage runner, slicing, cache, attribution, rollups, and
+$ per 1% across profiles (window by window: tests/test_dollar_per_pct.py).
 
 No network and no real ccusage: ``fake_ccusage`` prices a slice the way
 ccusage lays it out (one session per ``projects/<source>/<slot>.jsonl``,
@@ -20,7 +21,8 @@ import pytest
 
 from claude_rotater import cost_report as cr
 from claude_rotater import costs
-from claude_rotater.usage_history import WindowSummary
+from claude_rotater import dollar_per_pct as dpp
+from claude_rotater.usage_history import Point, WindowSummary
 
 FIXTURE = Path(__file__).parent / "fixtures" / "ccusage_session.json"
 HOUR = 3600.0
@@ -461,7 +463,7 @@ class TestSwitchHistory:
         assert got == {}
 
 
-# -- $ per 1% ---------------------------------------------------------------------------------
+# -- one account across profiles ------------------------------------------------------------
 
 
 def spend_every_slot(lo: float, hi: float, per_hour: float) -> list[tuple[int, float]]:
@@ -469,42 +471,36 @@ def spend_every_slot(lo: float, hi: float, per_hour: float) -> list[tuple[int, f
     return [(s, per_hour / 4) for s in range(start, int(hi), 900)]
 
 
-class TestEstimate:
-    def test_ratio_of_spend_to_peak_over_windows(self, now):
-        lo = now - 10 * 86400
-        spend = spend_every_slot(lo, now, 4.0)  # $4/h
-        windows = [WindowSummary(now - k * 6 * HOUR, 10.0) for k in range(1, 6)]  # 5h -> $20 at 10%
-        est = cr.estimate_per_pct(spend, windows, 5 * HOUR, lo, now)
-        assert est.dollars == pytest.approx(2.0) and est.n == 5
-        assert est.rel_err == pytest.approx(0.0, abs=1e-9)
+class TestAcrossProfiles:
+    def test_majority_is_who_was_on_duty_longest(self):
+        spans = [(0.0, 1000.0, "1"), (1000.0, 3600.0, "2")]
+        assert cr.majority(spans, 0, 3600) == "2"
+        assert cr.majority(spans, 0, 900) == "1"
+        assert cr.majority(spans, 5000, 6000) is None
 
-    def test_spread_of_the_windows_gives_the_error(self, now):
-        lo = now - 10 * 86400
-        spend = spend_every_slot(lo, now, 4.0)
-        windows = [WindowSummary(now - 6 * HOUR, 10.0), WindowSummary(now - 12 * HOUR, 20.0)]
-        est = cr.estimate_per_pct(spend, windows, 5 * HOUR, lo, now)
-        assert est.dollars == pytest.approx(40 / 30)
-        assert est.rel_err is not None and est.rel_err > 0.2
+    def test_covers_asks_for_every_duty_stretch_to_be_priced(self, now):
+        p = cr.ProfileSpend({}, {}, ((now - 10 * HOUR, now - 5 * HOUR, "1"),
+                                     (now - 5 * HOUR, now, "2")), built_at=now - 2 * HOUR,
+                            lo=now - 20 * HOUR)
+        assert p.covers("1", now - 9 * HOUR, now - HOUR)  # 1's stretch ends before built_at
+        assert not p.covers("2", now - 4 * HOUR, now - HOUR)  # 2 on duty past built_at
+        assert p.covers("2", now - 4 * HOUR, now - 3 * HOUR)
+        early = cr.ProfileSpend({}, {}, ((now - 30 * HOUR, now, "1"),), now, now - 20 * HOUR)
+        assert not early.covers("1", now - 25 * HOUR, now - 21 * HOUR)  # before its priced range
+        assert early.covers("3", now - 25 * HOUR, now)  # never on duty: nothing to price
 
-    def test_one_window_has_no_error_bar(self, now):
-        lo = now - 86400
-        est = cr.estimate_per_pct(spend_every_slot(lo, now, 4.0), [WindowSummary(now - HOUR, 10.0)],
-                                  5 * HOUR, lo, now)
-        assert est.n == 1 and est.rel_err is None
+    def test_read_numbers_keys_accounts_by_identity(self, tmp_path):
+        (tmp_path / "sequence.json").write_text(json.dumps({"accounts": {
+            "1": {"email": "a@x", "organizationUuid": "o1"}, "2": {"email": "b@x"}, "3": "junk"}}))
+        assert cr.read_numbers(tmp_path) == {("a@x", "o1"): "1", ("b@x", ""): "2"}
+        assert cr.read_numbers(tmp_path / "missing") == {}
 
-    def test_running_window_counts_spend_so_far(self, now):
-        lo = now - 86400
-        est = cr.estimate_per_pct(spend_every_slot(lo, now, 4.0),
-                                  [WindowSummary(now + 3 * HOUR, 4.0)], 5 * HOUR, lo, now)
-        assert est.dollars == pytest.approx(8.0 / 4.0)
-
-    def test_windows_starting_before_the_data_tiny_or_used_elsewhere_are_skipped(self, now):
-        lo = now - 86400
-        spend = spend_every_slot(now - 10 * HOUR, now - 6 * HOUR, 4.0)
-        windows = [WindowSummary(lo + HOUR, 50.0),  # starts before the data
-                   WindowSummary(now - 5 * HOUR, 1.0),  # under MIN_WINDOW_PCT
-                   WindowSummary(now + 4 * HOUR, 30.0)]  # moved with no local spend
-        assert cr.estimate_per_pct(spend, windows, 5 * HOUR, lo, now) is None
+    def test_sources_from_paths_credit_session_profiles_again(self, tmp_path):
+        backup = tmp_path / ".rota"
+        (backup / "sessions" / "7-a@x" / "projects").mkdir(parents=True)
+        session = os.path.realpath(backup / "sessions" / "7-a@x" / "projects")
+        got = costs.sources_from_paths(backup, ["/main/projects", session])
+        assert got == [costs.Source("s0", "/main/projects"), costs.Source("s1", session, "7")]
 
 
 # -- rollups ---------------------------------------------------------------------------------
@@ -526,11 +522,27 @@ def test_model_name(raw, name):
 
 
 class FakeHistory:
-    def __init__(self, windows: dict):
+    """Windows and exact readings per (email, label); no hourly peaks."""
+
+    def __init__(self, windows: dict, points: dict | None = None):
         self._w = windows
+        self._p = points or {}
 
     def windows(self, identity, label, since):
         return [w for w in self._w.get((identity[0], label), []) if w.resets_at >= since]
+
+    def long_series(self, identity, label, since):
+        return []
+
+    def series(self, identities):
+        return {num: {label: pts for (email, label), pts in self._p.items() if email == ident[0]}
+                for num, ident in identities.items()}
+
+
+def climb(reset: float, duration: float, pcts: list[float]) -> list[Point]:
+    """Readings spread evenly through the window ending at ``reset``."""
+    every = duration / (len(pcts) + 1)
+    return [Point(reset - duration + (i + 1) * every, pct, reset) for i, pct in enumerate(pcts)]
 
 
 def make_cache(rows: list[costs.Row], now: float) -> costs.CostCache:
@@ -549,8 +561,7 @@ class TestBuildReport:
             costs.Row("s0", int(now - 2 * HOUR) // 900 * 900, "claude-haiku-4-5", 0.001, 0, 0, 0, 0),
         ]
         spans = [(now - 40 * 86400, now - 3 * 86400 - HOUR, "2"), (now - 3 * 86400 - HOUR, now, "1")]
-        report = cr.build_report(make_cache(rows, now), [costs.Source("s0", "/a")], spans,
-                                 lambda n, label, since: [], now)
+        report = cr.build_report(make_cache(rows, now), [costs.Source("s0", "/a")], spans, now)
         assert report.today == pytest.approx(30.0 + 0.001)
         assert report.week == pytest.approx(60.001)
         assert report.month == pytest.approx(100.001)
@@ -565,35 +576,29 @@ class TestBuildReport:
         assert [(a.number, round(a.cost, 3)) for a in report.accounts] == [("1", 60.001), ("2", 40.0)]
         assert report.unattributed == pytest.approx(0.0, abs=1e-6)
 
-    def test_accounts_get_estimates_from_their_history(self, now):
-        lo = costs.range_start(now)
-        rows = [costs.Row("s0", s, "claude-opus-4-7", c, 0, 0, 0, 0)
-                for s, c in spend_every_slot(now - 2 * 86400, now, 4.0)]
-        history = FakeHistory({("a@x", "5h"): [WindowSummary(now - 6 * HOUR, 10.0),
-                                               WindowSummary(now - 12 * HOUR, 10.0)],
-                               ("a@x", "7d"): [WindowSummary(now + 86400, 8.0)]})
-        report = cr.build_report(
-            make_cache(rows, now), [costs.Source("s0", "/a")], [(lo, now, "1")],
-            lambda n, label, since: history.windows(("a@x", "o") if n == "1" else ("?", "?"), label, since),
-            now)
-        acc = report.accounts[0]
-        assert acc.per_5h.dollars == pytest.approx(2.0) and acc.per_5h.n == 2
-        assert acc.per_7d.dollars == pytest.approx(192.0 / 8.0) and acc.per_7d.rel_err is None
+    def test_hours_hold_the_last_day_by_model_and_who_was_on_duty(self, now):
+        now += 1200  # 20 minutes into the hour
+        hour = int(now // HOUR * HOUR)
+        rows = [costs.Row("s0", hour - 3600, "claude-opus-4-7", 4.0, 0, 0, 0, 0),
+                costs.Row("s0", hour - 2700, "claude-sonnet-4-5", 1.0, 0, 0, 0, 0),
+                costs.Row("s0", hour - 30 * 3600, "claude-opus-4-7", 9.0, 0, 0, 0, 0)]
+        spans = [(now - 40 * HOUR, hour - 1800, "1"), (hour - 1800, now, "2")]  # switch at :30
+        report = cr.build_report(make_cache(rows, now), [costs.Source("s0", "/a")], spans, now)
+        assert len(report.hours) == cr.RECENT_HOURS and report.hours[-1][0] == hour
+        assert report.hours[-2][1] == {"Opus 4.7": 4.0, "Sonnet 4.5": 1.0}
+        assert sum(sum(h.values()) for _, h in report.hours) == 5.0  # 30h ago is not in it
+        assert report.hour_duty[-3:] == ("1", "1", "2")  # the switched hour: a tie goes first-come
+        assert cr.build_report(make_cache(rows, now), [], [], now).hour_duty == (None,) * 24
 
-    def test_history_errors_leave_no_estimate(self, now):
-        rows = [costs.Row("s0", int(now - HOUR) // 900 * 900, "claude-opus-4-7", 5.0, 0, 0, 0, 0)]
-
-        def broken(*_a):
-            raise RuntimeError("corrupt")
-
-        report = cr.build_report(make_cache(rows, now), [costs.Source("s0", "/a")],
-                                 [(now - 86400, now, "1")], broken, now)
-        assert report.accounts[0].per_5h is None
+    def test_accounts_carry_their_figures_even_without_spend(self, now):
+        fig = dpp.PerPct(2.0, True, None, True, ())
+        report = cr.build_report(make_cache([], now), [], [], now, {"3": {"5h": fig}})
+        assert report.accounts == (cr.AccountLine("3", 0.0, fig, None),)
 
     def test_empty(self, now):
-        report = cr.build_report(make_cache([], now), [], [], lambda *a: [], now)
+        report = cr.build_report(make_cache([], now), [], [], now)
         assert report.month == 0 and report.models == () and report.week_change is None
-        assert report.top_model is None
+        assert report.accounts == ()
 
 
 # -- the source the view reads ------------------------------------------------------------------
@@ -604,7 +609,8 @@ class TestCostSource:
         return cr.CostSource(
             tmp_path / ".rota", FakeHistory({}), [home], active=lambda: "1",
             find_runner=lambda: list(runner) if runner else None,
-            run=run or fake_ccusage(), clock=lambda: now)
+            run=run or fake_ccusage(), clock=lambda: now,
+            other_profiles=lambda: [], store_path=tmp_path / dpp.STORE_FILENAME)
 
     def test_first_refresh_builds_and_saves_then_reopening_is_cached(self, tmp_path, home, now):
         write(home / "projects" / "p" / "a.jsonl", entry(now - 600, "t1", out=4000))
@@ -649,3 +655,56 @@ class TestCostSource:
         write(home / "projects" / "p" / "a.jsonl", entry(now - 2 * HOUR, "a1"), entry(now - 600, "b1"))
         report = self.make(tmp_path, home, now).refresh({}).report
         assert {a.number: a.cost for a in report.accounts} == pytest.approx({"1": 1.0, "2": 1.0})
+
+
+class TestPerPctAcrossProfiles:
+    """One account (a@x) held by two profiles: #1 here, #2 in "work"."""
+
+    RESET_AGO = HOUR
+
+    def setup(self, tmp_path, now, *, other_built_at: float | None = None):
+        me, work = tmp_path / ".rota", tmp_path / "work" / ".rota"
+        home = tmp_path / ".claude"
+        (home / "projects").mkdir(parents=True)
+        reset = now - self.RESET_AGO
+        start = reset - 5 * HOUR
+        for backup, number, src in ((me, "1", os.path.realpath(home / "projects")),
+                                    (work, "2", "/work/projects")):
+            backup.mkdir(parents=True)
+            (backup / "sequence.json").write_text(json.dumps({
+                "activeAccountNumber": number,
+                "accounts": {number: {"email": "a@x", "organizationUuid": "o"}}}))
+            rows = [costs.Row("s0", slot, "claude-opus-4-7", usd, 0, 0, 0, 0)
+                    for slot, usd in spend_every_slot(start, reset, 10.0)]  # $10/h each
+            built = other_built_at if (backup == work and other_built_at) else now - 60
+            costs.save_cache(backup, costs.CostCache(costs.day_start(now), [src], rows, {}, built))
+        history = FakeHistory(
+            {("a@x", "5h"): [WindowSummary(reset, 40.0)]},
+            {("a@x", "5h"): climb(reset, 5 * HOUR, [10, 20, 30, 40])})  # peak 1h before reset
+        store = tmp_path / "shared" / dpp.STORE_FILENAME
+        store.parent.mkdir()
+        source = cr.CostSource(me, history, [home], active=lambda: "1", clock=lambda: now,
+                               find_runner=lambda: None, other_profiles=lambda: [work],
+                               store_path=store)
+        return source, store
+
+    def test_spend_is_summed_over_every_profile_holding_the_account(self, tmp_path, now):
+        source, store = self.setup(tmp_path, now)
+        acc = source.cached({"1": ("a@x", "o")}).report.accounts[0]
+        # 4h to the peak at $10/h in each profile, over 40%
+        assert acc.per_5h.dollars == pytest.approx(2 * 40.0 / 40)
+        assert acc.cost == pytest.approx(50.0)  # the cost column stays this profile's own
+        assert list(dpp.load_store(store)["a@x|o"]["5h"].values())[0].usd == pytest.approx(80.0)
+
+    def test_a_window_the_other_profile_has_not_priced_yet_waits(self, tmp_path, now):
+        source, store = self.setup(tmp_path, now, other_built_at=now - 4 * HOUR)
+        acc = source.cached({"1": ("a@x", "o")}).report.accounts[0]
+        assert acc.per_5h is None and not store.exists()
+
+    def test_a_stored_window_outlives_the_priced_range(self, tmp_path, now):
+        source, store = self.setup(tmp_path, now)
+        source.cached({"1": ("a@x", "o")})
+        kept = store.read_text()
+        source.clock = lambda: now + costs.RANGE_DAYS * 86400  # its start is out of range now
+        source.cached({"1": ("a@x", "o")})
+        assert store.read_text() == kept

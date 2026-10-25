@@ -251,6 +251,20 @@ def transcript_sources(
     return out
 
 
+def sources_from_paths(backup_dir: Path, paths: Iterable[str]) -> list[Source]:
+    """The sources a cache was built from (its ``sources``, in key order),
+    each session profile's again credited to its account."""
+    sessions = os.path.realpath(backup_dir / "sessions") + os.sep
+    out = []
+    for i, path in enumerate(paths):
+        account = None
+        if path.startswith(sessions):
+            number = path[len(sessions):].split(os.sep, 1)[0].split("-", 1)[0]
+            account = number if number.isdigit() else None
+        out.append(Source(f"s{i}", path, account))
+    return out
+
+
 def feed_config_dirs(backup_dir: Path) -> list[str]:
     """Config dirs the statusline feed of this data dir has reported.
 

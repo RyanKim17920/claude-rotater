@@ -17,9 +17,14 @@ Windows.
 - Costs behind `$`, priced by [ccusage](https://github.com/ryoppippi/ccusage)
   from your local transcripts and run only when you open the page. Spend is
   credited to the account rota had on duty at the time (approximate: other
-  machines and chats still on an old login are not seen), and each account's
-  ~$ per 1% of its 5h and 7d windows is fitted from rota's usage history, with
-  its spread. Without `ccusage`, `bunx` or `npx` the page says so.
+  machines and chats still on an old login are not seen). Daily bars for 30
+  days sit beside hourly bars for the last day, with dashed lines at round
+  dollar values. Each account's ~$ per 1% of its 5h and 7d windows is taken
+  window by window (its spend summed over every profile that holds it) and
+  kept, so its trend shows whether the limits shrink: a falling $ per 1%
+  means a 1% buys less. Windows that rose with no local spend (other
+  machines, claude.ai) are marked `?` or left out. Without `ccusage`, `bunx`
+  or `npx` the page says so.
 - Automatic switching while the TUI is open, or headless with `rota auto`.
   By default (`pace`) it spreads usage while every account's weekly quota is
   safe, moving only when the 5-hour window gets tight and keeping a fresh
@@ -96,7 +101,7 @@ revoke the stored refresh token.
 | `y` / `Y` | copy the highlighted account's line / every account's line as plain text |
 | `f` | refresh usage now |
 | `h` / `esc` | history: past 5h peaks and the 7d curve across weeks, and back |
-| `$` / `esc` | costs: today / 7d / 30d, daily bars by model, per-model tokens and trend, per-account cost and ~$ per 1% of the 5h and 7d windows (`r` reprices today, `y`/`Y` copy); needs `ccusage`, or Node/Bun to fetch it |
+| `$` / `esc` | costs: today / 7d / 30d, daily and hourly bars by model, per-account cost and ~$ per 1% of the 5h and 7d windows with its trend, per-model cost and trend (`r` reprices today, `y`/`Y` copy); needs `ccusage`, or Node/Bun to fetch it |
 | `?` / `esc` | every key, grouped, in place of the charts, and back |
 | `s` | set up or remove the statusline feed |
 | `c` | settings (`↑`/`↓` select, `←`/`→` change, digits or `enter` exact value, `esc` back) |

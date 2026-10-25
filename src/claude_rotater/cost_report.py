@@ -9,38 +9,41 @@ Three things happen here, all pure functions of their inputs:
   profile's slots (``rota run``) are its account's outright. Still an
   approximation: a running chat may keep the old login for a while after a
   switch, and usage on other machines is never in local transcripts.
-- **$ per 1%.** For every 5h and 7d window in rota's usage history whose
-  span lies inside the priced range, the account's spend in that window
-  against the window's peak %, fitted through the origin (ratio of sums:
-  big windows weigh more, as their % is the least rounded). The spread of
-  the per-window ratios gives the ± shown next to it.
+- **$ per 1%.** An account's spend over every profile that holds it (one
+  account may sit in two profiles: their transcripts are separate), window
+  by window against its peak reading; :mod:`claude_rotater.dollar_per_pct`
+  grades the windows and keeps the finished ones for the trend.
 - **Rollups.** Today / 7 days / 30 days, the daily series by model, the
-  per-model table with a trend against the week before, and per account.
+  last 24 hours by model with who was on duty, the per-model table with a
+  trend against the week before, and per account.
 """
 
 from __future__ import annotations
 
 import bisect
+import json
 import logging
-import math
+import os
 import re
 import time
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Protocol
 
-from claude_rotater import costs
+from claude_rotater import costs, profiles
+from claude_rotater import dollar_per_pct as dpp
+from claude_rotater.paths import get_default_backup_root, get_shared_cache_dir
 
 _logger = logging.getLogger(__name__)
 
 DAY_S = 86400.0
+HOUR_S = 3600.0
 WEEK_S = 7 * DAY_S
-WINDOW_S = {"5h": 5 * 3600.0, "7d": WEEK_S}
-MIN_WINDOW_PCT = 2.0  # below this, integer rounding swamps the ratio
-MIN_WINDOW_COST = 0.5  # % moved with ~no local spend: used on another machine
-TREND_FLAT = 0.10  # within ±10% the arrow is flat
+WINDOW_S = {"5h": 5 * HOUR_S, "7d": WEEK_S}
+RECENT_HOURS = 24
+
+Identity = tuple[str, str]  # (email, organization uuid), as the usage history keys it
 
 _SWITCH_RE = re.compile(
     r"^(\d{4}-\d\d-\d\d \d\d:\d\d:\d\d),\d+ - INFO - Switched from account (\S+) to (\d+)\s*$"
@@ -140,58 +143,136 @@ def attribute(
     return {who: sorted(per.items()) for who, per in out.items()}
 
 
-# -- $ per 1% ------------------------------------------------------------------
+def majority(spans: Sequence[Span], a: float, b: float) -> str | None:
+    """The account on duty for most of ``[a, b)``, None when nobody was."""
+    time_on: dict[str, float] = {}
+    for start, end, who in spans:
+        overlap = min(end, b) - max(start, a)
+        if overlap > 0:
+            time_on[who] = time_on.get(who, 0.0) + overlap
+    return max(time_on, key=time_on.__getitem__) if time_on else None
+
+
+# -- one account across profiles -----------------------------------------------
 
 
 @dataclass(frozen=True)
-class Estimate:
-    """Dollars of local spend per 1% of a window, and how sure that is."""
+class ProfileSpend:
+    """What one profile knows of its accounts' spend.
 
-    dollars: float
-    rel_err: float | None  # one standard error, relative; None from one window
-    n: int  # windows behind it
+    ``built_at`` and ``lo`` bound the priced transcripts; spend while an
+    account was on duty outside them is not known yet.
+    """
+
+    numbers: dict[Identity, str]  # account identity -> its number here
+    spend: dict[str, list[tuple[int, float]]]  # number -> (slot, usd)
+    spans: tuple[Span, ...]
+    built_at: float
+    lo: float
+
+    def covers(self, number: str, a: float, b: float) -> bool:
+        """Whether every stretch ``number`` was on duty in ``[a, b)`` is priced."""
+        for start, end, who in self.spans:
+            if who != number or end <= a or start >= b:
+                continue
+            if max(start, a) < self.lo or min(end, b) > self.built_at:
+                return False
+        return True
 
 
-class _Window(Protocol):  # what estimate_per_pct reads of a usage_history.WindowSummary
-    resets_at: float
-    peak_pct: float
+def read_numbers(backup_dir: Path) -> dict[Identity, str]:
+    """``{identity: number}`` from a profile's ``sequence.json``."""
+    try:
+        data = json.loads((backup_dir / "sequence.json").read_text())
+    except (OSError, ValueError):
+        return {}
+    accounts = data.get("accounts") if isinstance(data, dict) else None
+    out: dict[Identity, str] = {}
+    for number, account in (accounts.items() if isinstance(accounts, dict) else ()):
+        if isinstance(account, dict) and isinstance(account.get("email"), str):
+            out[(account["email"], account.get("organizationUuid") or "")] = str(number)
+    return out
 
 
-def estimate_per_pct(
-    spend: Sequence[tuple[int, float]],
-    windows: Iterable[_Window],
-    duration: float,
-    lo: float,
-    now: float,
-) -> Estimate | None:
-    """Fit spend ≈ $/1% × peak % over the windows inside ``[lo, now]``."""
-    slots = [s for s, _ in spend]
-    prefix = [0.0]
-    for _, usd in spend:
-        prefix.append(prefix[-1] + usd)
-
-    def cost_in(a: float, b: float) -> float:
-        return prefix[bisect.bisect_left(slots, b)] - prefix[bisect.bisect_left(slots, a)]
-
-    points: list[tuple[float, float]] = []
-    for w in windows:
-        start = w.resets_at - duration
-        if start < lo or w.peak_pct < MIN_WINDOW_PCT:
-            continue
-        usd = cost_in(start, min(w.resets_at, now))
-        if usd < MIN_WINDOW_COST:
-            continue
-        points.append((usd, w.peak_pct))
-    if not points:
+def _active(backup_dir: Path) -> str | None:
+    try:
+        value = json.loads((backup_dir / "sequence.json").read_text()).get("activeAccountNumber")
+    except (OSError, ValueError, AttributeError):
         return None
-    total_usd = sum(c for c, _ in points)
-    total_pct = sum(p for _, p in points)
-    ratio = total_usd / total_pct
-    if len(points) < 2:
-        return Estimate(ratio, None, 1)
-    var = sum(p * (c / p - ratio) ** 2 for c, p in points) / total_pct
-    rel = math.sqrt(var / (len(points) - 1)) / ratio if ratio > 0 else None
-    return Estimate(ratio, rel, len(points))
+    return str(value) if value is not None else None
+
+
+def profile_spend(
+    cache: costs.CostCache,
+    sources: Sequence[costs.Source],
+    spans: Sequence[Span],
+    numbers: dict[Identity, str],
+    now: float,
+) -> ProfileSpend:
+    lo = costs.range_start(now)
+    rows = [r for r in cache.rows if lo <= r.slot <= now]
+    return ProfileSpend(numbers, attribute(rows, sources, spans), tuple(spans),
+                        cache.built_at, lo)
+
+
+def other_profile_dirs(backup_dir: Path) -> list[Path]:
+    """The data dirs of the other rota profiles on this machine."""
+    me = os.path.realpath(backup_dir)
+    seen = {me}
+    out = []
+    for path in [get_default_backup_root(), *(Path(p.data_dir) for p in profiles.load())]:
+        real = os.path.realpath(os.path.expanduser(path))
+        if real not in seen and os.path.isdir(real):
+            seen.add(real)
+            out.append(Path(real))
+    return out
+
+
+def load_profile_spend(backup_dir: Path, now: float) -> ProfileSpend | None:
+    """Another profile's spend from its own cost cache (never repriced from
+    here) and switch log; None when it has never priced anything."""
+    cache = costs.load_cache(backup_dir)
+    numbers = read_numbers(backup_dir)
+    if cache is None or not numbers:
+        return None
+    sources = costs.sources_from_paths(backup_dir, cache.sources)
+    lo = costs.range_start(now)
+    spans = duty_spans(switch_history(backup_dir), _active(backup_dir), lo, now)
+    return profile_spend(cache, sources, spans, numbers, now)
+
+
+def account_per_pct(
+    identity: Identity,
+    held: Sequence[ProfileSpend],
+    history,
+    store: dpp.Store,
+    now: float,
+) -> tuple[dict[str, list[dpp.WindowCost]], dict[str, dpp.PerPct | None]]:
+    """One account's finished windows (fresh from its spend over every
+    profile in ``held``) and the figures from those plus the stored ones."""
+    lo = max(p.lo for p in held)
+    merged: dict[int, float] = {}
+    for p in held:
+        for slot, usd in p.spend.get(p.numbers[identity], ()):
+            merged[slot] = merged.get(slot, 0.0) + usd
+    spend = sorted(merged.items())
+
+    def covered(a: float, b: float) -> bool:
+        return all(p.covers(p.numbers[identity], a, b) for p in held)
+
+    full = history.series({"": identity}).get("", {})
+    fresh: dict[str, list[dpp.WindowCost]] = {}
+    shown: dict[str, dpp.PerPct | None] = {}
+    key = dpp.identity_key(identity)
+    for label, duration in WINDOW_S.items():
+        resets = [w.resets_at for w in history.windows(identity, label, lo)]
+        hourly = history.long_series(identity, label, lo)
+        fresh[label] = dpp.window_costs(spend, full.get(label, ()), hourly, resets,
+                                        duration, lo, now, covered)
+        windows = dict(store.get(key, {}).get(label, {}))
+        windows.update((w.resets_at, w) for w in fresh[label])
+        shown[label] = dpp.summarize(windows.values(), label, now)
+    return fresh, shown
 
 
 # -- rollups -------------------------------------------------------------------
@@ -229,14 +310,16 @@ class ModelLine:
 class AccountLine:
     number: str
     cost: float  # attributed spend over the range
-    per_5h: Estimate | None
-    per_7d: Estimate | None
+    per_5h: dpp.PerPct | None
+    per_7d: dpp.PerPct | None
 
 
 @dataclass(frozen=True)
 class CostReport:
     now: float
     days: tuple[tuple[float, dict[str, float]], ...]  # (local midnight, {model: usd}), oldest first
+    hours: tuple[tuple[float, dict[str, float]], ...]  # last 24 (hour start, {model: usd})
+    hour_duty: tuple[str | None, ...]  # who was on duty most of each of those hours
     today: float
     week: float  # last 7 x 24h
     month: float  # the whole range
@@ -247,10 +330,6 @@ class CostReport:
     built_at: float
     took_s: float
 
-    @property
-    def top_model(self) -> ModelLine | None:
-        return self.models[0] if self.models else None
-
 
 def _change(now: float, prev: float) -> float | None:
     return (now - prev) / prev if prev > 0 else None
@@ -260,13 +339,18 @@ def build_report(
     cache: costs.CostCache,
     sources: Sequence[costs.Source],
     spans: Sequence[Span],
-    windows_for: Callable[[str, str, float], Iterable[_Window]],
     now: float,
+    per_pct: dict[str, dict[str, dpp.PerPct | None]] | None = None,
 ) -> CostReport:
+    """The view's numbers; ``per_pct`` maps account numbers to their
+    ``{"5h": ..., "7d": ...}`` figures."""
+    per_pct = per_pct or {}
     lo = costs.range_start(now)
     rows = [r for r in cache.rows if lo <= r.slot <= now]
     midnights = [costs.day_start(now, back) for back in range(costs.RANGE_DAYS - 1, -1, -1)]
     days: list[dict[str, float]] = [{} for _ in midnights]
+    first_hour = (now // HOUR_S - (RECENT_HOURS - 1)) * HOUR_S
+    hours: list[dict[str, float]] = [{} for _ in range(RECENT_HOURS)]
     per_model: dict[str, list[float]] = {}  # name -> [cost, in, out, cw, cr, last7, prev7]
     week_ago, fortnight_ago = now - WEEK_S, now - 2 * WEEK_S
     today_start = midnights[-1]
@@ -290,6 +374,9 @@ def build_report(
             prev_week += r.cost
         if r.slot >= today_start:
             today += r.cost
+        if r.slot >= first_hour:
+            h = hours[int((r.slot - first_hour) // HOUR_S)]
+            h[name] = h.get(name, 0.0) + r.cost
     month = sum(m[0] for m in per_model.values())
     models = tuple(sorted(
         (ModelLine(name, m[0], m[0] / month if month else 0.0, int(m[1]), int(m[2]),
@@ -299,23 +386,18 @@ def build_report(
     ))
     spend = attribute(rows, sources, spans)
     accounts = []
-    for number, series in spend.items():
-        estimates = {}
-        for label, duration in WINDOW_S.items():
-            try:
-                estimates[label] = estimate_per_pct(
-                    series, windows_for(number, label, lo), duration, lo, now
-                )
-            except Exception as e:  # history is best effort
-                _logger.warning(f"costs: no {label} windows for account {number}: {e!r}")
-                estimates[label] = None
-        accounts.append(AccountLine(number, sum(c for _, c in series),
-                                    estimates["5h"], estimates["7d"]))
-    accounts.sort(key=lambda a: -a.cost)
+    for number in {*spend, *per_pct}:
+        figures = per_pct.get(number, {})
+        accounts.append(AccountLine(number, sum(c for _, c in spend.get(number, ())),
+                                    figures.get("5h"), figures.get("7d")))
+    accounts.sort(key=lambda a: (-a.cost, a.number))
     attributed = sum(a.cost for a in accounts)
+    hour_starts = [first_hour + i * HOUR_S for i in range(RECENT_HOURS)]
     return CostReport(
         now=now,
         days=tuple(zip(midnights, days)),
+        hours=tuple(zip(hour_starts, hours)),
+        hour_duty=tuple(majority(spans, h, h + HOUR_S) for h in hour_starts),
         today=today,
         week=week,
         month=month,
@@ -343,7 +425,7 @@ class CostSource:
 
     ``identities`` maps account numbers to the (email, org uuid) the usage
     history is keyed by; ``history`` is a ``UsageHistory`` (or anything with
-    its ``windows`` method).
+    its ``windows``, ``long_series`` and ``series`` methods).
     """
 
     def __init__(
@@ -356,6 +438,8 @@ class CostSource:
         find_runner: Callable[[], list[str] | None] = costs.find_runner,
         run: Callable[[list[str], Path], dict] = costs.run_ccusage,
         clock: Callable[[], float] = time.time,
+        other_profiles: Callable[[], Iterable[Path]] | None = None,
+        store_path: Path | None = None,
     ) -> None:
         self.backup_dir = backup_dir
         self.history = history
@@ -364,24 +448,46 @@ class CostSource:
         self.find_runner = find_runner
         self.run = run
         self.clock = clock
+        self.other_profiles = other_profiles or (lambda: other_profile_dirs(backup_dir))
+        self.store_path = store_path or get_shared_cache_dir() / dpp.STORE_FILENAME
 
     def _sources(self) -> list[costs.Source]:
         homes = [*self.config_homes, *costs.feed_config_dirs(self.backup_dir)]
         return costs.transcript_sources(self.backup_dir, homes)
 
+    def _per_pct(
+        self, mine: ProfileSpend, identities: dict[str, Identity], now: float
+    ) -> dict[str, dict[str, dpp.PerPct | None]]:
+        """Every account's figures, its spend summed over the profiles that
+        hold it; finished windows go into the shared store."""
+        if self.history is None:
+            return {}
+        others = [p for p in map(lambda d: load_profile_spend(d, now), self.other_profiles())
+                  if p is not None]
+        store = dpp.load_store(self.store_path)
+        changed = False
+        out: dict[str, dict[str, dpp.PerPct | None]] = {}
+        for number, identity in identities.items():
+            held = [mine, *(p for p in others if identity in p.numbers)]
+            try:
+                fresh, out[number] = account_per_pct(identity, held, self.history, store, now)
+            except Exception as e:  # history is best effort
+                _logger.warning(f"costs: no $ per 1% for account {number}: {e!r}")
+                continue
+            for label, windows in fresh.items():
+                changed |= dpp.merge(store, dpp.identity_key(identity), label, windows, now)
+        if changed:
+            dpp.save_store(self.store_path, store)
+        return out
+
     def _report(self, cache: costs.CostCache, sources, identities, now: float) -> CostReport:
         lo = costs.range_start(now)
         spans = duty_spans(switch_history(self.backup_dir), self.active(), lo, now)
+        numbers = {identity: number for number, identity in identities.items()}
+        mine = profile_spend(cache, sources, spans, numbers, now)
+        return build_report(cache, sources, spans, now, self._per_pct(mine, identities, now))
 
-        def windows_for(number: str, label: str, since: float):
-            identity = identities.get(number)
-            if identity is None or self.history is None:
-                return []
-            return self.history.windows(identity, label, since)
-
-        return build_report(cache, sources, spans, windows_for, now)
-
-    def cached(self, identities: dict[str, tuple[str, str]]) -> CostResult:
+    def cached(self, identities: dict[str, Identity]) -> CostResult:
         """The last priced report, without running ccusage (None if never)."""
         cache = costs.load_cache(self.backup_dir)
         if cache is None:
@@ -389,7 +495,7 @@ class CostSource:
         now = self.clock()
         return CostResult(self._report(cache, self._sources(), identities, now))
 
-    def refresh(self, identities: dict[str, tuple[str, str]], *, force: bool = False) -> CostResult:
+    def refresh(self, identities: dict[str, Identity], *, force: bool = False) -> CostResult:
         """Reprice what changed (everything ``force``-d from today on) and save."""
         now = self.clock()
         sources = self._sources()

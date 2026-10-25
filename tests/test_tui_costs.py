@@ -17,9 +17,9 @@ from claude_rotater.cost_report import (
     AccountLine,
     CostReport,
     CostResult,
-    Estimate,
     ModelLine,
 )
+from claude_rotater.dollar_per_pct import PerPct
 from claude_rotater.settings import set_setting
 from claude_rotater.tui import costs as view
 from claude_rotater.tui.main import MainScreen
@@ -47,15 +47,20 @@ def report(now: float | None = None, *, n_models: int = 3, n_accounts: int = 2) 
         (costs.day_start(now, back), {m.name: (back % 5 + 1) * 3.0 / (j + 1) for j, m in enumerate(models)})
         for back in range(costs.RANGE_DAYS - 1, -1, -1)
     )
+    first_hour = (now // 3600 - 23) * 3600
+    hours = tuple((first_hour + h * 3600, {m.name: (h % 6) * 1.5 / (j + 1) for j, m in enumerate(models)})
+                  for h in range(24))
+    duty = tuple("1" if h < 16 else "2" for h in range(24))
     accounts = tuple(
         AccountLine(str(i + 1), 80.0 / (i + 1),
-                    Estimate(3.1 / (i + 1), 0.2, 6) if i == 0 else Estimate(1.8, None, 1),
-                    Estimate(9.4, 0.35, 3) if i == 0 else None)
+                    PerPct(3.1, True, -0.12, False, (3.4, 3.3, 3.2, 3.1)) if i == 0
+                    else PerPct(1.8, False, None, True, ()),
+                    PerPct(9.4, True, 0.03, True, (9.3, 9.5)) if i == 0 else None)
         for i in range(n_accounts)
     )
-    return CostReport(now=now, days=days, today=12.3, week=245.0, month=1020.0, week_change=0.18,
-                      models=models, accounts=accounts, unattributed=0.0, built_at=now - 120,
-                      took_s=1.2)
+    return CostReport(now=now, days=days, hours=hours, hour_duty=duty, today=12.3, week=245.0,
+                      month=1020.0, week_change=0.18, models=models, accounts=accounts,
+                      unattributed=0.0, built_at=now - 120, took_s=1.2)
 
 
 class FakeCosts:
@@ -104,10 +109,43 @@ def test_tokens(n, text):
     assert view.tokens(n) == text
 
 
-def test_estimates_are_marked_approximate_with_their_spread():
-    assert view.estimate_text(Estimate(3.104, 0.2, 5)) == "~$3.10 ±20%"
-    assert view.estimate_text(Estimate(3.1, None, 1)) == "~$3.10 ±?"
-    assert view.estimate_text(None) == "–"
+def test_per_pct_figures_are_approximate_and_say_when_unsure():
+    assert view.per_pct_value(PerPct(3.104, True, None, True, ())) == "~$3.10"
+    assert view.per_pct_value(PerPct(3.1, False, None, True, ())) == "~$3.10?"
+    assert view.per_pct_value(None) == "–"
+
+
+def test_per_pct_trend_is_per_four_weeks_and_steady_within_the_noise():
+    assert view.per_pct_trend(PerPct(3.1, True, -0.123, False, ())) == "↓12%/4w"
+    assert view.per_pct_trend(PerPct(3.1, True, 0.08, False, ())) == "↑8%/4w"
+    assert view.per_pct_trend(PerPct(3.1, True, 0.3, True, ())) == "steady"
+    assert view.per_pct_trend(PerPct(3.1, True, None, True, ())) == ""
+    assert view.per_pct_trend(None) == ""
+
+
+def test_spark_spans_lowest_to_highest():
+    assert view.spark([1.0, 2.0, 3.0]) == "▁▅█"
+    assert view.spark([2.0, 2.0]) == "▄▄"
+
+
+@pytest.mark.parametrize("peak,step", [(7, 2), (140, 50), (3400, 1000), (1415, 500),
+                                       (99, 20), (0.3, 0.1), (25, 10), (4, 1)])
+def test_nice_step_puts_one_to_four_lines_under_the_peak(peak, step):
+    assert view.nice_step(peak) == pytest.approx(step)
+    assert 1 <= peak // view.nice_step(peak) <= view.MAX_GRID_LINES
+
+
+@pytest.mark.parametrize("usd,text", [(0.5, "$0.5"), (20, "$20"), (500, "$500"), (1000, "$1k"),
+                                      (1500, "$1.5k"), (20000, "$20k")])
+def test_short_money(usd, text):
+    assert view.short_money(usd) == text
+
+
+def test_grid_rows_sit_where_their_value_reaches_and_never_share_a_row():
+    assert view.grid_rows(3400, 10) == {2: "$1k", 5: "$2k", 8: "$3k"}
+    assert view.grid_rows(140, 7) == {2: "$50", 4: "$100"}
+    assert view.grid_rows(100, 2) == {1: "$100"}  # a short chart gets one line
+    assert view.grid_rows(0, 5) == {}
 
 
 def test_trend_words():
@@ -120,7 +158,7 @@ def test_trend_words():
 
 def test_summary_line_is_one_sentence_of_numbers():
     text = view.summary_text(report(), Palette.DARK).plain
-    assert text == "today $12.3 · 7d $245 · 30d $1,020   ↑ 18% vs last week · Opus 4.7 60%"
+    assert text == "today $12.3 · 7d $245 · 30d $1,020   ↑ 18% vs last week"
 
 
 # -- layout -------------------------------------------------------------------------
@@ -142,9 +180,9 @@ def test_the_freshness_note_goes_first_when_the_summary_is_too_wide():
     wide = view.costs_lines(rep, width=118, height=36, names={}, palette=Palette.DARK,
                             status="updated 2m ago")
     assert wide[0].plain.endswith("updated 2m ago")
-    narrow = view.costs_lines(rep, width=78, height=36, names={}, palette=Palette.DARK,
+    narrow = view.costs_lines(rep, width=60, height=36, names={}, palette=Palette.DARK,
                               status="updated 2m ago")
-    assert "updated" not in narrow[0].plain and narrow[0].cell_len <= 78
+    assert "updated" not in narrow[0].plain and narrow[0].cell_len <= 60
 
 
 def test_the_note_and_gaps_go_before_the_chart_shrinks():
@@ -152,10 +190,11 @@ def test_the_note_and_gaps_go_before_the_chart_shrinks():
     roomy = view.costs_lines(rep, width=118, height=36, names={}, palette=Palette.DARK)
     assert roomy[-1].plain.startswith("~ estimate")
     assert any(line.plain == "" for line in roomy)
-    tight = view.costs_lines(rep, width=78, height=12, names={}, palette=Palette.DARK)
+    tight = view.costs_lines(rep, width=78, height=13, names={}, palette=Palette.DARK)
     assert not tight[-1].plain.startswith("~ estimate")
+    assert "hourly" in "\n".join(line.plain for line in tight)
     tiny = view.costs_lines(rep, width=78, height=8, names={}, palette=Palette.DARK)
-    assert "daily cost" not in "\n".join(line.plain for line in tiny)  # chart gone first
+    assert "daily" not in "\n".join(line.plain for line in tiny)  # chart gone first
 
 
 def test_many_models_fold_into_one_other_row():
@@ -166,27 +205,82 @@ def test_many_models_fold_into_one_other_row():
 
 def test_chart_bars_follow_the_daily_totals_and_model_colors():
     rep = report(n_models=2)
-    lines = view.chart_lines(rep, 98, 6, Palette.DARK)
+    lines = view.daily_chart(rep, 98, 6, Palette.DARK)
     assert len(lines) == 7 and lines[-1].plain.rstrip().endswith("today")
-    assert lines[0].plain.lstrip().startswith("$")  # the peak labels the top row
     colors = {span.style for line in lines[:-1] for span in line.spans}
     assert Palette.DARK.accent in colors and Palette.DARK.sev_ok in colors
-    # the tallest day reaches the top row; a day of zero draws nothing
+    # the tallest day reaches the top row; a day of zero draws nothing, not even a gridline
     flat = report(n_models=1)
     flat = CostReport(**{**flat.__dict__, "days": tuple((d, {}) for d, _ in flat.days)})
-    empty = view.chart_lines(flat, 98, 4, Palette.DARK)
-    assert all(set(line.plain[6:]) <= {" "} for line in empty[:-1])
+    empty = view.daily_chart(flat, 98, 4, Palette.DARK)
+    assert all(set(line.plain[3:]) <= {" "} for line in empty[:-1])
+
+
+def test_gridlines_are_dashed_dim_and_labelled_in_round_dollars():
+    rep = report(n_models=1)  # days peak at $15: lines at $5, $10, $15
+    lines = view.daily_chart(rep, 98, 9, Palette.DARK)
+    labelled = [line.plain for line in lines[:-1] if line.plain.strip().startswith("$")]
+    assert [p.split()[0] for p in labelled] == ["$15", "$10", "$5"]
+    assert all("╌" in p for p in labelled)
+    dashes = [span.style for line in lines for span in line.spans
+              if "╌" in line.plain[span.start:span.end]]
+    assert dashes and all(style.startswith("dim") for style in dashes)
+
+
+def test_hourly_chart_shows_the_last_day_and_who_was_on_duty():
+    rep = report(n_models=2)
+    lines = view.hourly_chart(rep, 60, 5, Palette.DARK)
+    assert lines[-1].plain.rstrip().endswith("now") and "hourly" in lines[-1].plain
+    duty = lines[-2].plain
+    assert duty.lstrip().startswith("on #1") and duty.count("#2") == 1  # marks where it changes
+    twelve = view.hourly_chart(rep, 40, 5, Palette.DARK, hours=12)
+    first = time.strftime("%H:00", time.localtime(rep.hours[12][0]))
+    assert first in twelve[-1].plain
+
+
+def test_duty_marks_never_run_into_each_other_or_off_the_end():
+    row = view._duty_row(["1", "2", "3", "3", "3", "3", "3", "4"], 1, 3, Palette.DARK).plain
+    assert row == "on #1 #3   "  # #2 had no room; #3 waits for some; #4 would run off the end
+
+
+@pytest.mark.parametrize("width", [118, 78, 58, 40])
+def test_charts_sit_side_by_side_when_wide_and_stack_when_narrow(width):
+    rep = report(n_models=2)
+    lines = view.chart_lines(rep, width, 4, Palette.DARK)
+    text = "\n".join(line.plain for line in lines)
+    assert all(line.cell_len <= width for line in lines)
+    assert len(lines) == view.chart_rows(rep, width, 4, hourly_only=False)
+    if width >= view.SIDE_BY_SIDE_W:
+        assert "daily" in lines[-1].plain and "hourly" in lines[-1].plain  # axes level
+    else:
+        assert text.index("daily") < text.index("hourly")
 
 
 def test_account_names_come_from_the_table_and_unknown_numbers_show_as_such():
     lines = view.account_lines(report(), 118, 5, {"1": "me@x.com"}, Palette.DARK)
-    assert lines[1].plain.startswith("me@x.com") and "~$3.10 ±20%" in lines[1].plain
-    assert lines[2].plain.startswith("#2") and "–" in lines[2].plain
+    assert lines[1].plain.startswith("me@x.com")
+    assert "~$3.10  █▆▃▁ ↓12%/4w" in lines[1].plain
+    assert "~$9.40  steady" in lines[1].plain  # two windows make no sparkline
+    assert lines[2].plain.startswith("#2") and "~$1.80?" in lines[2].plain and "–" in lines[2].plain
+
+
+def test_an_unsure_figure_is_saffron_and_a_falling_one_warns():
+    lines = view.account_lines(report(), 118, 5, {}, Palette.DARK)
+    styles = {lines[2].plain[s.start:s.end].strip(): s.style for s in lines[2].spans}
+    assert styles["~$1.80?"] == Palette.DARK.sev_warn
+    falling = {lines[1].plain[s.start:s.end].strip(): s.style for s in lines[1].spans}
+    assert falling["↓12%/4w"] == Palette.DARK.sev_warn
+
+
+def test_narrow_account_table_drops_the_sparklines_first():
+    lines = view.account_lines(report(), 64, 5, {"1": "me@x.com"}, Palette.DARK)
+    assert "█" not in lines[1].plain and "↓12%/4w" in lines[1].plain
+    assert all(line.cell_len <= 64 for line in lines)
 
 
 def test_plain_page_has_every_part():
     text = view.plain_page(report(), {"1": "me@x.com"})
-    for part in ("today $12.3", "daily cost", "model", "me@x.com", "~ estimate"):
+    for part in ("today $12.3", "daily", "hourly", "model", "me@x.com", "$/1% 5h", "~ estimate"):
         assert part in text
 
 
@@ -209,8 +303,8 @@ class TestCostsPage:
             text = page(app)
             lines = text.splitlines()
             assert lines[0].startswith("today $12.3 · 7d $245 · 30d $1,020")
-            assert "me@x.com" in text and "~$3.10 ±20%" in text
-            assert "daily cost" in text and "Opus 4.7" in text
+            assert "me@x.com" in text and "~$3.10" in text
+            assert "daily" in text and "hourly" in text and "Opus 4.7" in text
             costs_view = app.screen.query_one("#costs")
             assert costs_view.render().no_wrap  # a line too long is cut, never wrapped
             screen = ["".join(seg.text for seg in strip)
