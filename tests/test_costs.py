@@ -328,6 +328,36 @@ class TestRefresh:
         assert cache.boundary == costs.day_start(now)
         assert all(r.slot >= costs.range_start(now) for r in cache.rows)
 
+    def test_slots_leaving_the_range_fold_into_the_archive_and_survive_a_reload(
+            self, tmp_path, home, now):
+        write(home / "projects" / "p" / "a.jsonl", entry(now - 3 * 86400, "d3", out=2000),
+              entry(now - 600, "t1"))
+        first = costs.refresh(None, source(home), ["x"], now, run=fake_ccusage())
+        assert first.archive == {}
+        later = now + costs.RANGE_DAYS * 86400  # d3 is out of range then
+        second = costs.refresh(first, source(home), ["x"], later, run=fake_ccusage())
+        d3 = costs.day_start(now - 3 * 86400)
+        assert second.archive[d3] == {"claude-opus-4-7": 2.0}
+        assert all(r.slot >= costs.range_start(later) for r in second.rows)
+        costs.save_cache(tmp_path, second)
+        assert costs.load_cache(tmp_path).archive == second.archive
+        third = costs.refresh(second, source(home), ["x"], later + 86400, run=fake_ccusage())
+        assert third.archive[d3] == {"claude-opus-4-7": 2.0}  # folded once, not again
+
+    def test_the_archive_keeps_its_newest_days(self, now):
+        rows = [costs.Row("s0", int(costs.day_start(now, d)), "m", 1.0, 0, 0, 0, 0)
+                for d in range(costs.ARCHIVE_DAYS + 5)]
+        archive = costs.fold({}, rows)
+        assert len(archive) == costs.ARCHIVE_DAYS
+        assert min(archive) == costs.day_start(now, costs.ARCHIVE_DAYS - 1)
+
+    def test_a_garbled_archive_reads_as_empty(self, now):
+        raw = make_cache([], now).to_json()
+        raw["archive"] = {"x": {"m": 1}, "12": "no", "13": {"m": "1", "n": 2.0}}
+        assert costs.CostCache.from_json(raw).archive == {13.0: {"n": 2.0}}
+        del raw["archive"]  # a cache written before the archive existed
+        assert costs.CostCache.from_json(raw).archive == {}
+
     def test_reprices_only_from_the_boundary_and_matches_a_full_build(self, tmp_path, home, now):
         f = write(home / "projects" / "p" / "a.jsonl", entry(now - 3 * 86400, "d3"), entry(now - 600, "t1"))
         calls: list = []

@@ -17,7 +17,8 @@ module (a test guards that). Node is not required: without an installed
 view says how to get one.
 
 The cache (``<data>/cache/costs.json``) keeps the priced slots of the last
-:data:`RANGE_DAYS` days plus, for every transcript written since the start
+:data:`RANGE_DAYS` days (older ones folded into spend per day and model,
+for the costs view's whole-history chart) plus, for every transcript written since the start
 of the day it was built, the byte offset where that day begins. Transcripts
 are append-only, so a refresh rereads only the lines from that offset on and
 reprices only the slots from that day on; a reopen with no transcript
@@ -50,6 +51,7 @@ RUNNER_TIMEOUT_S = 300.0  # a first npx/bunx run downloads the package
 
 SLOT_S = 900  # 15 minutes: fine enough for switches, aligned to every tz offset
 RANGE_DAYS = 30  # today and the 29 days before it
+ARCHIVE_DAYS = 800  # days kept folded (per day and model) once they leave the range
 CACHE_FILENAME = "costs.json"
 CACHE_SCHEMA = 1
 
@@ -422,6 +424,9 @@ class CostCache:
     offsets: Offsets
     built_at: float
     took_s: float = 0.0  # the last refresh's wall time
+    # Spend per local day and model from before the priced range: the
+    # slots that aged out, folded so the costs view can show all of it.
+    archive: dict[float, dict[str, float]] = field(default_factory=dict)
 
     def to_json(self) -> dict:
         return {
@@ -432,6 +437,8 @@ class CostCache:
             "tookS": round(self.took_s, 3),
             "offsets": self.offsets,
             "rows": [row.to_json() for row in self.rows],
+            "archive": {str(int(day)): {m: round(usd, 4) for m, usd in models.items()}
+                        for day, models in sorted(self.archive.items())},
         }
 
     @classmethod
@@ -453,7 +460,31 @@ class CostCache:
             },
             built_at=float(built),
             took_s=float(raw.get("tookS") or 0.0) if _num(raw.get("tookS")) else 0.0,
+            archive=_archive_from_json(raw.get("archive")),
         )
+
+
+def _archive_from_json(raw: object) -> dict[float, dict[str, float]]:
+    out: dict[float, dict[str, float]] = {}
+    for day, models in (raw.items() if isinstance(raw, dict) else ()):
+        if not (isinstance(day, str) and day.isdigit() and isinstance(models, dict)):
+            continue
+        kept = {m: float(v) for m, v in models.items() if isinstance(m, str) and _num(v)}
+        if kept:
+            out[float(day)] = kept
+    return out
+
+
+def fold(archive: dict[float, dict[str, float]], rows: Iterable[Row]) -> dict[float, dict[str, float]]:
+    """``archive`` plus ``rows`` summed per local day and model, the oldest
+    days past :data:`ARCHIVE_DAYS` dropped."""
+    out = {day: dict(models) for day, models in archive.items()}
+    for r in rows:
+        day = out.setdefault(day_start(r.slot), {})
+        day[r.model] = day.get(r.model, 0.0) + r.cost
+    for day in sorted(out)[:-ARCHIVE_DAYS]:
+        del out[day]
+    return out
 
 
 def cache_path(backup_dir: Path) -> Path:
@@ -512,11 +543,13 @@ def refresh(
 
     Slots before the cache's boundary are kept as priced; the ones after are
     rebuilt from the transcripts' stored offsets on. Slots older than
-    :data:`RANGE_DAYS` days are dropped, which bounds the cache.
+    :data:`RANGE_DAYS` days are folded into the per-day archive, which
+    bounds the cache.
     """
     started = time.monotonic()
     lo = range_start(now)
     paths = [s.path for s in sources]
+    archive = fold(cache.archive, (r for r in cache.rows if r.slot < lo)) if cache else {}
     if cache is None or cache.sources != paths or cache.boundary < lo:
         since, offsets, kept = lo, {}, []
     else:
@@ -536,4 +569,5 @@ def refresh(
         offsets=sliced.offsets,
         built_at=now,
         took_s=time.monotonic() - started,
+        archive=archive,
     )
