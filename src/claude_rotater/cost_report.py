@@ -10,9 +10,9 @@ Three things happen here, all pure functions of their inputs:
   approximation: a running chat may keep the old login for a while after a
   switch, and usage on other machines is never in local transcripts.
 - **$ per 1%.** An account's spend over every profile that holds it (one
-  account may sit in two profiles: their transcripts are separate), window
-  by window against its peak reading; :mod:`claude_rotater.dollar_per_pct`
-  grades the windows and keeps the finished ones for the trend.
+  account may sit in two profiles: their transcripts are separate), climb
+  by climb of its readings; :mod:`claude_rotater.dollar_per_pct` cuts the
+  windows into samples, grades them and keeps them for the trend.
 - **Rollups.** Today / 7 days / 30 days, the daily series by model (and
   every older day the cache folded), the last week hour by hour with who
   was on duty, the per-model table with a
@@ -248,9 +248,10 @@ def account_per_pct(
     history,
     store: dpp.Store,
     now: float,
-) -> tuple[dict[str, list[dpp.WindowCost]], dict[str, dpp.PerPct | None]]:
-    """One account's finished windows (fresh from its spend over every
-    profile in ``held``) and the figures from those plus the stored ones."""
+) -> tuple[dict[str, tuple[set[float], list[dpp.Sample]]], dict[str, dpp.PerPct | None]]:
+    """One account's samples (fresh from its spend over every profile in
+    ``held``, with the windows they were read from) and the figures from
+    those plus the stored ones."""
     lo = max(p.lo for p in held)
     merged: dict[int, float] = {}
     for p in held:
@@ -262,17 +263,17 @@ def account_per_pct(
         return all(p.covers(p.numbers[identity], a, b) for p in held)
 
     full = history.series({"": identity}).get("", {})
-    fresh: dict[str, list[dpp.WindowCost]] = {}
+    fresh: dict[str, tuple[set[float], list[dpp.Sample]]] = {}
     shown: dict[str, dpp.PerPct | None] = {}
     key = dpp.identity_key(identity)
     for label, duration in WINDOW_S.items():
         resets = [w.resets_at for w in history.windows(identity, label, lo)]
         hourly = history.long_series(identity, label, lo)
-        fresh[label] = dpp.window_costs(spend, full.get(label, ()), hourly, resets,
-                                        duration, lo, now, covered)
-        windows = dict(store.get(key, {}).get(label, {}))
-        windows.update((w.resets_at, w) for w in fresh[label])
-        shown[label] = dpp.summarize(windows.values(), label, now)
+        read, found = dpp.samples(spend, full.get(label, ()), hourly, resets, duration, lo,
+                                  now, covered, dpp.SEGMENT_PCT[label])
+        fresh[label] = (read, found)
+        stored = [s for s in store.get(key, {}).get(label, ()) if s.resets_at not in read]
+        shown[label] = dpp.summarize([*stored, *found], label, now)
     return fresh, shown
 
 
@@ -468,7 +469,7 @@ class CostSource:
         self, mine: ProfileSpend, identities: dict[str, Identity], now: float
     ) -> dict[str, dict[str, dpp.PerPct | None]]:
         """Every account's figures, its spend summed over the profiles that
-        hold it; finished windows go into the shared store."""
+        hold it; their samples go into the shared store."""
         if self.history is None:
             return {}
         others = [p for p in map(lambda d: load_profile_spend(d, now), self.other_profiles())
@@ -483,8 +484,8 @@ class CostSource:
             except Exception as e:  # history is best effort
                 _logger.warning(f"costs: no $ per 1% for account {number}: {e!r}")
                 continue
-            for label, windows in fresh.items():
-                changed |= dpp.merge(store, dpp.identity_key(identity), label, windows, now)
+            for label, (read, found) in fresh.items():
+                changed |= dpp.merge(store, dpp.identity_key(identity), label, read, found, now)
         if changed:
             dpp.save_store(self.store_path, store)
         return out

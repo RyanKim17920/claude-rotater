@@ -736,7 +736,8 @@ class TestPerPctAcrossProfiles:
         # 4h to the peak at $10/h in each profile, over 40%
         assert acc.per_5h.dollars == pytest.approx(2 * 40.0 / 40)
         assert acc.cost == pytest.approx(50.0)  # the cost column stays this profile's own
-        assert list(dpp.load_store(store)["a@x|o"]["5h"].values())[0].usd == pytest.approx(80.0)
+        kept = dpp.load_store(store)["a@x|o"]["5h"]  # 10% climbs of 1h: $20 each over both
+        assert sum(s.usd for s in kept) == pytest.approx(80.0) and len(kept) == 4
 
     def test_a_window_the_other_profile_has_not_priced_yet_waits(self, tmp_path, now):
         source, store = self.setup(tmp_path, now, other_built_at=now - 4 * HOUR)
