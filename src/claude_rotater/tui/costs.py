@@ -21,6 +21,7 @@ reprices what changed since (``r`` forces today's slots again).
 from __future__ import annotations
 
 import math
+import statistics
 import time
 from collections import Counter
 from collections.abc import Sequence
@@ -58,6 +59,7 @@ _BLOCKS = "▁▂▃▄▅▆▇"
 _GRID = "╌"
 _FLAT = "┄"  # a steady trendline
 _SLOPE = "·"  # a moving one
+_SPREAD = "│"  # a column's samples, lower to upper quartile
 
 
 # -- formatting ------------------------------------------------------------------
@@ -137,23 +139,27 @@ def per_pct_value(p: PerPct | None) -> str:
 def verdict(p: PerPct | None, palette: Palette) -> tuple[str, str]:
     """``(words, style)`` for one account's $ per 1% trend: ``steady``,
     ``↓12%/4w limit shrinking`` (amber, red past :data:`SHRINK_ALARM`) or
-    ``↑8%/4w more room``; a provisional fit says so and is dimmed."""
+    ``↑8%/4w more room``. A provisional fit gives its change over the days
+    it saw instead (``~ ↑20% in 7 days, provisional``), dimmed: a few
+    days stretched to 4 weeks overstate it."""
     f = p.fit if p is not None else None
     if f is None:
-        return ("one window so far" if p is not None and p.points else "no windows yet",
+        return ("one day so far" if p is not None and p.points else "no samples yet",
                 palette.muted)
-    if f.steady:
-        words, color = "steady", palette.foreground
-    elif f.change < 0:
-        words = f"↓{abs(f.change) * 100:.0f}%/4w limit shrinking"
-        color = palette.sev_crit if f.change <= SHRINK_ALARM else palette.sev_warn
-    else:
-        words, color = f"↑{f.change * 100:.0f}%/4w more room", palette.sev_ok
-    if not f.provisional:
-        return words, color
     days = f.span_s / DAY_S
     span = "under a day" if days < 1 else f"{days:.0f} day{'s' if round(days) != 1 else ''}"
-    return f"~ {words}, provisional: {span} of data", f"dim {color}"
+    change, per = (f.span_change, f" in {span}") if f.provisional else (f.change, "/4w")
+    if f.steady:
+        words, color = "steady", palette.foreground
+    elif change < 0:
+        words = f"↓{abs(change) * 100:.0f}%{per} limit shrinking"
+        color = palette.sev_crit if f.change <= SHRINK_ALARM else palette.sev_warn
+    else:
+        words, color = f"↑{change * 100:.0f}%{per} more room", palette.sev_ok
+    if not f.provisional:
+        return words, color
+    tail = "provisional" if not f.steady else f"provisional: {span} of data"
+    return f"~ {words}, {tail}", f"dim {color}"
 
 
 def ago(seconds: float) -> str:
@@ -413,21 +419,45 @@ def trend_accounts(report: CostReport, label: str):
     return out
 
 
+def _columns(points, col_of) -> dict[int, tuple[float, float, float, bool]]:
+    """Samples squeezed to the chart: per column ``(p25, median, p75, sure)``,
+    sure when most of its samples are."""
+    by_col: dict[int, list[tuple[float, bool]]] = {}
+    for t, v, sure in points:
+        by_col.setdefault(col_of(t), []).append((v, sure))
+    out = {}
+    for c, group in by_col.items():
+        values = sorted(v for v, _ in group)
+        q = statistics.quantiles(values, n=4, method="inclusive") if len(values) > 2 else None
+        out[c] = (q[0] if q else values[0], statistics.median(values),
+                  q[2] if q else values[-1], 2 * sum(sure for _, sure in group) >= len(group))
+    return out
+
+
 def trend_chart(report: CostReport, label: str, width: int, height: int,
                 names: dict[str, str], palette: Palette) -> list[Text]:
-    """Each account's $ per 1% of ``label`` per finished window (● sure,
-    ○ partly used elsewhere) with its trendline, flat when steady, then one
-    legend line per account with its figure and verdict."""
+    """Each account's $ per 1% of ``label`` over time, one point per column
+    (the median of its samples: ● sure, ○ mostly used elsewhere) over a
+    faint ``│`` from its lower to upper quartile, with the trendline, flat
+    when steady; then one legend line per account with its figure and
+    verdict."""
     shown = trend_accounts(report, label)
     if not shown:
-        return [Text(f"no finished {label} window with ≥10% used and priced locally yet",
+        return [Text(f"no {label} climb priced locally yet",
                      style=palette.muted, no_wrap=True, overflow="ellipsis")]
     colors = account_colors(report, palette)
     t_hi = report.now
     t_lo = min(t for _, p in shown for t, _, _ in p.points)
     if t_hi - t_lo < DAY_S:
         t_lo = t_hi - DAY_S
-    values = [v for _, p in shown for _, v, _ in p.points]
+    label_w = 6  # "$1.5k " at most; fixed so the columns are known before the scale
+    plot_w = max(4, width - label_w)
+
+    def col_of(t: float) -> int:
+        return max(0, min(plot_w - 1, round((t - t_lo) / (t_hi - t_lo) * (plot_w - 1))))
+
+    columns = {acc.number: _columns(p.points, col_of) for acc, p in shown}
+    values = [v for cols in columns.values() for q1, _, q3, _ in cols.values() for v in (q1, q3)]
     values += [p.fit.at(t) for _, p in shown if p.fit for t in (t_lo, t_hi)]
     lo_v, hi_v = min(values), max(values)
     step = nice_step(max(hi_v - lo_v, hi_v * 0.2), min(MAX_GRID_LINES, max(1, height // 2)))
@@ -439,8 +469,9 @@ def trend_chart(report: CostReport, label: str, width: int, height: int,
         v = y_lo + k * step
         labels[round((v - y_lo) / (y_hi - y_lo) * (height - 1))] = short_money(round(v, 6))
         k += 1
-    label_w = max(len(v) for v in labels.values()) + 1
-    plot_w = max(4, width - label_w)
+    if (wider := max(len(v) for v in labels.values()) + 1) > label_w:
+        label_w, plot_w = wider, max(4, width - wider)
+        columns = {acc.number: _columns(p.points, col_of) for acc, p in shown}
     grid_style = f"dim {palette.muted}"
     cells = [[(_GRID if r in labels else " ", grid_style) for _ in range(plot_w)]
              for r in range(height)]
@@ -448,22 +479,23 @@ def trend_chart(report: CostReport, label: str, width: int, height: int,
     def row_of(v: float) -> int:
         return max(0, min(height - 1, round((v - y_lo) / (y_hi - y_lo) * (height - 1))))
 
-    def col_of(t: float) -> int:
-        return max(0, min(plot_w - 1, round((t - t_lo) / (t_hi - t_lo) * (plot_w - 1))))
-
+    for acc, _ in shown:
+        for c, (q1, _, q3, _) in columns[acc.number].items():
+            for r in range(row_of(q1), row_of(q3) + 1):
+                cells[r][c] = (_SPREAD, f"dim {colors[acc.number]}")
     for acc, p in shown:
         if p.fit is None:
             continue
         color = colors[acc.number]
         style = f"dim {color}" if p.fit.provisional else color
-        start = col_of(min(t for t, _, _ in p.points))
+        start = min(columns[acc.number])
         for c in range(start, plot_w):
             t = t_lo + c / (plot_w - 1) * (t_hi - t_lo)
             cells[row_of(p.fit.at(t))][c] = (_FLAT if p.fit.steady else _SLOPE, style)
-    for acc, p in shown:
+    for acc, _ in shown:
         color = colors[acc.number]
-        for t, v, sure in p.points:
-            cells[row_of(v)][col_of(t)] = ("●", color) if sure else ("○", f"dim {color}")
+        for c, (_, median, _, sure) in columns[acc.number].items():
+            cells[row_of(median)][c] = ("●", color) if sure else ("○", f"dim {color}")
     lines: list[Text] = []
     for r in range(height - 1, -1, -1):
         line = Text(no_wrap=True)
@@ -472,7 +504,7 @@ def trend_chart(report: CostReport, label: str, width: int, height: int,
             line.append(glyph, style=style)
         lines.append(line)
     first = time.strftime("%m-%d", time.localtime(t_lo))
-    lines.append(_axis((first, f"$ per 1% of {label}, per window", "now"), label_w, plot_w,
+    lines.append(_axis((first, f"$ per 1% of {label}", "now"), label_w, plot_w,
                        palette))
     name_w = max(len(names.get(a.number, f"#{a.number}")) for a, _ in shown)
     for acc, p in shown:
@@ -503,7 +535,7 @@ def chart_title(report: CostReport, view: str, palette: Palette) -> Text:
         text.append(money(total), style=f"bold {palette.foreground}")
         text.append(f" since {since}", style=palette.muted)
     elif view in TREND_VIEWS:
-        text.append("   ● sure  ○ partly used elsewhere  ", style=palette.muted)
+        text.append(f"   ● sure  ○ used elsewhere  {_SPREAD} spread  ", style=palette.muted)
         text.append(f"{_FLAT} steady  {_SLOPE} moving", style=palette.muted)
     return text
 

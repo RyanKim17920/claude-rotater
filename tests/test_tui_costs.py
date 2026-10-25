@@ -143,10 +143,13 @@ P = Palette.DARK
     (trend_fig(3.0, change=0.08, steady=False), "↑8%/4w more room", P.sev_ok),
     (trend_fig(3.0, provisional=True, days=8), "~ steady, provisional: 8 days of data",
      f"dim {P.foreground}"),
-    (trend_fig(3.0, change=-0.3, steady=False, provisional=True, days=1),
-     "~ ↓30%/4w limit shrinking, provisional: 1 day of data", f"dim {P.sev_crit}"),
-    (PerPct(3.0, True, None, ((1.0, 3.0, True),)), "one window so far", P.muted),
-    (None, "no windows yet", P.muted),
+    # a few days stretched to 4 weeks would overstate it: the change over its span
+    (trend_fig(3.0, change=-0.3, steady=False, provisional=True, days=7),
+     "~ ↓9% in 7 days limit shrinking, provisional", f"dim {P.sev_crit}"),
+    (trend_fig(3.0, change=0.5, steady=False, provisional=True, days=1),
+     "~ ↑1% in 1 day more room, provisional", f"dim {P.sev_ok}"),
+    (PerPct(3.0, True, None, ((1.0, 3.0, True),)), "one day so far", P.muted),
+    (None, "no samples yet", P.muted),
 ])
 def test_verdict_names_the_direction_and_how_sure_it_is(fig, words, style):
     assert view.verdict(fig, P) == (words, style)
@@ -362,7 +365,7 @@ def test_trend_view_draws_each_account_with_its_own_line_and_verdict():
     colors = view.account_colors(rep, P)
     styles = {span.style for line in plot for span in line.spans}
     assert colors["1"] in styles and colors["2"] in styles  # never pooled: one hue each
-    assert "per window" in lines[10].plain and lines[10].plain.rstrip().endswith("now")
+    assert "$ per 1% of 5h" in lines[10].plain and lines[10].plain.rstrip().endswith("now")
 
 
 def test_a_steady_account_gets_a_flat_line_and_a_moving_one_a_slope():
@@ -398,10 +401,45 @@ def test_few_points_still_show_with_a_provisional_line():
     assert "~ steady, provisional: 2 days of data" in lines[-1].plain
 
 
+def test_many_samples_squeeze_to_one_median_point_per_column_over_their_spread():
+    now = time.time()
+    fig = trend_fig(5.0, days=10, n=2)
+    # 40 samples a day over the last day: far more than the columns
+    dense = tuple((now - 86400 + i * 2160, v, True)
+                  for i, v in enumerate([3.0, 5.0, 7.0, 5.0] * 10))
+    rep = trend_report(**{"1": PerPct(5.0, True, fig.fit, fig.points + dense)})
+    lines = view.trend_chart(rep, "5h", 78, 12, {}, P)
+    plot = [line.plain for line in lines[:12]]
+    dots = sum(row.count("●") for row in plot)
+    assert dots <= 78  # at most one point per column
+    last_cols = {i for row in plot for i, ch in enumerate(row) if ch in "●│" and i > 60}
+    assert last_cols  # the dense day is drawn at the right
+    assert any(view._SPREAD in row for row in plot)  # quartiles of a busy column
+    spread = [s.style for line in lines[:12] for s in line.spans
+              if view._SPREAD in line.plain[s.start:s.end]]
+    assert spread and all(style.startswith("dim") for style in spread)
+
+
+def test_a_column_mostly_used_elsewhere_is_hollow():
+    now = time.time()
+    fig = trend_fig(5.0, days=10, n=2)
+    pts = fig.points + tuple((now - 60 - i, 5.0, i == 0) for i in range(5))  # 2 of 6 sure
+    rep = trend_report(**{"1": PerPct(5.0, True, fig.fit, pts)})
+    plot = "".join(line.plain for line in view.trend_chart(rep, "5h", 78, 10, {}, P)[:10])
+    assert "○" in plot
+
+
+def test_columns_take_the_median_and_quartiles():
+    cols = view._columns([(0, 1.0, True), (0, 2.0, True), (0, 9.0, False), (5, 4.0, False)],
+                         lambda t: int(t))
+    assert cols[0] == (pytest.approx(1.5), 2.0, pytest.approx(5.5), True)
+    assert cols[5] == (4.0, 4.0, 4.0, False)
+
+
 def test_a_trend_view_with_nothing_to_plot_says_so_in_one_line():
     rep = trend_report(**{"1": None})
     lines = view.trend_chart(rep, "7d", 78, 10, {}, P)
-    assert len(lines) == 1 and "no finished 7d window" in lines[0].plain
+    assert len(lines) == 1 and "no 7d climb" in lines[0].plain
     assert view.chart_rows(rep, "$/1% 7d", 78, 10) == 2
 
 
