@@ -31,6 +31,11 @@ SEV_OK = "#6fc4aa"  # sea glass: plenty of headroom
 SEV_WARN = "#f2b443"  # saffron: climbing (>= 70%); saturated, never beige
 SEV_CRIT = "#f08c82"  # rose: near the limit (>= 90%)
 TRACK = "#2a3442"  # unfilled meter track
+# One hue per account, kept by identity (claude_rotater.account_colors):
+# sky, orchid, aqua, sand, violet. None is the accent, a severity or a
+# model color (accent, sea glass, saffron), so "whose" never reads as
+# "how full" or "which model".
+ACCOUNT_HUES = ("#6cb8f6", "#e293dc", "#5fd0de", "#d6bf9b", "#b896f5")
 # The row under the cursor: the accent blended over the page at this
 # strength (rota.tcss: ``background: $primary 14%``). Strong enough to see at
 # a glance, weak enough that every text colour keeps AA contrast on it.
@@ -60,8 +65,15 @@ class Palette:
     sev_crit: str
     track: str
     background: str = BACKGROUND
+    accounts: tuple[str, ...] = ACCOUNT_HUES
 
     DARK: ClassVar["Palette"]
+
+    def account(self, index: int | None) -> str:
+        """The hue of the account with color ``index``; muted when unknown."""
+        if index is None or index < 0:
+            return self.muted
+        return self.accounts[index % len(self.accounts)]
 
     def severity(self, pct: float | None) -> str:
         if pct is None:
@@ -83,6 +95,7 @@ class Palette:
             sev_crit=theme.error,
             track=theme.variables.get("track", TRACK),
             background=theme.background or BACKGROUND,
+            accounts=ACCOUNT_HUES if theme.dark else ACCOUNT_HUES_LIGHT,
         )
 
 
@@ -122,6 +135,7 @@ SEV_OK_LIGHT = "#17705a"  # deep sea green
 SEV_WARN_LIGHT = "#7d5600"  # dark saffron
 SEV_CRIT_LIGHT = "#ad3229"  # brick rose
 TRACK_LIGHT = "#bcc6d3"  # deep enough to read as a bar on the near-white page
+ACCOUNT_HUES_LIGHT = ("#1f5fa8", "#9b3192", "#0a6873", "#75593a", "#6a42b8")
 
 ROTA_LIGHT = Theme(
     name="rota-light",

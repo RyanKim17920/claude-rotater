@@ -74,7 +74,7 @@ from claude_rotater.tui.main import (
     switch_flash,
 )
 from claude_rotater.tui.prompt import Choice, PromptLine
-from claude_rotater.tui.theme import ROTA_DARK, ROTA_LIGHT
+from claude_rotater.tui.theme import ROTA_DARK, ROTA_LIGHT, Palette
 from claude_rotater.usage_history import Point
 
 
@@ -206,6 +206,7 @@ class RotaApp(App):
         self.cadence = load_cadence(switcher.backup_dir)  # when a reading counts as overdue
         self.main_screen = MainScreen()
         self._cost_source = None
+        self._color_indices: dict[tuple[str, str], int] = {}
 
     @property
     def cost_source(self):
@@ -213,6 +214,22 @@ class RotaApp(App):
         if self._cost_source is None:
             self._cost_source = default_cost_source_factory(self.switcher)
         return self._cost_source
+
+    def color_index(self, identity: tuple[str, str]) -> int:
+        """The account's color (an index into the theme's account hues),
+        kept by identity so it is the same everywhere it shows."""
+        if identity not in self._color_indices:
+            from claude_rotater import account_colors
+
+            known = [(a.email, a.org_uuid) for a in (self.snapshot.accounts if self.snapshot else ())]
+            self._color_indices.update(account_colors.indices([*known, identity]))
+        return self._color_indices[identity]
+
+    def account_color(self, number: str, palette: Palette) -> str:
+        """The hue of account ``number`` in ``palette`` (muted if unknown)."""
+        acc = next((a for a in (self.snapshot.accounts if self.snapshot else ())
+                    if a.number == number), None)
+        return palette.account(self.color_index((acc.email, acc.org_uuid)) if acc else None)
 
     def _load_settings(self) -> None:
         try:

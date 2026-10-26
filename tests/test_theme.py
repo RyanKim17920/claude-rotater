@@ -129,3 +129,28 @@ def test_bar_track_reads_against_the_page_in_both_themes():
 def test_blend_matches_the_test_reference():
     assert theme.blend("#ffffff", "#000000", 0.5) == _blend("#ffffff", "#000000", 0.5) == "#808080"
     assert theme.blend(theme.SEV_OK, theme.TRACK, 0.0) == theme.TRACK
+
+
+def test_account_hues_meet_AA_and_stay_apart_from_the_other_roles():
+    """Account hues paint the ``#N`` text in rows and legends: AA on every
+    background, and never a severity, the accent or a model color."""
+    for hues, roles, backgrounds, accent in (
+        (theme.ACCOUNT_HUES, (theme.SEV_OK, theme.SEV_WARN, theme.SEV_CRIT, theme.ACCENT,
+                              theme.MUTED, theme.FOREGROUND),
+         (theme.BACKGROUND, theme.SURFACE, theme.PANEL), theme.ACCENT),
+        (theme.ACCOUNT_HUES_LIGHT, (theme.SEV_OK_LIGHT, theme.SEV_WARN_LIGHT, theme.SEV_CRIT_LIGHT,
+                                    theme.ACCENT_LIGHT, theme.MUTED_LIGHT, theme.FOREGROUND_LIGHT),
+         (theme.BACKGROUND_LIGHT, theme.SURFACE_LIGHT, theme.PANEL_LIGHT), theme.ACCENT_LIGHT),
+    ):
+        assert len(set(hues)) == len(hues) >= 5
+        for hue in hues:
+            assert hue not in roles
+            for bg in (*backgrounds, _blend(accent, backgrounds[0], theme.CURSOR_ALPHA)):
+                assert _contrast(hue, bg) >= 4.5, f"{hue} on {bg}"
+
+
+def test_palette_picks_account_hues_by_theme_and_wraps():
+    dark, light = Palette.from_theme(ROTA_DARK), Palette.from_theme(ROTA_LIGHT)
+    assert dark.account(0) == theme.ACCOUNT_HUES[0] and light.account(0) == theme.ACCOUNT_HUES_LIGHT[0]
+    assert dark.account(len(theme.ACCOUNT_HUES)) == dark.account(0)
+    assert dark.account(None) == dark.muted
