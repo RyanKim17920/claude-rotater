@@ -93,6 +93,15 @@ def report(now: float | None = None, *, n_models: int = 3, n_accounts: int = 2,
                       accounts=accounts, unattributed=0.0, built_at=now - 120, took_s=1.2)
 
 
+def with_days(rep: CostReport, days) -> CostReport:
+    """``rep`` with its priced days replaced (all credited to #1)."""
+    older = len(rep.history) - len(rep.days)
+    cells = tuple((t, {("1", m): usd for m, usd in d.items()}) for t, d in days)
+    return CostReport(**{**rep.__dict__, "days": tuple(days),
+                         "history": rep.history[:older] + tuple(days),
+                         "history_cells": rep.history_cells[:older] + cells})
+
+
 class FakeCosts:
     """A cost source that never touches a transcript."""
 
@@ -252,10 +261,18 @@ def test_the_note_and_gaps_go_before_the_chart_shrinks():
     assert "24 hours" not in "\n".join(line.plain for line in tiny)  # chart gone first
 
 
-def test_many_models_fold_into_one_other_row():
-    lines = view.model_lines(report(n_models=7), 118, view.MODEL_ROWS, P)
-    assert len(lines) == 1 + view.MODEL_ROWS
-    assert "3 other" in lines[-1].plain
+def test_many_models_fold_into_one_other_row_only_when_rows_run_out():
+    lines = view.model_lines(report(n_models=7), 118, 5, P)
+    assert len(lines) == 6 and "3 other" in lines[-1].plain
+    every = view.model_lines(report(n_models=7), 118, 7, P)
+    assert len(every) == 8 and not any("other" in line.plain for line in every)
+
+
+def test_the_page_lists_every_model_with_spend_when_there_is_room():
+    rep = report(n_models=7)
+    page = "\n".join(line.plain for line in view.costs_lines(
+        rep, width=118, height=60, names={}, palette=P, view="monthly"))
+    assert all(m.name in page for m in rep.models) and "other" not in page
 
 
 # -- the money views ------------------------------------------------------------------
@@ -311,7 +328,7 @@ def test_chart_bars_follow_the_totals_and_model_colors():
     assert len(lines) == 7 and lines[-1].plain.rstrip().endswith("today")
     colors = {span.style for line in lines[:-1] for span in line.spans}
     assert P.accent in colors and P.sev_ok in colors
-    flat = CostReport(**{**rep.__dict__, "days": tuple((d, {}) for d, _ in rep.days)})
+    flat = with_days(rep, tuple((d, {}) for d, _ in rep.days))
     empty = view.money_chart(flat, "monthly", 98, 4, P)
     assert all(set(line.plain[3:]) <= {" "} for line in empty[:-1])  # no bars, no gridlines
 
@@ -328,7 +345,7 @@ def test_the_top_row_is_a_labelled_gridline_at_or_above_the_tallest_bar():
     assert dashes and all(style.startswith("dim") for style in dashes)
     # a peak between round values tops out at the next one, never above the last line
     days = tuple((d, {"Opus 4.7": 26.0 if i == 3 else 4.0}) for i, (d, _) in enumerate(rep.days))
-    tall = CostReport(**{**rep.__dict__, "days": days})
+    tall = with_days(rep, days)
     top = view.money_chart(tall, "monthly", 98, 8, P)[0].plain
     assert top.lstrip().startswith("$30")
 
@@ -344,7 +361,7 @@ def test_the_week_and_the_day_show_who_was_on_duty():
 
 
 def test_duty_marks_never_run_into_each_other_or_off_the_end():
-    row = view._duty_row(["1", "2", "3", "3", "3", "3", "3", "4"], 1, 3, P).plain
+    row = view._duty_row(["1", "2", "3", "3", "3", "3", "3", "4"], 1, 3, P, {}).plain
     assert row == "on #1 #3   "  # #2 had no room; #3 waits for some; #4 would run off the end
 
 
@@ -357,55 +374,79 @@ def test_chart_rows_counts_what_chart_lines_draws(v, width):
     assert all(line.cell_len <= width for line in lines)
 
 
-# -- ↑/↓: what the bars split by ------------------------------------------------------------
+# -- ↑/↓ and tab: whose spend and which model ------------------------------------------
 
 
-def test_money_picks_go_all_models_by_account_then_each_model_costliest_first():
+def test_account_picks_go_all_by_account_then_each_account_with_spend():
+    rep = report(n_models=3, n_accounts=3)
+    rep = CostReport(**{**rep.__dict__, "accounts": rep.accounts + (
+        AccountLine("x:old@x|o", 0.0, None, None),)})  # no spend in the range: no pick
+    assert view.account_picks(rep, "monthly", 98) == [view.ALL, view.BY_ACCOUNT, "1", "2"]
+
+
+def test_model_picks_take_every_model_with_spend_costliest_first():
     rep = report(n_models=3)
-    assert view.picks(rep, "monthly", 98) == [view.ALL_MODELS, view.BY_ACCOUNT,
-                                              "Opus 4.7", "Sonnet 4.5", "Haiku 4.5"]
-
-
-def test_a_model_under_one_percent_of_the_range_gets_no_view_of_its_own():
-    rep = report(n_models=2)
     days = list(rep.days)
-    days[-1] = (days[-1][0], {**days[-1][1], "Haiku 4.5": 0.01})  # $0.01 of hundreds
-    rep = CostReport(**{**rep.__dict__, "days": tuple(days)})
-    assert "Haiku 4.5" not in view.picks(rep, "monthly", 98)
+    days[-1] = (days[-1][0], {**days[-1][1], "Opus 4.8": 0.01})  # $0.01 of hundreds still counts
+    rep = with_days(rep, days)
+    assert view.model_picks(rep, "monthly", 98) == [view.ALL_MODELS, "Opus 4.7", "Sonnet 4.5",
+                                                    "Haiku 4.5", "Opus 4.8"]
+    assert view.model_picks(rep, "$/1% 5h", 98) == []  # a trend has no model to pick
 
 
 def test_trend_picks_go_all_accounts_then_each_account_with_points():
     rep = trend_report(**{"1": trend_fig(5.0), "2": PerPct(1.8, False), "3": trend_fig(2.0)})
-    assert view.picks(rep, "$/1% 5h", 78) == [view.ALL_ACCOUNTS, "1", "3"]  # #2 has no points
+    assert view.account_picks(rep, "$/1% 5h", 78) == [view.ALL_ACCOUNTS, "1", "3"]  # #2: no points
 
 
 def test_a_pick_the_view_lacks_falls_back_to_all():
     rep = report()
-    assert view.resolve_pick(rep, "monthly", 98, "Haiku 4.5") == "Haiku 4.5"
-    assert view.resolve_pick(rep, "monthly", 98, "Opus 9") == view.ALL_MODELS
-    assert view.resolve_pick(rep, "$/1% 5h", 98, "Haiku 4.5") == view.ALL_ACCOUNTS
-    assert view.resolve_pick(rep, "monthly", 98, None) == view.ALL_MODELS
+    assert view.resolve_model(rep, "monthly", 98, "Haiku 4.5") == "Haiku 4.5"
+    assert view.resolve_model(rep, "monthly", 98, "Opus 9") == view.ALL_MODELS
+    assert view.resolve_model(rep, "monthly", 98, None) == view.ALL_MODELS
+    assert view.resolve_pick(rep, "monthly", 98, "2") == "2"
+    assert view.resolve_pick(rep, "monthly", 98, "7") == view.ALL
+    assert view.resolve_pick(rep, "$/1% 5h", 98, view.BY_ACCOUNT) == view.ALL_ACCOUNTS
 
 
 @pytest.mark.parametrize("v", ["total", "monthly", "weekly", "hourly"])
 def test_one_model_alone_keeps_only_its_spend(v):
     rep = report(n_models=3, archive_days=20)
     every, _, _ = view.money_series(rep, v, 98)
-    alone, _, axis = view.money_series(rep, v, 98, "Sonnet 4.5")
+    alone, _, axis = view.money_series(rep, v, 98, view.ALL, "Sonnet 4.5")
     assert len(alone) == len(every) and axis == view.money_series(rep, v, 98)[2]
     assert all(set(m) <= {"Sonnet 4.5"} for _, m in alone)
-    assert [m.get("Sonnet 4.5", 0) for _, m in alone] == [m.get("Sonnet 4.5", 0) for _, m in every]
+    assert [m.get("Sonnet 4.5", 0) for _, m in alone] == pytest.approx(
+        [m.get("Sonnet 4.5", 0) for _, m in every])
 
 
-@pytest.mark.parametrize("v", ["monthly", "weekly", "hourly"])
-def test_by_account_buckets_sum_like_the_model_ones(v):
+@pytest.mark.parametrize("v", ["total", "monthly", "weekly", "hourly"])
+def test_every_filter_sums_alike_by_account_and_by_model(v):
+    """For each model pick, Σ by account = Σ over the accounts alone = Σ by
+    model = the filtered total, bucket by bucket."""
+    rep = report(n_models=3, archive_days=5)
+    for model in view.model_picks(rep, v, 98):
+        by_model, duty, _ = view.money_series(rep, v, 98, view.ALL, model)
+        by_account, duty2, _ = view.money_series(rep, v, 98, view.BY_ACCOUNT, model)
+        alone = [view.money_series(rep, v, 98, k, model)[0] for k in ("1", "2")]
+        assert duty == duty2
+        for i, ((t, m), (t2, a)) in enumerate(zip(by_model, by_account)):
+            assert t == t2 and sum(m.values()) == pytest.approx(sum(a.values()))
+            assert sum(sum(one[i][1].values()) for one in alone) == pytest.approx(
+                sum(v for k, v in a.items() if k))  # what nobody was credited with is in neither
+            assert set(a) <= {"1", "2", ""}
+
+
+def test_one_account_alone_stacks_by_model_and_by_account_one_model_stacks_by_account():
     rep = report(n_models=3)
-    every, duty, _ = view.money_series(rep, v, 98)
-    split, duty2, _ = view.money_series(rep, v, 98, view.BY_ACCOUNT)
-    assert duty == duty2
-    for (t, m), (t2, a) in zip(every, split):
-        assert t == t2 and sum(m.values()) == pytest.approx(sum(a.values()))
-        assert set(a) <= {"1", "2"}
+    two, _, _ = view.money_series(rep, "monthly", 98, "2")
+    assert all(set(m) <= {"Opus 4.7", "Sonnet 4.5", "Haiku 4.5"} for _, m in two)
+    total = sum(sum(m.values()) for _, m in view.money_series(rep, "monthly", 98)[0])
+    assert sum(sum(m.values()) for _, m in two) == pytest.approx(total / 3)  # #2's third
+    split, _, _ = view.money_series(rep, "monthly", 98, view.BY_ACCOUNT, "Haiku 4.5")
+    assert all(set(m) <= {"1", "2"} for _, m in split)
+    both, _, _ = view.money_series(rep, "monthly", 98, "1", "Haiku 4.5")
+    assert all(set(m) <= {"Haiku 4.5"} for _, m in both)
 
 
 def test_by_account_total_marks_days_before_the_priced_range_unattributed():
@@ -422,35 +463,53 @@ def test_one_model_alone_gets_its_own_scale_and_color():
     def top(lines):
         return lines[0].plain.split()[0]
     every = view.money_chart(rep, "monthly", 98, 8, P)
-    haiku = view.money_chart(rep, "monthly", 98, 8, P, "Haiku 4.5")
+    haiku = view.money_chart(rep, "monthly", 98, 8, P, view.ALL, "Haiku 4.5")
     assert top(every) == "$30" and top(haiku) == "$6"  # the gridlines follow the one series
     bars = {span.style for line in haiku[:-1] for span in line.spans
             if set(line.plain[span.start:span.end]) & set("▁▂▃▄▅▆▇█")}
     assert bars == {P.sev_warn}  # Haiku's color in the model table
+    one = view.money_chart(rep, "monthly", 98, 8, P, "2", "Haiku 4.5")
+    assert top(one) == "$2"  # a third of it: rescaled again
 
 
 def test_by_account_bars_take_the_account_colors():
     rep = report(n_models=3)
-    lines = view.money_chart(rep, "monthly", 98, 8, P, view.BY_ACCOUNT)
+    kept = {"1": P.account(3), "2": P.account(0), "": P.muted}  # kept by identity, not order
+    lines = view.money_chart(rep, "monthly", 98, 8, P, view.BY_ACCOUNT, colors=kept)
     bars = {span.style for line in lines[:-1] for span in line.spans
             if set(line.plain[span.start:span.end]) & set("▁▂▃▄▅▆▇█")}
-    colors = view.account_colors(rep, P)
-    assert bars == {colors["1"], colors["2"]}
+    assert bars == {kept["1"], kept["2"]}
+    duty = view.money_chart(rep, "weekly", 98, 5, P, colors=kept)[-2]
+    assert {sp.style for sp in duty.spans if "#" in duty.plain[sp.start:sp.end]} == {
+        kept["1"], kept["2"]}  # "on #1 … #2" in the same hues
 
 
-def test_the_title_names_the_split():
+def test_the_title_names_both_picks_with_the_filtered_spend_and_share():
     rep = report(n_models=3)
-    def title(v, pick):
-        return view.chart_title(rep, v, P, width=98, pick=pick, names={"1": "me@x.com"}).plain
-    assert title("weekly", view.ALL_MODELS) == "‹ weekly ›  ←/→ · ↕ all models"
-    assert title("weekly", view.BY_ACCOUNT) == "‹ weekly ›  ←/→ · ↕ by account ■ #1 ■ #2"
-    spend = view.range_spend(rep, "monthly", 98)
-    share = spend["Opus 4.7"] / sum(spend.values())
-    assert title("monthly", "Opus 4.7") == (
-        f"‹ monthly ›  ←/→ · ↕ Opus 4.7 · {view.money(spend['Opus 4.7'])} ({share * 100:.0f}%)")
-    assert "since" not in title("total", "Opus 4.7")  # the model's total stands in for it
-    assert title("$/1% 5h", "1").startswith("‹ $/1% 5h ›  ←/→ · ↕ me@x.com")
-    assert title("$/1% 5h", view.ALL_ACCOUNTS).startswith("‹ $/1% 5h ›  ←/→ · ↕ all accounts")
+    def title(v, pick, model=view.ALL_MODELS):
+        return view.chart_title(rep, v, P, width=98, pick=pick, model=model,
+                                names={"1": "me@x.com"}).plain
+    assert title("weekly", view.ALL) == "‹ weekly ›  ←/→ · ↕ all · ⇥ all models"
+    assert title("weekly", view.BY_ACCOUNT).startswith(
+        "‹ weekly ›  ←/→ · ↕ by account · ⇥ all models · ")
+    assert title("weekly", view.BY_ACCOUNT).endswith("■ #1 ■ #2")
+    cells = view.range_cells(rep, "monthly", 98)
+    whole = sum(cells.values())
+    part = sum(usd for (who, name), usd in cells.items() if who == "2" and name == "Opus 4.7")
+    assert title("monthly", "2", "Opus 4.7") == (
+        f"‹ monthly ›  ←/→ · ↕ #2 · ⇥ Opus 4.7 · {view.money(part)} ({part / whole * 100:.0f}%)")
+    assert "since" not in title("total", view.ALL, "Opus 4.7")  # the filtered total stands in
+    assert title("$/1% 5h", "1").startswith("‹ $/1% 5h ›  ←/→ · ↕ #1 me@x.com")
+    assert "⇥" not in title("$/1% 5h", view.ALL_ACCOUNTS)  # no model to pick on a trend
+
+
+def test_accounts_are_tagged_by_number_removed_ones_by_email_and_nobody_by_a_question_mark():
+    assert view.account_tag("2") == "#2" and view.account_tag("") == "?"
+    assert view.account_tag("x:oldname@x.com|o") == "×oldnam"
+    names = {"2": "me@x.com"}
+    assert view.account_label("2", names) == "#2 me@x.com"
+    assert view.account_label("x:old@x.com|o", names) == "× old@x.com (removed)"
+    assert view.account_label("", names) == "? unattributed"
 
 
 def test_one_account_alone_on_a_trend_drops_the_others():
@@ -464,14 +523,15 @@ def test_one_account_alone_on_a_trend_drops_the_others():
 
 
 @pytest.mark.parametrize("width,height", [(40, 16), (60, 16), (78, 20), (158, 46)])
-def test_every_split_of_every_view_fits(width, height):
+def test_every_filter_of_every_view_fits(width, height):
     rep = report(n_models=7, n_accounts=4, archive_days=60)
     for v in view.VIEWS:
-        for pick in view.picks(rep, v, width):
-            lines = view.costs_lines(rep, width=width, height=height, names={}, palette=P,
-                                     view=v, pick=pick)
-            assert len(lines) <= height
-            assert all(line.cell_len <= width for line in lines[1:]), (v, pick)
+        for pick in view.account_picks(rep, v, width):
+            for model in view.model_picks(rep, v, width) or [None]:
+                lines = view.costs_lines(rep, width=width, height=height, names={}, palette=P,
+                                         view=v, pick=pick, model=model)
+                assert len(lines) <= height
+                assert all(line.cell_len <= width for line in lines[1:]), (v, pick, model)
 
 
 # -- the $ per 1% views ------------------------------------------------------------------
@@ -488,7 +548,7 @@ def test_trend_view_draws_each_account_with_its_own_line_and_verdict():
                           "2": trend_fig(2.0)})
     lines = view.trend_chart(rep, "5h", 78, 10, {"1": "me@x.com"}, P)
     legend = [line.plain for line in lines[-2:]]
-    assert legend[0].startswith("● me@x.com") and "↓30%/4w limit shrinking" in legend[0]
+    assert legend[0].startswith("● #1 me@x.com") and "↓30%/4w limit shrinking" in legend[0]
     assert legend[1].startswith("● #2") and legend[1].endswith("steady")
     plot = lines[:10]
     colors = view.account_colors(rep, P)
@@ -582,12 +642,24 @@ def test_trend_view_fits_narrow_widths(width):
 
 def test_account_table_shows_the_figures_and_leaves_the_trend_to_its_view():
     lines = view.account_lines(report(), 118, 5, {"1": "me@x.com"}, P)
-    assert lines[1].plain.startswith("me@x.com") and "~$3.10" in lines[1].plain
+    assert lines[1].plain.startswith("#1 me@x.com") and "~$3.10" in lines[1].plain
     assert "~$9.40" in lines[1].plain and "4w" not in lines[1].plain
     assert lines[2].plain.startswith("#2") and "~$1.80?" in lines[2].plain and "–" in lines[2].plain
     styles = {lines[2].plain[s.start:s.end].strip(): s.style for s in lines[2].spans}
     assert styles["~$1.80?"] == P.sev_warn
     assert all(line.cell_len <= 50 for line in view.account_lines(report(), 50, 5, {}, P))
+    kept = {"1": P.account(2), "2": P.account(4)}
+    colored = view.account_lines(report(), 118, 5, {"1": "me@x.com"}, P, kept)
+    assert any(kept["1"] in st for st in [str(sp.style) for sp in colored[1].spans
+                                           if colored[1].plain[sp.start:sp.end] == "#1"])
+
+
+def test_the_account_table_ends_with_what_nobody_was_credited_with():
+    rep = CostReport(**{**report().__dict__, "unattributed": 345.0})
+    lines = view.account_lines(rep, 118, 5, {"1": "me@x.com"}, P)
+    assert lines[-1].plain.startswith("? unattributed") and "$345" in lines[-1].plain
+    assert "~" not in lines[-1].plain  # no $ per 1% for nobody
+    assert view.account_lines(report(), 118, 5, {}, P)[-1].plain.startswith("#2")
 
 
 def test_plain_page_has_every_part():
@@ -677,56 +749,93 @@ class TestCostsPage:
             assert f"‹ {view.VIEWS[-1]} ›" in page(app)  # reopened on the same chart
             assert app.screen.costs_shown  # arrows never left the page
 
-    async def test_up_and_down_cycle_the_split_and_keep_it_across_views(self, tmp_path):
+    async def test_up_and_down_cycle_whose_spend_and_keep_it_across_views(self, tmp_path):
         app = costs_app(tmp_path, FakeCosts())
         async with app.run_test(size=(120, 40)) as pilot:
             await settle(pilot)
             await pilot.press("dollar_sign")
             await settle(pilot)
             costs_view = app.screen.query_one("#costs")
-            options = view.picks(report(), "total", costs_view.size.width)
+            options = view.account_picks(report(), "total", costs_view.size.width)
+            assert options == [view.ALL, view.BY_ACCOUNT, "1", "2"]
             seen = [costs_view.pick]
             for _ in options:
                 await pilot.press("down")
                 await pilot.pause()
                 seen.append(costs_view.pick)
-            assert seen == [*options, options[0]]  # every split once, then around
+            assert seen == [*options, options[0]]  # every pick once, then around
             await pilot.press("up")
             await pilot.pause()
-            assert costs_view.pick == options[-1] and f"↕ {options[-1]}" in page(app)
-            await pilot.press("right")  # monthly: the same model is still there
+            assert costs_view.pick == "2" and "↕ #2 · ⇥ all models" in page(app)
+            await pilot.press("right")  # monthly: #2 is still there
             await pilot.pause()
-            assert f"↕ {options[-1]}" in page(app)
+            assert "↕ #2" in page(app)
             for _ in range(3):  # on to the 5h trend: its own pick, all accounts
                 await pilot.press("right")
                 await pilot.pause()
             assert costs_view.view == "$/1% 5h" and "↕ all accounts" in page(app)
             await pilot.press("down")
             await pilot.pause()
-            assert costs_view.trend_pick == "1" and costs_view.money_pick == options[-1]
+            assert costs_view.trend_pick == "1" and costs_view.money_pick == "2"
             await pilot.press("left", "left", "left")
             await pilot.pause()
-            assert f"↕ {options[-1]}" in page(app)  # the money split came back
+            assert "↕ #2" in page(app)  # the money pick came back
             assert app.screen.costs_shown and not app.screen.keys_shown
 
-    async def test_a_model_missing_from_the_range_shows_all_and_the_cycle_starts_there(self, tmp_path):
-        base = report(n_models=3)  # the last week only ever used Opus
-        rep = CostReport(**{**base.__dict__, "hours": tuple(
-            (t, {"Opus 4.7": 1.0}) for t, _ in base.hours)})
+    async def test_tab_cycles_the_model_combined_with_the_account_and_stays_on_the_page(
+            self, tmp_path):
+        app = costs_app(tmp_path, FakeCosts())
+        async with app.run_test(size=(120, 40)) as pilot:
+            await settle(pilot)
+            assert app.screen.query_one("#costs").model_pick == view.ALL_MODELS
+            await pilot.press("tab")  # on the main page tab is not the costs' to take
+            await pilot.pause()
+            assert app.screen.query_one("#costs").model_pick == view.ALL_MODELS
+            await pilot.press("dollar_sign")
+            await settle(pilot)
+            costs_view = app.screen.query_one("#costs")
+            models = view.model_picks(report(), "total", costs_view.size.width)
+            seen = [costs_view.model_pick]
+            for _ in models:
+                await pilot.press("tab")
+                await pilot.pause()
+                seen.append(costs_view.model_pick)
+                assert app.focused is costs_view  # tab never moves focus off the page
+            assert seen == [*models, models[0]]
+            await pilot.press("shift+tab")
+            await pilot.pause()
+            assert costs_view.model_pick == models[-1]
+            await pilot.press("down", "down", "down")  # #2 only
+            await pilot.pause()
+            assert f"↕ #2 · ⇥ {models[-1]} · $" in page(app)
+            for _ in range(4):  # a trend: tab does nothing there
+                await pilot.press("right")
+            await pilot.press("tab")
+            await pilot.pause()
+            assert costs_view.model_pick == models[-1] and "⇥" not in page(app).splitlines()[2]
+
+    async def test_a_pick_missing_from_the_range_shows_all_and_the_cycle_starts_there(self, tmp_path):
+        base = report(n_models=3)  # the last week only ever used Opus, on #1
+        rep = CostReport(**{**base.__dict__, "hour_cells": tuple(
+            (t, {("1", "Opus 4.7"): 1.0}) for t, _ in base.hour_cells)})
         app = costs_app(tmp_path, FakeCosts(CostResult(rep, ran=True)))
         async with app.run_test(size=(120, 40)) as pilot:
             await settle(pilot)
             await pilot.press("dollar_sign")
             await settle(pilot)
             costs_view = app.screen.query_one("#costs")
-            costs_view.money_pick = "Haiku 4.5"  # chosen on the month
-            costs_view.view = "hourly"  # the day never used it
+            costs_view.model_pick = "Haiku 4.5"  # chosen on the month
+            costs_view.money_pick = "2"
+            costs_view.view = "hourly"  # the day never used either
             costs_view.refresh()
             await pilot.pause()
-            assert "↕ all models" in page(app)
+            assert "↕ all · ⇥ all models" in page(app)
             await pilot.press("down")
             await pilot.pause()
             assert costs_view.money_pick == view.BY_ACCOUNT
+            await pilot.press("tab")
+            await pilot.pause()
+            assert costs_view.model_pick == "Opus 4.7"
 
     async def test_r_reprices_today(self, tmp_path):
         source = FakeCosts()
@@ -815,7 +924,7 @@ class TestCostsPage:
             await settle(pilot)
             await pilot.press("question_mark")
             await pilot.pause()
-            assert "$      costs ←→↑↓ (esc)" in app.screen.query_one("#detail").render().plain
+            assert "$      costs ←→↑↓⇥ (esc)" in app.screen.query_one("#detail").render().plain
             await pilot.press("dollar_sign")  # straight from the key list
             await settle(pilot)
             assert app.screen.costs_shown and not app.screen.keys_shown

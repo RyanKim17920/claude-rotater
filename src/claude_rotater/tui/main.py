@@ -1371,7 +1371,7 @@ KEY_COLUMNS: tuple[tuple[KeyGroup, ...], ...] = (
         ("view", (
             ("y / Y", "copy row / table"),
             ("h", "history (esc back)"),
-            ("$", "costs ←→↑↓ (esc)"),
+            ("$", "costs ←→↑↓⇥ (esc)"),
             ("f", "refresh now"),
             ("ctrl+t", "theme"),
         )),

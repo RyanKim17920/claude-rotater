@@ -16,14 +16,18 @@ Windows.
   and coloured by outcome: green under the threshold, yellow close, red over.
 - Costs behind `$`, priced by [ccusage](https://github.com/ryoppippi/ccusage)
   from your local transcripts and run only when you open the page. Spend is
-  credited to the account rota had on duty at the time (approximate: other
-  machines and chats still on an old login are not seen). One chart, cycled
+  credited to the account that was logged in at the time, from the switch
+  log (rota's, and an imported claude-swap's) and the login each transcript
+  records; spend with no such record is shown as `?` unattributed, never
+  guessed. Accounts are numbered `#N` everywhere, each in its own color
+  (kept per account across views and profiles). One chart, cycled
   with ←/→: all history, 30 days, the last week and the last day, bars by
   model with dashed lines at round dollar values (the top one at or above
   the tallest bar), then each account's ~$ per 1% of its 5h and of its 7d
-  window over time. ↑/↓ changes what the bars split by: all models, by
-  account, or one model alone on its own scale with its total and share;
-  on a trend, all accounts or one alone. That figure is sampled every few points the reading
+  window over time. ↑/↓ picks whose spend: all, stacked by account, or one
+  account alone; tab / shift+tab picks the model: all, or any one model
+  with spend alone. The two combine, each on its own scale with its total
+  and share; on a trend, ↑/↓ picks all accounts or one alone. That figure is sampled every few points the reading
   climbs (4 for 5h, 6 for 7d: whole-percent readings are too coarse for
   less), the spend over each climb summed over every profile that holds the
   account, so a busy day gives dozens of points; they are kept, and fold
@@ -110,7 +114,7 @@ revoke the stored refresh token.
 | `y` / `Y` | copy the highlighted account's line / every account's line as plain text |
 | `f` | refresh usage now |
 | `h` / `esc` | history: past 5h peaks and the 7d curve across weeks, and back |
-| `$` / `esc` | costs: today / 7d / 30d, one chart cycled with `←`/`→` (all, 30 days, week, day, $ per 1% of 5h and of 7d per account with its trendline) and split with `↑`/`↓` (all models, by account, one model; on a trend one account), per-account cost and ~$ per 1%, per-model cost and trend (`r` reprices today, `y`/`Y` copy); needs `ccusage`, or Node/Bun to fetch it |
+| `$` / `esc` | costs: today / 7d / 30d, one chart cycled with `←`/`→` (all, 30 days, week, day, $ per 1% of 5h and of 7d per account with its trendline) filtered with `↑`/`↓` by account (all, stacked by account, each `#N` alone; on a trend one account) and with `tab`/`shift+tab` by model (all, each model alone), the two combined, per-account cost and ~$ per 1%, per-model cost and trend (`r` reprices today, `y`/`Y` copy); needs `ccusage`, or Node/Bun to fetch it |
 | `?` / `esc` | every key, grouped, in place of the charts, and back |
 | `s` | set up or remove the statusline feed |
 | `c` | settings (`↑`/`↓` select, `←`/`→` change, digits or `enter` exact value, `esc` back) |

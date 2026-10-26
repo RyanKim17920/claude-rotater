@@ -9,10 +9,13 @@ to bottom, dropping the lower parts first when rows run out:
   lines at round dollars, the top one at or above the tallest bar, who was
   on duty under the week and the day), then each account's $ per 1% of the
   5h and of the 7d window over time, one series and trendline per account;
-  ↑/↓ picks what the bars split by (all models, by account, one model
-  alone) or, on a trend, all accounts or one alone (:func:`picks`);
-- per account: cost and $ per 1% of the 5h and 7d windows;
-- per model: cost, share and trend (tokens too when wide);
+  ↑/↓ picks whose spend (all, stacked by account, one account alone) and
+  tab / shift+tab which model (all, or each with any spend alone), the two
+  combined (:func:`account_picks`, :func:`model_picks`); on a trend ↑/↓
+  picks all accounts or one alone and tab does nothing;
+- per account (``#N`` in the account's own color; ``?`` for spend with no
+  record of who was logged in): cost and $ per 1% of the 5h and 7d windows;
+- per model: cost, share and trend (tokens too when wide), every model;
 - a note on what is estimated.
 
 Data comes from :class:`claude_rotater.cost_report.CostSource`, which runs
@@ -39,7 +42,8 @@ from claude_rotater.tui.theme import Palette
 
 HINT_KEYS: tuple[tuple[str, str], ...] = (
     ("←/→", "chart"),
-    ("↑/↓", "split"),
+    ("↑/↓", "account"),
+    ("tab", "model"),
     ("r", "refresh"),
     ("y / Y", "copy"),
     ("esc", "back"),
@@ -47,14 +51,17 @@ HINT_KEYS: tuple[tuple[str, str], ...] = (
 
 VIEWS: tuple[str, ...] = ("total", "monthly", "weekly", "hourly", "$/1% 5h", "$/1% 7d")
 TREND_VIEWS = {"$/1% 5h": "5h", "$/1% 7d": "7d"}
-ALL_MODELS = "all models"  # the money views' picks, cycled with ↑/↓: these two,
-BY_ACCOUNT = "by account"  # then each model with a share of the range alone
-ALL_ACCOUNTS = "all accounts"  # the trend views': this, then each account alone
-MIN_MODEL_SHARE = 0.01  # a model under this share of the range gets no view of its own
+# the money views' two axes, combinable: ↑/↓ picks whose spend (all of it,
+# split by account, or one account's), tab which model (all, split by
+# model, or one alone); a trend view's ↑/↓ picks all accounts or one
+ALL = "all"
+BY_ACCOUNT = "by account"
+ALL_MODELS = "all models"
+ALL_ACCOUNTS = "all accounts"
+UNATTRIBUTED = ""  # the account key of spend no evidence credits to anyone
 
 LOADING = "reading transcripts… (the first time takes a while)"
 NOTE = "~ estimate, ? unsure · $/1% = spend per 1% of a limit, falling = limit shrinking · priced by ccusage"
-MODEL_ROWS = 5  # the costliest four, then one "other" row
 COLORED_MODELS = 3
 CHART_MAX_H = 10
 CHART_MIN_H = 3
@@ -186,10 +193,37 @@ def model_colors(report: CostReport, palette: Palette) -> dict[str, str]:
             for i, m in enumerate(report.models)}
 
 
-def account_colors(report: CostReport, palette: Palette) -> dict[str, str]:
-    """One hue per account for the trend series, in table order."""
-    hues = (palette.accent, palette.sev_ok, palette.foreground, palette.muted)
-    return {a.number: hues[i % len(hues)] for i, a in enumerate(report.accounts)}
+def account_colors(report: CostReport, palette: Palette,
+                   indices: dict[str, int] | None = None) -> dict[str, str]:
+    """Each account's hue: its kept color ``indices`` (by account key, see
+    :mod:`claude_rotater.account_colors`), else one by table order;
+    unattributed spend is muted."""
+    out = {UNATTRIBUTED: palette.muted}
+    for i, a in enumerate(report.accounts):
+        out[a.number] = palette.account(indices.get(a.number, i) if indices else i)
+    return out
+
+
+def account_tag(key: str) -> str:
+    """How a bar's legend and the duty row name an account: ``#2``, a
+    removed one by its email's local part (``×work``), ``?`` for nobody."""
+    if key == UNATTRIBUTED:
+        return "?"
+    if key.startswith("x:"):
+        local = key[2:].split("|", 1)[0].split("@", 1)[0]
+        return f"×{local[:6]}" if local else "×?"
+    return f"#{key}"
+
+
+def account_label(key: str, names: dict[str, str]) -> str:
+    """An account in a table or legend: ``#2 me@x.com``, ``× old@x.com
+    (removed)``, ``? unattributed``."""
+    if key == UNATTRIBUTED:
+        return "? unattributed"
+    if key.startswith("x:"):
+        email = key[2:].split("|", 1)[0]
+        return f"× {email or 'unknown account'} (removed)"
+    return f"#{key} {names[key]}" if key in names else f"#{key}"
 
 
 # -- bucketing -------------------------------------------------------------------
@@ -299,9 +333,11 @@ def bar_chart(
     *,
     axis: tuple[str, str, str],
     under: Sequence[str | None] | None = None,
+    under_colors: dict[str, str] | None = None,
 ) -> list[Text]:
     """Stacked bars, ``height`` rows, then the optional ``under`` row (who
-    was on duty, shown where it changes) and an axis of (left, middle,
+    was on duty, shown where it changes, each in ``under_colors``) and an
+    axis of (left, middle,
     right) labels. A bar is cut in eighths at its top and colored by the
     model holding each cell; dashed rows mark round dollar values, the top
     row the round value at or above the tallest bar."""
@@ -337,7 +373,7 @@ def bar_chart(
             line.append(filler * (col - bar), style=grid_style)
         lines.append(line)
     if under is not None:
-        lines.append(_duty_row(under, col, label_w, palette))
+        lines.append(_duty_row(under, col, label_w, palette, under_colors or {}))
     lines.append(_axis(axis, label_w, col * n, palette))
     return lines
 
@@ -356,21 +392,29 @@ def _axis(axis: tuple[str, str, str], label_w: int, span: int, palette: Palette)
     return text
 
 
-def _duty_row(under: Sequence[str | None], col: int, label_w: int, palette: Palette) -> Text:
+def _duty_row(under: Sequence[str | None], col: int, label_w: int, palette: Palette,
+              colors: dict[str, str]) -> Text:
     """``#3`` under the bar where account 3 came on duty, when it fits
-    clear of the mark before it."""
-    cells = [" "] * (col * len(under))
+    clear of the mark before it, in the account's color."""
+    marks: list[tuple[int, str, str]] = []  # (column, text, account)
+    width = col * len(under)
     free, prev, pending = 0, None, None
     for i, who in enumerate(under):
         if who != prev:
             pending = who  # marked at the first column with room, if still on duty
-        mark = f"#{who}"
-        if who is not None and who == pending and free <= i * col <= len(cells) - len(mark):
-            cells[i * col:i * col + len(mark)] = mark
+        mark = account_tag(who) if who is not None else ""
+        if who is not None and who == pending and free <= i * col <= width - len(mark):
+            marks.append((i * col, mark, who))
             free, pending = i * col + len(mark) + 1, None
         prev = who
     row = Text(no_wrap=True, style=palette.muted)
-    row.append(f"{'on':>{label_w - 1}} " + "".join(cells))
+    row.append(f"{'on':>{label_w - 1}} ")
+    at = 0
+    for column, mark, who in marks:
+        row.append(" " * (column - at))
+        row.append(mark, style=colors.get(who, palette.muted))
+        at = column + len(mark)
+    row.append(" " * (width - at))
     return row
 
 
@@ -379,104 +423,135 @@ def _fits(n: int, width: int, label_w: int = 6) -> bool:
     return 2 * n <= width - label_w
 
 
-def _split(buckets: Sequence[Bucket], pick: str) -> list[Bucket]:
-    """``buckets`` (by model) cut down to the one model ``pick`` names."""
-    return [(t, {pick: m[pick]} if pick in m else {}) for t, m in buckets]
+Cells = dict[tuple[str, str], float]  # (account key, model) -> usd
 
 
-def _by_account(cells) -> dict[str, float]:
+def _cells_series(report: CostReport, view: str) -> list[tuple[float, Cells]]:
+    if view == "total":
+        return fill_days(list(report.history_cells))
+    if view == "monthly":
+        return list(report.history_cells[-len(report.days):]) if report.days else []
+    return list(report.hour_cells)
+
+
+def _keep(cell: tuple[str, str], account: str, model: str) -> bool:
+    who, name = cell
+    return (account in (ALL, BY_ACCOUNT) or who == account) and model in (ALL_MODELS, name)
+
+
+def stack_of(account: str, model: str) -> str:
+    """What a bar is split by: accounts on "by account", else models (one
+    series when one model is picked)."""
+    return "account" if account == BY_ACCOUNT else "model"
+
+
+def _select(cells: Cells, account: str, model: str) -> dict[str, float]:
+    by_account = stack_of(account, model) == "account"
     out: dict[str, float] = {}
-    for (who, _), usd in cells.items():
-        out[who] = out.get(who, 0.0) + usd
+    for cell, usd in cells.items():
+        if _keep(cell, account, model):
+            key = cell[0] if by_account else cell[1]
+            out[key] = out.get(key, 0.0) + usd
     return out
 
 
-def money_series(report: CostReport, view: str, width: int, pick: str = ALL_MODELS):
-    """``(buckets, duty or None, axis)`` of a money view at ``width``, split
-    as ``pick`` says: by model, by account (``{number: usd}``, ``""`` for
-    spend no account was credited with) or one model alone."""
+def money_series(report: CostReport, view: str, width: int, account: str = ALL,
+                 model: str = ALL_MODELS):
+    """``(buckets, duty or None, axis)`` of a money view at ``width``, the
+    spend ``account`` and ``model`` pick, each bucket ``{key: usd}`` split
+    as :func:`stack_of` says (account ``""``: spend nobody was credited
+    with, which the days older than the priced range all are)."""
     def stamp(fmt: str, t: float) -> str:
         return time.strftime(fmt, time.localtime(t))
 
-    accounts = pick == BY_ACCOUNT
-    one = pick not in (ALL_MODELS, BY_ACCOUNT)
-    account_days = [(t, _by_account(c)) for t, c in report.history_cells[-len(report.days):]]
-    account_hours = [(t, _by_account(c)) for t, c in report.hour_cells]
+    series = [(t, _select(c, account, model)) for t, c in _cells_series(report, view)]
     if view == "total":
-        if accounts:
-            days = fill_days([(t, _by_account(c)) for t, c in report.history_cells])
-        else:
-            days = fill_days(_split(report.history, pick) if one else report.history)
         for size, unit in ((1, "daily"), (7, "weekly"), (30, "monthly")):
-            buckets = group(days, size)
+            buckets = group(series, size)
             if _fits(len(buckets), width) or size == 30:
                 break
         first = stamp("%m-%d", buckets[0][0]) if buckets else ""
         return buckets, None, (first, f"all, {unit}", "today")
     if view == "monthly":
-        days = list(account_days if accounts else report.days)
-        if one:
-            days = _split(days, pick)
-        return days, None, (stamp("%m-%d", days[0][0]) if days else "", "30 days", "today")
-    hours, duty = list(account_hours if accounts else report.hours), list(report.hour_duty)
-    if one:
-        hours = _split(hours, pick)
+        return series, None, (stamp("%m-%d", series[0][0]) if series else "", "30 days", "today")
+    duty = list(report.hour_duty)
     if view == "weekly":
-        size = 3 if _fits(len(hours) // 3, width) else 6
-        buckets = group(hours, size)
+        size = 3 if _fits(len(series) // 3, width) else 6
+        buckets = group(series, size)
         first = stamp("%a %H:00", buckets[0][0]) if buckets else ""
         return buckets, group_duty(duty, size), (first, f"7 days, {size}h bars", "now")
     n = 24 if _fits(24, width) else 12
-    buckets = hours[-n:]
+    buckets = series[-n:]
     return buckets, duty[-n:], (stamp("%H:00", buckets[0][0]) if buckets else "",
                                 f"{n} hours", "now")
 
 
-def range_spend(report: CostReport, view: str, width: int) -> dict[str, float]:
-    """``{model: usd}`` over what the money ``view`` shows."""
-    buckets, _, _ = money_series(report, view, width)
-    out: dict[str, float] = {}
-    for _, models in buckets:
-        for name, usd in models.items():
-            out[name] = out.get(name, 0.0) + usd
+def range_cells(report: CostReport, view: str, width: int) -> Cells:
+    """Every (account, model)'s spend over what the money ``view`` shows."""
+    lo = money_series(report, view, width)[0]
+    first = lo[0][0] if lo else float("inf")
+    out: Cells = {}
+    for t, cells in _cells_series(report, view):
+        if t >= first:
+            for cell, usd in cells.items():
+                out[cell] = out.get(cell, 0.0) + usd
     return out
 
 
-def picks(report: CostReport, view: str, width: int) -> list[str]:
-    """What ↑/↓ cycles on ``view``, in order. A money view: all models, by
-    account, then each model with at least :data:`MIN_MODEL_SHARE` of the
-    range, costliest first. A trend view: all accounts, then each account
-    with something to plot."""
+def _ranked(spend: dict[str, float]) -> list[str]:
+    return sorted((k for k, usd in spend.items() if usd > 0), key=lambda k: (-spend[k], k))
+
+
+def account_picks(report: CostReport, view: str, width: int) -> list[str]:
+    """What ↑/↓ cycles on ``view``, in order. A money view: all, by
+    account, then each account with spend in the range, as the account
+    table orders them. A trend view: all accounts, then each with
+    something to plot."""
     if view in TREND_VIEWS:
         return [ALL_ACCOUNTS, *(a.number for a, _ in trend_accounts(report, TREND_VIEWS[view]))]
-    spend = range_spend(report, view, width)
-    total = sum(spend.values())
-    alone = sorted((name for name, usd in spend.items()
-                    if total > 0 and usd / total >= MIN_MODEL_SHARE), key=lambda n: -spend[n])
-    return [ALL_MODELS, BY_ACCOUNT, *alone]
+    spent = {who for (who, _), usd in range_cells(report, view, width).items() if usd > 0}
+    return [ALL, BY_ACCOUNT, *(a.number for a in report.accounts if a.number in spent)]
+
+
+def model_picks(report: CostReport, view: str, width: int) -> list[str]:
+    """What tab cycles on a money ``view``: all models, then every model
+    with any spend in the range, costliest first. None on a trend."""
+    if view in TREND_VIEWS:
+        return []
+    spend: dict[str, float] = {}
+    for (_, name), usd in range_cells(report, view, width).items():
+        spend[name] = spend.get(name, 0.0) + usd
+    return [ALL_MODELS, *_ranked(spend)]
 
 
 def resolve_pick(report: CostReport, view: str, width: int, pick: str | None) -> str:
-    """``pick`` when ``view`` offers it, else its first ("all") pick."""
-    options = picks(report, view, width)
+    """``pick`` when ``view``'s account axis offers it, else its first."""
+    options = account_picks(report, view, width)
     return pick if pick in options else options[0]
 
 
+def resolve_model(report: CostReport, view: str, width: int, model: str | None) -> str:
+    """``model`` when ``view`` offers it, else all models."""
+    options = model_picks(report, view, width)
+    return model if model in options else ALL_MODELS
+
+
 def money_chart(report: CostReport, view: str, width: int, height: int,
-                palette: Palette, pick: str = ALL_MODELS) -> list[Text]:
-    buckets, duty, axis = money_series(report, view, width, pick)
+                palette: Palette, pick: str = ALL, model: str = ALL_MODELS,
+                colors: dict[str, str] | None = None) -> list[Text]:
+    buckets, duty, axis = money_series(report, view, width, pick, model)
     under = duty if duty is not None and any(d is not None for d in duty) else None
-    if pick == BY_ACCOUNT:
+    if stack_of(pick, model) == "account":
         order = [a.number for a in report.accounts]
-        colors = account_colors(report, palette)
+        hues = colors or account_colors(report, palette)
     else:
+        hues = model_colors(report, palette)
         order = [m.name for m in report.models[:COLORED_MODELS]]
-        colors = model_colors(report, palette)
-        if pick != ALL_MODELS:
-            order = [pick]
-            colors = {pick: colors.get(pick, palette.accent)}
-    return bar_chart([b for _, b in buckets], width, height, order, colors, palette,
-                     axis=axis, under=under)
+        if model != ALL_MODELS:
+            order = [model]
+            hues = {model: hues.get(model, palette.accent)}
+    return bar_chart([b for _, b in buckets], width, height, order, hues, palette,
+                     axis=axis, under=under, under_colors=colors)
 
 
 def trend_accounts(report: CostReport, label: str, pick: str = ALL_ACCOUNTS):
@@ -507,7 +582,7 @@ def _columns(points, col_of) -> dict[int, tuple[float, float, float, bool]]:
 
 def trend_chart(report: CostReport, label: str, width: int, height: int,
                 names: dict[str, str], palette: Palette,
-                pick: str = ALL_ACCOUNTS) -> list[Text]:
+                pick: str = ALL_ACCOUNTS, colors: dict[str, str] | None = None) -> list[Text]:
     """Each account's $ per 1% of ``label`` over time, one point per column
     (the median of its samples: ● sure, ○ mostly used elsewhere) over a
     faint ``│`` from its lower to upper quartile, with the trendline, flat
@@ -517,7 +592,7 @@ def trend_chart(report: CostReport, label: str, width: int, height: int,
     if not shown:
         return [Text(f"no {label} climb priced locally yet",
                      style=palette.muted, no_wrap=True, overflow="ellipsis")]
-    colors = account_colors(report, palette)
+    colors = colors or account_colors(report, palette)
     t_hi = report.now
     t_lo = min(t for _, p in shown for t, _, _ in p.points)
     if t_hi - t_lo < DAY_S:
@@ -578,12 +653,12 @@ def trend_chart(report: CostReport, label: str, width: int, height: int,
     first = time.strftime("%m-%d", time.localtime(t_lo))
     lines.append(_axis((first, f"$ per 1% of {label}", "now"), label_w, plot_w,
                        palette))
-    name_w = max(len(names.get(a.number, f"#{a.number}")) for a, _ in shown)
+    name_w = max(len(account_label(a.number, names)) for a, _ in shown)
     for acc, p in shown:
         line = Text(no_wrap=True, overflow="ellipsis")
         line.append("● ", style=colors[acc.number])
-        line.append(f"{names.get(acc.number, f'#{acc.number}'):<{name_w}}  ",
-                    style=palette.foreground)
+        line.append_text(_named(acc.number, names, colors, palette, name_w))
+        line.append("  ")
         value = per_pct_value(p)
         line.append(f"{value:<8} ", style=palette.foreground if p.sure else palette.sev_warn)
         words, style = verdict(p, palette)
@@ -593,36 +668,68 @@ def trend_chart(report: CostReport, label: str, width: int, height: int,
     return lines
 
 
+def _named(key: str, names: dict[str, str], colors: dict[str, str], palette: Palette,
+           width: int = 0) -> Text:
+    """``#2 me@x.com``: the account's tag in its color, then its name."""
+    text = Text(no_wrap=True)
+    full = account_label(key, names)
+    head = account_tag(key) if key and not key.startswith("x:") else full.split(" ", 1)[0]
+    text.append(head, style=f"bold {colors.get(key, palette.muted)}")
+    text.append(full[len(head):], style=palette.foreground if key else palette.muted)
+    if width > len(full):
+        text.append(" " * (width - len(full)))
+    return text
+
+
+def _share(text: Text, part: float, whole: float, palette: Palette) -> None:
+    text.append(" · ", style=palette.muted)
+    text.append(money(part), style=f"bold {palette.foreground}")
+    text.append(f" ({part / whole * 100 if whole else 0:.0f}%)", style=palette.muted)
+
+
 def pick_title(report: CostReport, view: str, width: int, pick: str,
-               names: dict[str, str], palette: Palette) -> Text:
-    """``↕ Opus 5.5 · $4,210 (96%)``, ``↕ by account ■ #2 ■ #1`` (a swatch
-    per account, the bars' legend), ``↕ all models`` or, on a trend view,
-    ``↕ all accounts`` / ``↕ <account>``."""
+               names: dict[str, str], palette: Palette, model: str = ALL_MODELS,
+               colors: dict[str, str] | None = None) -> Text:
+    """What the chart shows: ``↕ #2 · ⇥ Opus 5.5 · $1,210 (31%)`` (the
+    picked spend and its share of the range), ``↕ by account ■ #1 ■ #2``
+    (a swatch per account, the bars' legend), ``↕ all · ⇥ all models`` or,
+    on a trend view, ``↕ all accounts`` / ``↕ #2 me@x.com``."""
+    colors = colors or account_colors(report, palette)
     text = Text(no_wrap=True)
     text.append("↕ ", style=palette.muted)
-    if view in TREND_VIEWS or pick in (ALL_MODELS, BY_ACCOUNT):
-        label = names.get(pick, f"#{pick}") if pick.isdigit() else pick
-        text.append(label, style=f"bold {palette.foreground}")
-        if pick == BY_ACCOUNT:
-            colors = account_colors(report, palette)
-            for acc in report.accounts:
-                text.append(" ■", style=colors[acc.number])
-                text.append(f" #{acc.number}", style=palette.muted)
+    if view in TREND_VIEWS:
+        if pick == ALL_ACCOUNTS:
+            text.append(pick, style=f"bold {palette.foreground}")
+        else:
+            text.append_text(_named(pick, names, colors, palette))
         return text
-    spend = range_spend(report, view, width)
-    total = sum(spend.values())
-    text.append(pick, style=f"bold {model_colors(report, palette).get(pick, palette.accent)}")
+    if pick in (ALL, BY_ACCOUNT):
+        text.append(pick, style=f"bold {palette.foreground}")
+    else:
+        text.append(account_tag(pick), style=f"bold {colors.get(pick, palette.muted)}")
     text.append(" · ", style=palette.muted)
-    text.append(money(spend.get(pick, 0.0)), style=f"bold {palette.foreground}")
-    share = spend.get(pick, 0.0) / total if total else 0.0
-    text.append(f" ({share * 100:.0f}%)", style=palette.muted)
+    text.append("⇥ ", style=palette.muted)
+    model_hue = model_colors(report, palette).get(model, palette.muted)
+    text.append(model, style=f"bold {palette.foreground if model == ALL_MODELS else model_hue}")
+    if pick != ALL or model != ALL_MODELS:
+        cells = range_cells(report, view, width)
+        part = sum(usd for cell, usd in cells.items() if _keep(cell, pick, model))
+        _share(text, part, sum(cells.values()), palette)
+    if pick == BY_ACCOUNT:
+        spent = {who for (who, name), usd in range_cells(report, view, width).items()
+                 if usd > 0 and model in (ALL_MODELS, name)}
+        for key in [a.number for a in report.accounts] + [UNATTRIBUTED]:
+            if key in spent:
+                text.append(" ■", style=colors.get(key, palette.muted))
+                text.append(f" {account_tag(key)}", style=palette.muted)
     return text
 
 
 def chart_title(report: CostReport, view: str, palette: Palette, *, width: int = 80,
-                pick: str | None = None, names: dict[str, str] | None = None) -> Text:
-    """``‹ weekly ›  ←/→ · ↕ by account``, plus the whole-history total on
-    the total view and the marks' key on a trend."""
+                pick: str | None = None, names: dict[str, str] | None = None,
+                model: str = ALL_MODELS, colors: dict[str, str] | None = None) -> Text:
+    """``‹ weekly ›  ←/→ · ↕ by account · ⇥ all models``, plus the
+    whole-history total on the total view and the marks' key on a trend."""
     text = Text(no_wrap=True, overflow="ellipsis")
     text.append("‹ ", style=palette.muted)
     text.append(view, style=f"bold {palette.accent}")
@@ -630,8 +737,10 @@ def chart_title(report: CostReport, view: str, palette: Palette, *, width: int =
     text.append("  ←/→", style=palette.muted)
     if pick is not None:
         text.append(" · ", style=palette.muted)
-        text.append_text(pick_title(report, view, width, pick, names or {}, palette))
-    if view == "total" and report.history and pick in (None, ALL_MODELS, BY_ACCOUNT):
+        text.append_text(pick_title(report, view, width, pick, names or {}, palette, model,
+                                    colors))
+    if view == "total" and report.history and pick in (None, ALL, BY_ACCOUNT) \
+            and model == ALL_MODELS:
         total = sum(sum(m.values()) for _, m in report.history)
         since = time.strftime("%m-%d", time.localtime(report.history[0][0]))
         text.append("   ")
@@ -644,16 +753,21 @@ def chart_title(report: CostReport, view: str, palette: Palette, *, width: int =
 
 
 def chart_lines(report: CostReport, view: str, width: int, height: int,
-                names: dict[str, str], palette: Palette, pick: str | None = None) -> list[Text]:
-    """The chosen view's title and chart, bars ``height`` rows high, split
-    as ``pick`` says (the view's first pick when it offers no such one)."""
+                names: dict[str, str], palette: Palette, pick: str | None = None,
+                model: str | None = None, colors: dict[str, str] | None = None) -> list[Text]:
+    """The chosen view's title and chart, bars ``height`` rows high, the
+    spend ``pick`` and ``model`` say (each axis' first pick when the view
+    offers no such one)."""
     pick = resolve_pick(report, view, width, pick)
-    title = chart_title(report, view, palette, width=width, pick=pick, names=names)
+    model = resolve_model(report, view, width, model)
+    colors = colors or account_colors(report, palette)
+    title = chart_title(report, view, palette, width=width, pick=pick, names=names,
+                        model=model, colors=colors)
     title.truncate(width, overflow="ellipsis")
     if view in TREND_VIEWS:
         return [title, *trend_chart(report, TREND_VIEWS[view], width, height, names, palette,
-                                    pick)]
-    return [title, *money_chart(report, view, width, height, palette, pick)]
+                                    pick, colors)]
+    return [title, *money_chart(report, view, width, height, palette, pick, model, colors)]
 
 
 def chart_rows(report: CostReport, view: str, width: int, height: int,
@@ -720,24 +834,39 @@ def model_lines(report: CostReport, width: int, rows: int, palette: Palette) -> 
     return out
 
 
+def table_keys(report: CostReport) -> list[str]:
+    """The account table's rows: each account, then nobody's spend if any."""
+    return [a.number for a in report.accounts] + ([UNATTRIBUTED] if report.unattributed >= 1 else [])
+
+
 def account_lines(
-    report: CostReport, width: int, rows: int, names: dict[str, str], palette: Palette
+    report: CostReport, width: int, rows: int, names: dict[str, str], palette: Palette,
+    colors: dict[str, str] | None = None,
 ) -> list[Text]:
-    """Cost and $ per 1% per account; how the $ per 1% moves is the trend
-    views' job, so only the figure shows here (saffron and ``?`` when unsure)."""
-    shown = report.accounts[:rows]
-    labels = [names.get(a.number, f"#{a.number}") for a in shown]
+    """Cost and $ per 1% per account (``#2`` in its color), then the spend
+    nobody was credited with; how the $ per 1% moves is the trend views'
+    job, so only the figure shows here (saffron and ``?`` when unsure)."""
+    colors = colors or account_colors(report, palette)
+    shown = list(report.accounts)
+    keys = table_keys(report)[:rows]
+    labels = [account_label(k, names) for k in keys]
     want = max([len("account"), *(len(s) for s in labels)])
     name_w = max(8, min(want, width - 7 - 2 * (9 + 2) - 2))
     out = [_row([("account", -name_w, palette.muted), ("30d", 7, palette.muted),
                  ("$/1% 5h", -9, palette.muted), ("$/1% 7d", -9, palette.muted)])]
-    for acc, label in zip(shown, labels):
-        cells = [(label, -name_w, palette.foreground),
-                 (money(acc.cost), 7, f"bold {palette.foreground}")]
-        for p in (acc.per_5h, acc.per_7d):
+    for key, text in zip(keys, labels):
+        acc = next((a for a in shown if a.number == key), None)
+        line = _named(key, names, colors, palette)
+        if len(text) > name_w:
+            line.truncate(name_w - 1)
+            line.append("…", style=palette.muted)
+        line.append(" " * (name_w - line.cell_len + 2))
+        cost = acc.cost if acc is not None else report.unattributed
+        cells = [(money(cost), 7, f"bold {palette.foreground}" if acc else palette.muted)]
+        for p in ((acc.per_5h, acc.per_7d) if acc is not None else ()):
             style = palette.foreground if p is None or p.sure else palette.sev_warn
             cells.append((per_pct_value(p), -9, style))
-        line = _row(cells)
+        line.append_text(_row(cells))
         line.rstrip()
         out.append(line)
     return out
@@ -746,7 +875,7 @@ def account_lines(
 def note_text(report: CostReport, palette: Palette, width: int) -> Text:
     note = NOTE
     if report.unattributed >= 1:
-        note += f" · {money(report.unattributed)} unattributed"
+        note += " · ? = no record of who was logged in"
     text = Text(note, style=palette.muted, no_wrap=True, overflow="ellipsis")
     text.truncate(width, overflow="ellipsis")
     return text
@@ -764,6 +893,8 @@ def costs_lines(
     palette: Palette,
     view: str = VIEWS[0],
     pick: str | None = None,
+    model: str | None = None,
+    colors: dict[str, str] | None = None,
     status: str = "",
     empty: str = LOADING,
 ) -> list[Text]:
@@ -771,15 +902,15 @@ def costs_lines(
     richest layout that fits.
 
     Lower-priority parts give way first: the note, the gaps, model rows
-    (down to three), chart rows (down to three), then the chart and the
+    (every model with spend, then five, then three), chart rows (down to three), then the chart and the
     model table. The summary and the account table stay. A trend view
     names every account in its legend, so it leaves the tables out.
     """
     if report is None:
         return [Text(status or empty, style=palette.muted)]
     trend = view in TREND_VIEWS
-    n_models = 0 if trend else min(len(report.models), MODEL_ROWS)
-    n_accounts = 0 if trend else len(report.accounts)
+    n_models = 0 if trend else len(report.models)
+    n_accounts = 0 if trend else len(table_keys(report))
     summary = summary_text(report, palette, status=status)
     if summary.cell_len > width:  # the freshness note is the first to go
         summary = summary_text(report, palette)
@@ -799,7 +930,7 @@ def costs_lines(
     plans = [
         (note, gaps, rows, chart, min_h)
         for chart, min_h in ((True, CHART_ROOMY_H), (True, CHART_MIN_H), (False, 0))
-        for rows in (n_models, min(n_models, 3), 0)
+        for rows in dict.fromkeys((n_models, min(n_models, 5), min(n_models, 3), 0))
         for gaps in (True, False)
         for note in (True, False)
     ]
@@ -814,9 +945,10 @@ def costs_lines(
     note, gaps, model_rows, chart, _ = plan
     blocks: list[list[Text]] = [[summary]]
     if chart:
-        blocks.append(chart_lines(report, view, width, chart_h, names, palette, pick))
+        blocks.append(chart_lines(report, view, width, chart_h, names, palette, pick, model,
+                                  colors))
     if n_accounts:
-        blocks.append(account_lines(report, width, n_accounts, names, palette))
+        blocks.append(account_lines(report, width, n_accounts, names, palette, colors))
     if model_rows:
         blocks.append(model_lines(report, width, model_rows, palette))
     if note:
@@ -831,9 +963,9 @@ def costs_lines(
 
 def plain_page(report: CostReport, names: dict[str, str], *, width: int = 100) -> str:
     """The whole page as text for ``Y``: the money views' parts once, with
-    the 30-day chart, then both trend charts."""
+    the 30-day chart by account, then both trend charts."""
     parts = [costs_lines(report, width=width, height=200, names=names, palette=Palette.DARK,
-                         view="monthly")]
+                         view="monthly", pick=BY_ACCOUNT)]
     for view in TREND_VIEWS:
         parts.append(chart_lines(report, view, width, 8, names, Palette.DARK))
     return "\n\n".join("\n".join(line.plain.rstrip() for line in lines) for lines in parts)
@@ -855,6 +987,9 @@ class CostsView(Widget, can_focus=True):
         Binding("left", "cycle(-1)", show=False),
         Binding("down", "split(1)", show=False),
         Binding("up", "split(-1)", show=False),
+        # held by the page while it has the keyboard, so tab never moves focus
+        Binding("tab", "model(1)", show=False),
+        Binding("shift+tab", "model(-1)", show=False),
         Binding("y", "copy_summary", show=False),
         Binding("Y", "copy_page", show=False),
     ]
@@ -872,9 +1007,11 @@ class CostsView(Widget, can_focus=True):
         self.result: CostResult | None = None
         self.busy = False
         self.view = VIEWS[0]  # kept while the app runs, so a reopen shows the same chart
-        # what ↑/↓ chose, one for the money views and one for the trends; kept
-        # across views, shown wherever the view offers it (else "all")
-        self.money_pick = ALL_MODELS
+        # what ↑/↓ chose, one for the money views and one for the trends, and
+        # what tab chose; kept across views, shown wherever the view offers
+        # it (else "all")
+        self.money_pick = ALL
+        self.model_pick = ALL_MODELS
         self.trend_pick = ALL_ACCOUNTS
 
     # -- data ------------------------------------------------------------------------
@@ -890,6 +1027,21 @@ class CostsView(Widget, can_focus=True):
         from claude_rotater.tui.main import account_name
 
         return {a.number: account_name(a) for a in self._accounts()}
+
+    def colors(self, report: CostReport, palette: Palette) -> dict[str, str]:
+        """Each account key's hue, kept by identity (the rows' colors); a
+        removed account's from the identity its key names."""
+        from claude_rotater.attribution import key_identity
+
+        ids = self.identities()
+        color_index = getattr(self.app, "color_index", None)
+        if color_index is None:
+            return account_colors(report, palette)
+        out = {UNATTRIBUTED: palette.muted}
+        for acc in report.accounts:
+            identity = ids.get(acc.number) or key_identity(acc.number)
+            out[acc.number] = palette.account(color_index(identity) if identity else None)
+        return out
 
     def open(self) -> None:
         """Take the keyboard; show the cached report, then refresh it."""
@@ -943,6 +1095,7 @@ class CostsView(Widget, can_focus=True):
             return Text(note or LOADING, style=palette.muted)
         lines = costs_lines(report, width=width, height=height, names=self.names(),
                             palette=palette, view=self.view, pick=self.pick,
+                            model=self.model_pick, colors=self.colors(report, palette),
                             status=self.status())
         return Text("\n", no_wrap=True, overflow="ellipsis").join(lines)
 
@@ -964,18 +1117,29 @@ class CostsView(Widget, can_focus=True):
         return max(20, self.size.width or 80)
 
     def action_split(self, step: int) -> None:
-        """The next (or previous) split of this chart, wrapping around; from
-        a pick this view lacks, the cycle starts at its first."""
+        """The next (or previous) account pick of this chart, wrapping
+        around; from a pick this view lacks, the cycle starts at its first."""
         report = self.result.report if self.result else None
         if report is None:
             return
-        options = picks(report, self.view, self._width())
+        options = account_picks(report, self.view, self._width())
         current = resolve_pick(report, self.view, self._width(), self.pick)
         chosen = options[(options.index(current) + step) % len(options)]
         if self.view in TREND_VIEWS:
             self.trend_pick = chosen
         else:
             self.money_pick = chosen
+        self.refresh()
+
+    def action_model(self, step: int) -> None:
+        """The next (or previous) model of a money chart, wrapping around;
+        a trend has none to pick."""
+        report = self.result.report if self.result else None
+        if report is None or self.view in TREND_VIEWS:
+            return
+        options = model_picks(report, self.view, self._width())
+        current = resolve_model(report, self.view, self._width(), self.model_pick)
+        self.model_pick = options[(options.index(current) + step) % len(options)]
         self.refresh()
 
     def action_refresh(self) -> None:
