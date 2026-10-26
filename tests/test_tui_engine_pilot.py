@@ -134,7 +134,7 @@ async def test_pace_switch_moves_cursor_charts_and_forecasts(world):
         await until(pilot, lambda: app.snapshot is not None and "~" in page(app)["rows"]["1"])
         before = page(app)
         assert before["cursor"] == before["active"] == "1"
-        assert before["charts"].startswith("› a@example.com")
+        assert before["charts"].startswith("› #1 a@example.com")
         assert "~5h limit in" in before["rows"]["1"]  # the user is burning #1
         # The user keeps working on #1: its 5h climbs past pace's "tight"
         # line, one statusline record at a time. Only the feed says so (the
@@ -153,7 +153,7 @@ async def test_pace_switch_moves_cursor_charts_and_forecasts(world):
     assert "switch → #2" in after["header"]
     # The cursor rode the account on duty, so it and the charts followed.
     assert after["cursor"] == "2"
-    assert after["charts"].startswith("› b@example.com"), after["charts"][:80]
+    assert after["charts"].startswith("› #2 b@example.com"), after["charts"][:80]
     # The new duty carries the user's burn at once; the old one stops
     # projecting the burn that was the user's, not its own.
     two, one = app.estimates["2"], app.estimates["1"]

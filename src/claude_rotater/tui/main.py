@@ -446,6 +446,7 @@ class RowLayout:
     name_w: int
     tag_w: int
     level: Level
+    num_w: int = 0  # "#12": the account number before the name, the one logs use
 
     @property
     def bar_w(self) -> int:
@@ -481,6 +482,7 @@ class RowLayout:
         tag_need: int = 0,
         short_name_need: int | None = None,
         warn_tag_need: int | None = None,
+        num_need: int = 0,
     ) -> "RowLayout":
         """The richest level that fits ``width``.
 
@@ -497,12 +499,13 @@ class RowLayout:
         def build(level: Level, name_w: int) -> "RowLayout":
             shown = windows if level.models else tuple(w for w in windows if w in PRIMARY_WINDOWS)
             tag_w = min(tag_need if level.org else warn_need, _MAX_TAG_W)
-            return cls(width, shown, name_w, tag_w, level)
+            return cls(width, shown, name_w, tag_w, level, num_need)
 
         def room(level: Level) -> int:
             layout = build(level, 0)
             return width - (
                 _PREFIX_W
+                + (layout.num_w + 1 if layout.num_w else 0)
                 + (layout.tag_w + _GAP if layout.tag_w else 0)
                 + sum(layout.window_w(label) + _GAP for label in layout.windows)
                 + (layout.forecast_w + _GAP if layout.forecast_w else 0)
@@ -896,17 +899,22 @@ def account_row_text(
     models: Sequence[str] = (),
     cadence: PollCadence = DEFAULT_CADENCE,
     selected: bool = False,
+    color: str | None = None,
 ) -> Text:
     """One account on one line, laid out by ``layout``:
-    ``›● me@x.com  Acme  5h 58% ↻ 1h20m  7d 48% ↻ 23h  ~7d limit in 15h``.
+    ``›● #1 me@x.com  Acme  5h 58% ↻ 1h20m  7d 48% ↻ 23h  ~7d limit in 15h``.
 
     ``›`` and a bold name mark the row under the cursor (its band is CSS);
     ``●`` and an accent name mark the account on duty, so the two read apart
-    at a glance."""
+    at a glance. ``#1`` is the number the header, the log and the costs
+    use, in the account's own ``color``."""
     text = Text(no_wrap=True, overflow="ellipsis")
     text.append(CURSOR_MARK if selected else " ", style=f"bold {palette.accent}")
     text.append(ON_DUTY_MARK if acc.is_active else " ", style=palette.accent)
     text.append(" ")
+    if layout.num_w:
+        text.append(f"#{acc.number}".ljust(layout.num_w), style=f"bold {color or palette.muted}")
+        text.append(" ")
     name_style = name_color(acc, palette)
     text.append(fit_name(account_name(acc), layout.name_w), style=f"bold {name_style}" if selected else name_style)
     if layout.tag_w:
@@ -1086,6 +1094,7 @@ def chart_lines(
     width: int,
     height: int,
     palette: Palette = Palette.DARK,
+    color: str | None = None,
 ) -> list[Text]:
     """The charts in at most ``height`` lines, or none when fewer than
     :func:`chart_min_rows` are spare: a line naming the account they belong
@@ -1096,7 +1105,8 @@ def chart_lines(
     if not blocks or height < chart_min_rows(width, len(blocks)):
         return []
     title = Text(f"{CURSOR_MARK} ", style=f"bold {palette.accent}", no_wrap=True)
-    title.append(account_title(acc, palette, ELSEWHERE if used_elsewhere(acc, est) else ""))
+    title.append(account_title(acc, palette, ELSEWHERE if used_elsewhere(acc, est) else "",
+                               color))
     return [title, *_arrange(blocks, width=width, height=height - 1)]
 
 
@@ -1118,10 +1128,13 @@ class LongTerm:
     series_7d: tuple[Point, ...] = ()
 
 
-def account_title(acc: AccountSnapshot, palette: Palette, suffix: str = "") -> Text:
-    """``me@x.com  Acme`` above the graphs: the name in the accent when it
-    is the account on duty, as in its row."""
+def account_title(acc: AccountSnapshot, palette: Palette, suffix: str = "",
+                  color: str | None = None) -> Text:
+    """``#1 me@x.com  Acme`` above the graphs: the number in the account's
+    ``color``, the name in the accent when it is the account on duty, as in
+    its row."""
     text = Text(no_wrap=True, overflow="ellipsis")
+    text.append(f"#{acc.number} ", style=f"bold {color or palette.muted}")
     text.append(account_name(acc), style=f"bold {name_color(acc, palette)}")
     tag = "off" if acc.disabled else acc.display_tag
     if tag != "personal":
@@ -1131,12 +1144,12 @@ def account_title(acc: AccountSnapshot, palette: Palette, suffix: str = "") -> T
     return text
 
 
-def history_title(acc: AccountSnapshot, palette: Palette) -> Text:
-    """``history  me@x.com      h/esc back``: which view, whose, the way out."""
+def history_title(acc: AccountSnapshot, palette: Palette, color: str | None = None) -> Text:
+    """``history  #1 me@x.com      h/esc back``: which view, whose, the way out."""
     text = Text(no_wrap=True, overflow="ellipsis")
     text.append("history", style=f"bold {palette.accent}")
     text.append("  ")
-    text.append(account_title(acc, palette))
+    text.append(account_title(acc, palette, color=color))
     text.append("   h/esc back", style=palette.muted)
     return text
 
@@ -1200,12 +1213,13 @@ def long_term_lines(
     height: int,
     palette: Palette = Palette.DARK,
     title: bool = True,
+    color: str | None = None,
 ) -> list[Text]:
     """The long-term view: one column per past 5h window over the last week,
     and the 7d usage curve over up to 30 days (as far back as history goes)."""
     if acc is None or height <= 0:
         return []
-    lines = [history_title(acc, palette)] if title else []
+    lines = [history_title(acc, palette, color)] if title else []
     if long_term is None:
         lines.append(Text("loading history…", style=palette.muted))
         return lines[:height]
@@ -1537,6 +1551,7 @@ class MainScreen(Screen):
             short_name_need=max(map(short_name_len, names), default=_MIN_NAME_W),
             tag_need=max(tags, default=0),
             warn_tag_need=max(warn_tags, default=0),
+            num_need=max((len(f"#{acc.number}") for acc in accounts), default=0),
         )
 
     def _chrome_rows(self) -> int:
@@ -1617,6 +1632,7 @@ class MainScreen(Screen):
             models=self.app.models,
             cadence=self.app.cadence,
             selected=number == self.selected_number,
+            color=self.app.account_color(number, self.palette),
         )
 
     def detail_text(self, width: int, _height: int) -> Text:
@@ -1639,6 +1655,7 @@ class MainScreen(Screen):
                 width=width,
                 height=budget,
                 palette=self.palette,
+                color=self.app.account_color(number, self.palette) if number else None,
             )
         else:
             lines = chart_lines(
@@ -1650,6 +1667,7 @@ class MainScreen(Screen):
                 width=width,
                 height=budget,
                 palette=self.palette,
+                color=self.app.account_color(number, self.palette) if number else None,
             )
         return Text("\n").join(lines)
 

@@ -1703,8 +1703,8 @@ class TestMainPage:
             app.theme = theme_name
             await pilot.press("down")
             await settle(pilot)
-            assert row_plain(app, "1").startswith(" ● me@x.com")  # on duty, cursor elsewhere
-            assert row_plain(app, "2").startswith("›  work@y.com")
+            assert row_plain(app, "1").startswith(" ● #1 me@x.com")  # on duty, cursor elsewhere
+            assert row_plain(app, "2").startswith("›  #2 work@y.com")
             rows = {r.number: r for r in app.screen.query(AccountRow)}
             band = rows["2"].styles.background
             assert band.a > 0 and band != rows["1"].styles.background
@@ -1716,10 +1716,32 @@ class TestMainPage:
             assert has_color(on_duty, "me@x.com", accent)  # one marker: ● plus the accent name
             assert not has_color(name, "work@y.com", accent)
             # the charts say whose they are
-            assert painted(app, "#detail").splitlines()[0].startswith("› work@y.com")
+            assert painted(app, "#detail").splitlines()[0].startswith("› #2 work@y.com")
             await pilot.hover(rows["3"])
             await pilot.pause()
             assert rows["3"].styles.background.a > 0  # hover tints too
+
+    async def test_each_row_shows_its_number_in_the_accounts_own_color(self, tmp_path):
+        """``#N`` before each name, the number the header, log and costs use,
+        in a color kept by identity: the same in the charts' title."""
+        from claude_rotater import account_colors
+        from claude_rotater.tui.main import AccountRow
+
+        app = make_app(three_accounts(tmp_path))
+        async with app.run_test(size=(120, 40)) as pilot:
+            await settle(pilot)
+            palette = Palette.from_theme(app.current_theme)
+            rows = {r.number: r.children[0].render() for r in app.screen.query(AccountRow)}
+            hues = {}
+            for number, text in rows.items():
+                assert f"#{number} " in text.plain
+                acc = next(a for a in app.snapshot.accounts if a.number == number)
+                hues[number] = palette.account(account_colors.indices([(acc.email, acc.org_uuid)])[
+                    (acc.email, acc.org_uuid)])
+                assert has_color(text, f"#{number}", hues[number])
+            assert len(set(hues.values())) == len(hues)  # three accounts, three hues
+            title = app.screen.query_one("#detail").render()
+            assert has_color(title, "#1 ", hues["1"])
 
     @pytest.mark.parametrize("theme_name", ["dark", "light"])
     @pytest.mark.parametrize("size", [(60, 20), (80, 24), (120, 40), (160, 50)])
@@ -1794,7 +1816,9 @@ class TestMainPage:
             assert listview.max_scroll_y == 0 and len(listview.children) == 4
             assert app.screen.max_scroll_y == 0
             assert app.screen.query_one("#prompt").region.bottom <= size[1]
-            assert "Fable  34%" in row_plain(app, "1")
+            assert row_plain(app, "1").startswith("›● #1 ")  # the number logs use, always
+            if size[0] >= 100:  # at 80 the number takes the model column's room
+                assert "Fable  34%" in row_plain(app, "1")
 
     async def test_event_log_appears_with_first_event(self, tmp_path, fake_engine):
         from claude_rotater.autoswitch import ErrorEvent
@@ -3299,7 +3323,7 @@ class TestChartLines:
 
     def test_side_by_side_when_wide(self):
         lines = self._lines(120)
-        assert lines[0].plain.startswith("› me@x.com") and "on duty" not in lines[0].plain
+        assert lines[0].plain.startswith("› #1 me@x.com") and "on duty" not in lines[0].plain
         assert has_color(lines[0], "me@x.com", Palette.DARK.accent)  # on duty: the accent name
         assert lines[1].plain.startswith("5h") and "7d" in lines[1].plain
         assert all(len(line.plain) <= 120 for line in lines)
@@ -3435,7 +3459,7 @@ class TestLongTermView:
             await pilot.press("h")
             await settle(pilot)
             title = painted(app, "#detail").splitlines()[0]
-            assert title.startswith("history  me@x.com") and title.rstrip().endswith("h/esc back")
+            assert title.startswith("history  #1 me@x.com") and title.rstrip().endswith("h/esc back")
             assert "for the charts" not in title
             await pilot.press("escape")
             await settle(pilot)
