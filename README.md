@@ -21,7 +21,9 @@ Windows.
   with ←/→: all history, 30 days, the last week and the last day, bars by
   model with dashed lines at round dollar values (the top one at or above
   the tallest bar), then each account's ~$ per 1% of its 5h and of its 7d
-  window over time. That figure is sampled every few points the reading
+  window over time. ↑/↓ changes what the bars split by: all models, by
+  account, or one model alone on its own scale with its total and share;
+  on a trend, all accounts or one alone. That figure is sampled every few points the reading
   climbs (4 for 5h, 6 for 7d: whole-percent readings are too coarse for
   less), the spend over each climb summed over every profile that holds the
   account, so a busy day gives dozens of points; they are kept, and fold
