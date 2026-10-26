@@ -110,7 +110,7 @@ revoke the stored refresh token.
 | `y` / `Y` | copy the highlighted account's line / every account's line as plain text |
 | `f` | refresh usage now |
 | `h` / `esc` | history: past 5h peaks and the 7d curve across weeks, and back |
-| `$` / `esc` | costs: today / 7d / 30d, one chart cycled with `←`/`→` (all, 30 days, week, day, $ per 1% of 5h and of 7d per account with its trendline), per-account cost and ~$ per 1%, per-model cost and trend (`r` reprices today, `y`/`Y` copy); needs `ccusage`, or Node/Bun to fetch it |
+| `$` / `esc` | costs: today / 7d / 30d, one chart cycled with `←`/`→` (all, 30 days, week, day, $ per 1% of 5h and of 7d per account with its trendline) and split with `↑`/`↓` (all models, by account, one model; on a trend one account), per-account cost and ~$ per 1%, per-model cost and trend (`r` reprices today, `y`/`Y` copy); needs `ccusage`, or Node/Bun to fetch it |
 | `?` / `esc` | every key, grouped, in place of the charts, and back |
 | `s` | set up or remove the statusline feed |
 | `c` | settings (`↑`/`↓` select, `←`/`→` change, digits or `enter` exact value, `esc` back) |
