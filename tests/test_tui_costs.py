@@ -76,16 +76,19 @@ def report(now: float | None = None, *, n_models: int = 3, n_accounts: int = 2,
                     trend_fig(9.4) if i == 0 else None)
         for i in range(n_accounts)
     )
-    def by_account(buckets):  # two thirds to #1, the rest to #2 (#1 alone with one account)
+    def cells(buckets, attributed=True):  # two thirds to #1, the rest to #2 (#1 alone with one)
+        share = {"1": 2 / 3, "2": 1 / 3} if n_accounts > 1 else {"1": 1.0}
         out = []
         for t, m in buckets:
-            total = sum(m.values())
-            split = {"1": total * 2 / 3, "2": total / 3} if n_accounts > 1 else {"1": total}
-            out.append((t, {k: v for k, v in split.items() if v > 0}))
+            if not attributed:  # days older than the priced range never had an account
+                out.append((t, {("", name): usd for name, usd in m.items()}))
+                continue
+            out.append((t, {(who, name): usd * f for name, usd in m.items()
+                            for who, f in share.items() if usd * f > 0}))
         return tuple(out)
 
     return CostReport(now=now, days=days, history=older + days, hours=hours, hour_duty=duty,
-                      account_days=by_account(days), account_hours=by_account(hours),
+                      history_cells=cells(older, False) + cells(days), hour_cells=cells(hours),
                       today=12.3, week=245.0, month=1020.0, week_change=0.18, models=models,
                       accounts=accounts, unattributed=0.0, built_at=now - 120, took_s=1.2)
 

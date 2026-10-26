@@ -127,7 +127,6 @@ def default_cost_source_factory(switcher):
         switcher.backup_dir,
         getattr(switcher, "usage_history", None),
         [home],
-        active=switcher.current_account_number,
     )
 
 

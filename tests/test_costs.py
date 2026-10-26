@@ -439,39 +439,17 @@ class TestRefresh:
 # -- attribution ---------------------------------------------------------------------------
 
 
+def start_line(t: float) -> str:
+    stamp = datetime.fromtimestamp(t).strftime("%Y-%m-%d %H:%M:%S")
+    return f"{stamp},001 - INFO - rota: engine started\n"
+
+
 def log_line(t: float, frm: str, to: str) -> str:
     stamp = datetime.fromtimestamp(t).strftime("%Y-%m-%d %H:%M:%S")
     return f"{stamp},123 - INFO - Switched from account {frm} to {to}\n"
 
 
-class TestSwitchHistory:
-    def test_reads_rotated_logs_oldest_first(self, tmp_path, now):
-        (tmp_path / "rota.log.1").write_text(log_line(now - 7200, "1", "2") + "junk\n")
-        (tmp_path / "rota.log").write_text(
-            "2026-10-18 13:14:22,211 - INFO - Auto-switch (pace): account 4 -> 1; ...\n"
-            + log_line(now - 3600, "2", "1")
-            + "2026-10-18 13:14:22,211 - INFO - [dry-run] would switch from account 2 to 3\n")
-        got = cr.switch_history(tmp_path)
-        assert [(s.frm, s.to) for s in got] == [("1", "2"), ("2", "1")]
-        assert got[0].at == pytest.approx(now - 7200, abs=1)
-
-    def test_no_log_no_history(self, tmp_path):
-        assert cr.switch_history(tmp_path) == []
-
-    def test_duty_spans(self, now):
-        lo, hi = now - 10 * HOUR, now
-        switches = [cr.Switch(now - 5 * HOUR, "2", "1"), cr.Switch(now - 2 * HOUR, "1", "2")]
-        assert cr.duty_spans(switches, "1", lo, hi) == [
-            (lo, now - 5 * HOUR, "1"), (now - 5 * HOUR, now - 2 * HOUR, "2"), (now - 2 * HOUR, hi, "1")]
-
-    def test_duty_spans_without_switches_use_the_account_on_duty(self, now):
-        assert cr.duty_spans([], "3", now - HOUR, now) == [(now - HOUR, now, "3")]
-        assert cr.duty_spans([], None, now - HOUR, now) == []
-
-    def test_a_switch_before_the_range_sets_who_starts_it(self, now):
-        spans = cr.duty_spans([cr.Switch(now - 50 * HOUR, "2", "1")], "2", now - 10 * HOUR, now)
-        assert spans == [(now - 10 * HOUR, now, "2")]
-
+class TestAttribute:
     def test_a_slot_with_a_switch_in_it_is_split_by_time(self):
         spans = [(0.0, 300.0, "1"), (300.0, 2000.0, "2")]
         got = dict(cr.shares(0, spans, [s[0] for s in spans]))
@@ -489,7 +467,13 @@ class TestSwitchHistory:
 
     def test_spend_before_any_known_duty_is_unattributed(self):
         got = cr.attribute([costs.Row("s0", 0, "m", 3.0, 0, 0, 0, 0)], [costs.Source("s0", "/a")], [])
-        assert got == {}
+        assert got == {cr.UNATTRIBUTED: [(0, 3.0)]}
+
+    def test_a_slot_half_covered_leaves_the_rest_unattributed(self):
+        got = cr.attribute([costs.Row("s0", 0, "m", 4.0, 0, 0, 0, 0)], [costs.Source("s0", "/a")],
+                           [(450.0, 2000.0, "1")])
+        assert dict(got["1"]) == pytest.approx({0: 2.0})
+        assert dict(got[cr.UNATTRIBUTED]) == pytest.approx({0: 2.0})
 
 
 # -- one account across profiles ------------------------------------------------------------
@@ -629,13 +613,15 @@ class TestBuildReport:
                 costs.Row("s0", hour - 60 * HOUR, "claude-opus-4-7", 3.0, 0, 0, 0, 0)]  # nobody
         spans = [(now - 40 * HOUR, hour - 1800, "1"), (hour - 1800, now, "2")]
         report = cr.build_report(make_cache(rows, now), [costs.Source("s0", "/a")], spans, now)
-        assert report.account_hours[-2][1] == {"1": 4.0, "2": 2.0}
-        assert report.account_hours[-61][1] == {"": 3.0}  # no duty span: the unattributed share
-        for (t, by_model), (t2, by_account) in zip(report.hours, report.account_hours):
-            assert t == t2 and sum(by_model.values()) == pytest.approx(sum(by_account.values()))
-        for (t, by_model), (t2, by_account) in zip(report.days, report.account_days):
-            assert t == t2 and sum(by_model.values()) == pytest.approx(sum(by_account.values()))
-        assert sum(sum(d.values()) for _, d in report.account_days) == pytest.approx(9.0)
+        assert report.hour_cells[-2][1] == {("1", "Opus 4.7"): 4.0, ("2", "Sonnet 4.5"): 2.0}
+        assert report.hour_cells[-61][1] == {("", "Opus 4.7"): 3.0}  # no duty span: unattributed
+        assert report.unattributed == pytest.approx(3.0)
+        assert {a.number for a in report.accounts} == {"1", "2"}  # "" is no account
+        for (t, by_model), (t2, cells) in zip(report.hours, report.hour_cells):
+            assert t == t2 and by_model == pytest.approx(cr.by_model(cells))
+        for (t, by_model), (t2, cells) in zip(report.history, report.history_cells):
+            assert t == t2 and by_model == pytest.approx(cr.by_model(cells))
+        assert sum(sum(d.values()) for _, d in report.history_cells) == pytest.approx(9.0)
 
     def test_history_puts_the_folded_days_before_the_range(self, now):
         cache = make_cache([costs.Row("s0", int(now) // 900 * 900, "claude-opus-4-7", 3.0,
@@ -647,6 +633,7 @@ class TestBuildReport:
         assert report.history[0] == (old, {"Opus 4.7": 5.0, "Sonnet 4.5": 1.0})
         assert report.history[1:] == report.days
         assert report.history[-1][1] == {"Opus 4.7": 3.0}
+        assert report.history_cells[0][1] == {("", "Opus 4.7"): 5.0, ("", "Sonnet 4.5"): 1.0}
 
     def test_accounts_carry_their_figures_even_without_spend(self, now):
         fig = dpp.PerPct(2.0, True)
@@ -665,7 +652,7 @@ class TestBuildReport:
 class TestCostSource:
     def make(self, tmp_path, home, now, *, runner=("x",), run=None):
         return cr.CostSource(
-            tmp_path / ".rota", FakeHistory({}), [home], active=lambda: "1",
+            tmp_path / ".rota", FakeHistory({}), [home],
             find_runner=lambda: list(runner) if runner else None,
             run=run or fake_ccusage(), clock=lambda: now,
             other_profiles=lambda: [], store_path=tmp_path / dpp.STORE_FILENAME)
@@ -709,10 +696,12 @@ class TestCostSource:
     def test_switch_log_attributes_spend(self, tmp_path, home, now):
         backup = tmp_path / ".rota"
         backup.mkdir()
-        (backup / "rota.log").write_text(log_line(now - HOUR, "1", "2"))
-        write(home / "projects" / "p" / "a.jsonl", entry(now - 2 * HOUR, "a1"), entry(now - 600, "b1"))
+        (backup / "rota.log").write_text(start_line(now - 3 * HOUR) + log_line(now - HOUR, "1", "2"))
+        write(home / "projects" / "p" / "a.jsonl", entry(now - 4 * HOUR, "z1"),
+              entry(now - 2 * HOUR, "a1"), entry(now - 600, "b1"))
         report = self.make(tmp_path, home, now).refresh({}).report
         assert {a.number: a.cost for a in report.accounts} == pytest.approx({"1": 1.0, "2": 1.0})
+        assert report.unattributed == pytest.approx(1.0)  # before rota started: nobody
 
 
 class TestPerPctAcrossProfiles:
@@ -732,6 +721,7 @@ class TestPerPctAcrossProfiles:
             (backup / "sequence.json").write_text(json.dumps({
                 "activeAccountNumber": number,
                 "accounts": {number: {"email": "a@x", "organizationUuid": "o"}}}))
+            (backup / "rota.log").write_text(start_line(start - HOUR))  # on duty since rota began
             rows = [costs.Row("s0", slot, "claude-opus-4-7", usd, 0, 0, 0, 0)
                     for slot, usd in spend_every_slot(start, reset, 10.0)]  # $10/h each
             built = other_built_at if (backup == work and other_built_at) else now - 60
@@ -741,7 +731,7 @@ class TestPerPctAcrossProfiles:
             {("a@x", "5h"): climb(reset, 5 * HOUR, [10, 20, 30, 40])})  # peak 1h before reset
         store = tmp_path / "shared" / dpp.STORE_FILENAME
         store.parent.mkdir()
-        source = cr.CostSource(me, history, [home], active=lambda: "1", clock=lambda: now,
+        source = cr.CostSource(me, history, [home], clock=lambda: now,
                                find_runner=lambda: None, other_profiles=lambda: [work],
                                store_path=store)
         return source, store

@@ -384,6 +384,13 @@ def _split(buckets: Sequence[Bucket], pick: str) -> list[Bucket]:
     return [(t, {pick: m[pick]} if pick in m else {}) for t, m in buckets]
 
 
+def _by_account(cells) -> dict[str, float]:
+    out: dict[str, float] = {}
+    for (who, _), usd in cells.items():
+        out[who] = out.get(who, 0.0) + usd
+    return out
+
+
 def money_series(report: CostReport, view: str, width: int, pick: str = ALL_MODELS):
     """``(buckets, duty or None, axis)`` of a money view at ``width``, split
     as ``pick`` says: by model, by account (``{number: usd}``, ``""`` for
@@ -393,12 +400,11 @@ def money_series(report: CostReport, view: str, width: int, pick: str = ALL_MODE
 
     accounts = pick == BY_ACCOUNT
     one = pick not in (ALL_MODELS, BY_ACCOUNT)
+    account_days = [(t, _by_account(c)) for t, c in report.history_cells[-len(report.days):]]
+    account_hours = [(t, _by_account(c)) for t, c in report.hour_cells]
     if view == "total":
-        if accounts:  # days older than the priced range were never attributed
-            known = {t for t, _ in report.account_days}
-            older = [(t, {"": sum(m.values())} if m else {})
-                     for t, m in report.history if t not in known]
-            days = fill_days([*older, *report.account_days])
+        if accounts:
+            days = fill_days([(t, _by_account(c)) for t, c in report.history_cells])
         else:
             days = fill_days(_split(report.history, pick) if one else report.history)
         for size, unit in ((1, "daily"), (7, "weekly"), (30, "monthly")):
@@ -408,11 +414,11 @@ def money_series(report: CostReport, view: str, width: int, pick: str = ALL_MODE
         first = stamp("%m-%d", buckets[0][0]) if buckets else ""
         return buckets, None, (first, f"all, {unit}", "today")
     if view == "monthly":
-        days = list(report.account_days if accounts else report.days)
+        days = list(account_days if accounts else report.days)
         if one:
             days = _split(days, pick)
         return days, None, (stamp("%m-%d", days[0][0]) if days else "", "30 days", "today")
-    hours, duty = list(report.account_hours if accounts else report.hours), list(report.hour_duty)
+    hours, duty = list(account_hours if accounts else report.hours), list(report.hour_duty)
     if one:
         hours = _split(hours, pick)
     if view == "weekly":
