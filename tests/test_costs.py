@@ -621,6 +621,22 @@ class TestBuildReport:
         assert report.hour_duty[-3:] == ("1", "1", "2")  # the switched hour: a tie goes first-come
         assert cr.build_report(make_cache(rows, now), [], [], now).hour_duty == (None,) * 168
 
+    def test_account_buckets_split_by_who_was_on_duty_and_sum_like_the_model_ones(self, now):
+        now += 1200
+        hour = int(now // HOUR * HOUR)
+        rows = [costs.Row("s0", hour - 3600, "claude-opus-4-7", 4.0, 0, 0, 0, 0),  # all #1
+                costs.Row("s0", hour - 1800, "claude-sonnet-4-5", 2.0, 0, 0, 0, 0),  # all #2
+                costs.Row("s0", hour - 60 * HOUR, "claude-opus-4-7", 3.0, 0, 0, 0, 0)]  # nobody
+        spans = [(now - 40 * HOUR, hour - 1800, "1"), (hour - 1800, now, "2")]
+        report = cr.build_report(make_cache(rows, now), [costs.Source("s0", "/a")], spans, now)
+        assert report.account_hours[-2][1] == {"1": 4.0, "2": 2.0}
+        assert report.account_hours[-61][1] == {"": 3.0}  # no duty span: the unattributed share
+        for (t, by_model), (t2, by_account) in zip(report.hours, report.account_hours):
+            assert t == t2 and sum(by_model.values()) == pytest.approx(sum(by_account.values()))
+        for (t, by_model), (t2, by_account) in zip(report.days, report.account_days):
+            assert t == t2 and sum(by_model.values()) == pytest.approx(sum(by_account.values()))
+        assert sum(sum(d.values()) for _, d in report.account_days) == pytest.approx(9.0)
+
     def test_history_puts_the_folded_days_before_the_range(self, now):
         cache = make_cache([costs.Row("s0", int(now) // 900 * 900, "claude-opus-4-7", 3.0,
                                       0, 0, 0, 0)], now)

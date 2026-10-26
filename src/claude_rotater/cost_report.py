@@ -323,6 +323,8 @@ class CostReport:
     history: tuple[tuple[float, dict[str, float]], ...]  # every day known: archive, then days
     hours: tuple[tuple[float, dict[str, float]], ...]  # last 7 x 24 (hour start, {model: usd})
     hour_duty: tuple[str | None, ...]  # who was on duty most of each of those hours
+    account_days: tuple[tuple[float, dict[str, float]], ...]  # as ``days``, {account: usd}
+    account_hours: tuple[tuple[float, dict[str, float]], ...]  # as ``hours``, {account: usd}
     today: float
     week: float  # last 7 x 24h
     month: float  # the whole range
@@ -332,6 +334,33 @@ class CostReport:
     unattributed: float  # spend no duty span covers
     built_at: float
     took_s: float
+
+
+def _by_account(
+    spend: dict[str, list[tuple[int, float]]],
+    starts: Sequence[float],
+    totals: Sequence[dict[str, float]],
+    *,
+    first: float | None = None,
+) -> list[dict[str, float]]:
+    """Each bucket's spend by account, as ``totals`` holds it by model; what
+    no account was credited with is the ``""`` share, so a bucket sums the
+    same either way. Buckets start at ``starts`` (an hour each from
+    ``first`` when given, else up to the next start)."""
+    out: list[dict[str, float]] = [{} for _ in starts]
+    for who, slots in spend.items():
+        for slot, usd in slots:
+            if first is not None:
+                i = int((slot - first) // HOUR_S) if slot >= first else -1
+            else:
+                i = bisect.bisect_right(starts, slot) - 1
+            if 0 <= i < len(out):
+                out[i][who] = out[i].get(who, 0.0) + usd
+    for bucket, total in zip(out, totals):
+        rest = sum(total.values()) - sum(bucket.values())
+        if rest >= 0.005:
+            bucket[""] = rest
+    return out
 
 
 def _change(now: float, prev: float) -> float | None:
@@ -396,6 +425,8 @@ def build_report(
     accounts.sort(key=lambda a: (-a.cost, a.number))
     attributed = sum(a.cost for a in accounts)
     hour_starts = [first_hour + i * HOUR_S for i in range(RECENT_HOURS)]
+    account_days = _by_account(spend, midnights, days)
+    account_hours = _by_account(spend, hour_starts, hours, first=first_hour)
     archived: dict[float, dict[str, float]] = {}
     for day, raw in cache.archive.items():
         if day < lo:
@@ -408,6 +439,8 @@ def build_report(
         history=(*sorted(archived.items()), *zip(midnights, days)),
         hours=tuple(zip(hour_starts, hours)),
         hour_duty=tuple(majority(spans, h, h + HOUR_S) for h in hour_starts),
+        account_days=tuple(zip(midnights, account_days)),
+        account_hours=tuple(zip(hour_starts, account_hours)),
         today=today,
         week=week,
         month=month,
