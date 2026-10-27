@@ -31,11 +31,24 @@ SEV_OK = "#6fc4aa"  # sea glass: plenty of headroom
 SEV_WARN = "#f2b443"  # saffron: climbing (>= 70%); saturated, never beige
 SEV_CRIT = "#f08c82"  # rose: near the limit (>= 90%)
 TRACK = "#2a3442"  # unfilled meter track
-# One hue per account, kept by identity (claude_rotater.account_colors):
-# sky, orchid, aqua, sand, violet. None is the accent, a severity or a
-# model color (accent, sea glass, saffron), so "whose" never reads as
-# "how full" or "which model".
-ACCOUNT_HUES = ("#6cb8f6", "#e293dc", "#5fd0de", "#d6bf9b", "#b896f5")
+# Three palette families, so a color never means two things on one screen
+# (tests/test_palettes.py measures them: CIELAB distance within each family,
+# under simulated deuteranopia too, and from the reserved colors above).
+#
+# Accounts: cool jewel tones, one per account, kept by identity
+# (claude_rotater.account_colors): azure, cyan, amethyst, lilac, steel blue.
+ACCOUNT_HUES = ("#20a7fe", "#18e3ff", "#b689e6", "#e4cef2", "#589db8")
+# Models: warm tones, one hue per family; a family's older versions take its
+# next shades (newest first): Opus orange, Sonnet sand, Haiku khaki, Fable clay.
+MODEL_SHADES = (
+    ("opus", ("#fbae71", "#f58748", "#bd6a13")),
+    ("sonnet", ("#e0d2bf", "#a39b8a", "#877055")),
+    ("haiku", ("#e3d897", "#a6a75f", "#717b1f")),
+    ("fable", ("#f5af9c", "#bd856f", "#ae6046")),
+)
+# Token kinds: one sequential pink-to-violet ramp, as parts of one whole
+# (input, cache write, cache read, output; costs.TOKEN_KINDS order).
+TOKEN_HUES = ("#fdcbda", "#fda4e6", "#e056bb", "#925fc2")
 # The row under the cursor: the accent blended over the page at this
 # strength (rota.tcss: ``background: $primary 14%``). Strong enough to see at
 # a glance, weak enough that every text colour keeps AA contrast on it.
@@ -66,6 +79,8 @@ class Palette:
     track: str
     background: str = BACKGROUND
     accounts: tuple[str, ...] = ACCOUNT_HUES
+    models: tuple[tuple[str, tuple[str, ...]], ...] = MODEL_SHADES
+    tokens: tuple[str, ...] = TOKEN_HUES
 
     DARK: ClassVar["Palette"]
 
@@ -74,6 +89,14 @@ class Palette:
         if index is None or index < 0:
             return self.muted
         return self.accounts[index % len(self.accounts)]
+
+    def model(self, family: int, version: int = 0) -> str:
+        """Shade ``version`` (0 = newest) of model family ``family`` (an index
+        into :attr:`models`); muted past the families or the shades."""
+        if not 0 <= family < len(self.models):
+            return self.muted
+        shades = self.models[family][1]
+        return shades[version] if 0 <= version < len(shades) else self.muted
 
     def severity(self, pct: float | None) -> str:
         if pct is None:
@@ -96,6 +119,8 @@ class Palette:
             track=theme.variables.get("track", TRACK),
             background=theme.background or BACKGROUND,
             accounts=ACCOUNT_HUES if theme.dark else ACCOUNT_HUES_LIGHT,
+            models=MODEL_SHADES if theme.dark else MODEL_SHADES_LIGHT,
+            tokens=TOKEN_HUES if theme.dark else TOKEN_HUES_LIGHT,
         )
 
 
@@ -135,7 +160,14 @@ SEV_OK_LIGHT = "#17705a"  # deep sea green
 SEV_WARN_LIGHT = "#7d5600"  # dark saffron
 SEV_CRIT_LIGHT = "#ad3229"  # brick rose
 TRACK_LIGHT = "#bcc6d3"  # deep enough to read as a bar on the near-white page
-ACCOUNT_HUES_LIGHT = ("#1f5fa8", "#9b3192", "#0a6873", "#75593a", "#6a42b8")
+ACCOUNT_HUES_LIGHT = ("#1367a2", "#1e666a", "#393992", "#7d4b8c", "#183959")
+MODEL_SHADES_LIGHT = (
+    ("opus", ("#933700", "#a05707", "#c96223")),
+    ("sonnet", ("#5e5035", "#76685b", "#987a58")),
+    ("haiku", ("#4e5605", "#60742e", "#83832d")),
+    ("fable", ("#89392d", "#8e5c4c", "#b76a4b")),
+)
+TOKEN_HUES_LIGHT = ("#c88ea1", "#c66caa", "#98399d", "#4f2e6f")
 
 ROTA_LIGHT = Theme(
     name="rota-light",
