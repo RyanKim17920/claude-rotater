@@ -7,6 +7,7 @@ data. Every page check runs at 80x24, 120x40 and 160x50, in both themes.
 
 from __future__ import annotations
 
+import dataclasses
 import math
 import threading
 import time
@@ -24,7 +25,8 @@ from claude_rotater.dollar_per_pct import Fit, PerPct
 from claude_rotater.settings import set_setting
 from claude_rotater.tui import costs as view
 from claude_rotater.tui.main import MainScreen
-from claude_rotater.tui.theme import Palette
+from claude_rotater.tui import theme
+from claude_rotater.tui.theme import ROTA_LIGHT, Palette
 from tests.test_tui import (  # noqa: F401  (autouse fixtures)
     fake_engine,
     fake_refresher,
@@ -344,7 +346,8 @@ def test_chart_bars_follow_the_totals_and_model_colors():
     lines = view.money_chart(rep, "monthly", 98, 6, P)
     assert len(lines) == 7 and lines[-1].plain.rstrip().endswith("today")
     colors = {span.style for line in lines[:-1] for span in line.spans}
-    assert P.accent in colors and P.sev_ok in colors
+    hues = view.model_colors(rep, P)
+    assert set(hues.values()) <= colors and P.accent not in colors and P.sev_ok not in colors
     flat = with_days(rep, tuple((d, {}) for d, _ in rep.days))
     empty = view.money_chart(flat, "monthly", 98, 4, P)
     assert all(set(line.plain[3:]) <= {" "} for line in empty[:-1])  # no bars, no gridlines
@@ -487,9 +490,37 @@ def test_one_model_alone_gets_its_own_scale_and_color():
     assert top(every) == "$30" and top(haiku) == "$6"  # the gridlines follow the one series
     bars = {span.style for line in haiku[:-1] for span in line.spans
             if set(line.plain[span.start:span.end]) & set("▁▂▃▄▅▆▇█")}
-    assert bars == {P.sev_warn}  # Haiku's color in the model table
+    assert bars == {view.model_colors(rep, P)["Haiku 4.5"]}  # its color in the model table
     one = view.money_chart(rep, "monthly", 98, 8, P, "2", "Haiku 4.5")
     assert top(one) == "$2"  # a third of it: rescaled again
+
+
+def test_models_take_their_family_hue_newest_version_brightest():
+    rep = report(n_models=7)  # Opus 4.7/4.1/4, Sonnet 4.5/4, Haiku 4.5/3.5
+    hues = view.model_colors(rep, P)
+    opus, sonnet, haiku = (dict(P.models)[f] for f in ("opus", "sonnet", "haiku"))
+    assert [hues[n] for n in ("Opus 4.7", "Opus 4.1", "Opus 4")] == list(opus)
+    assert [hues[n] for n in ("Sonnet 4.5", "Sonnet 4")] == list(sonnet[:2])
+    assert [hues[n] for n in ("Haiku 4.5", "Haiku 3.5")] == list(haiku[:2])
+    assert not set(hues.values()) & {P.accent, P.sev_ok, P.sev_warn, P.sev_crit, *P.accounts,
+                                     *P.tokens}
+
+
+def test_an_unknown_model_family_borrows_a_free_family_hue_then_goes_muted():
+    rep = report(n_models=1)
+    rep = dataclasses.replace(rep, models=(
+        *rep.models, *(dataclasses.replace(rep.models[0], name=n)
+                       for n in ("Mystery 1", "Other 2", "Third 1", "Fourth 1"))))
+    hues = view.model_colors(rep, P)
+    free = [shades[0] for family, shades in P.models if family != "opus"]
+    assert [hues[n] for n in ("Mystery 1", "Other 2", "Third 1")] == free
+    assert hues["Fourth 1"] == P.muted  # no family left to borrow
+
+
+def test_token_kinds_take_the_token_ramp():
+    assert list(view.token_colors(P).values()) == list(P.tokens)
+    assert list(view.token_colors(Palette.from_theme(ROTA_LIGHT)).values()) == list(
+        theme.TOKEN_HUES_LIGHT)
 
 
 def test_by_account_bars_take_the_account_colors():

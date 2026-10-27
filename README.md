@@ -20,7 +20,9 @@ Windows.
   log (rota's, and an imported claude-swap's) and the login each transcript
   records; spend with no such record is shown as `?` unattributed, never
   guessed. Accounts are numbered `#N` everywhere, each in its own color
-  (kept per account across views and profiles). One chart, cycled
+  (kept per account across views and profiles); accounts, models and token
+  kinds each have their own palette (cool, warm, a pink ramp), so a color
+  never means two things. One chart, cycled
   with ←/→: all history, 30 days, the last week and the last day, bars by
   model with dashed lines at round values (the top one at or above the
   tallest bar), then the trend: each account's ~$ per 1% of its 5h window

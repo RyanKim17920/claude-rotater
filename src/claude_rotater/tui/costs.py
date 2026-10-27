@@ -211,17 +211,34 @@ def ago(seconds: float) -> str:
     return f"{seconds / 86400:.0f}d ago"
 
 
+def _version(name: str) -> float:
+    """``Opus 4.8`` -> 4.8; a name without a number sorts as oldest."""
+    try:
+        return float(name.rsplit(" ", 1)[-1])
+    except ValueError:
+        return -1.0
+
+
 def model_colors(report: CostReport, palette: Palette) -> dict[str, str]:
-    """The costliest models get the accent, green and saffron; the rest muted."""
-    hues = (palette.accent, palette.sev_ok, palette.sev_warn)
-    return {m.name: hues[i] if i < COLORED_MODELS else palette.muted
-            for i, m in enumerate(report.models)}
+    """Each model in its family's hue (:attr:`Palette.models`), newer versions
+    in the brighter shades; a family rota doesn't know takes a free family's
+    hue, costliest first, and is muted once none is free."""
+    known = [family for family, _ in palette.models]
+    by_family: dict[str, list[str]] = {}
+    for m in report.models:  # costliest first
+        by_family.setdefault(m.name.split(" ", 1)[0].lower(), []).append(m.name)
+    spare = [i for i, family in enumerate(known) if family not in by_family]
+    out: dict[str, str] = {}
+    for family, names in by_family.items():
+        index = known.index(family) if family in known else (spare.pop(0) if spare else -1)
+        for version, name in enumerate(sorted(names, key=_version, reverse=True)):
+            out[name] = palette.model(index, version)
+    return out
 
 
 def token_colors(palette: Palette) -> dict[str, str]:
-    """One hue per token kind (:data:`TOKEN_LABELS`)."""
-    return dict(zip(TOKEN_LABELS, (palette.foreground, palette.sev_warn, palette.sev_ok,
-                                   palette.accent)))
+    """One step of the token ramp per kind (:data:`TOKEN_LABELS`)."""
+    return dict(zip(TOKEN_LABELS, palette.tokens))
 
 
 def account_colors(report: CostReport, palette: Palette,
@@ -611,7 +628,7 @@ def money_chart(report: CostReport, view: str, width: int, height: int,
         order = [m.name for m in report.models[:COLORED_MODELS]]
         if model != ALL_MODELS:
             order = [model]
-            hues = {model: hues.get(model, palette.accent)}
+            hues = {model: hues.get(model, palette.muted)}
     return bar_chart([b for _, b in buckets], width, height, order, hues, palette,
                      axis=axis, under=under, under_colors=colors,
                      fmt=short_tokens if unit == TOKENS else short_money)
