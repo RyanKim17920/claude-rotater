@@ -100,11 +100,17 @@ def simulate(
     weeks: int = 4,
     margin: float = 1.5,
     similar_h: float = 12.0,
+    threshold: float = THRESHOLD,
+    start_seven: list[float] | None = None,
+    start_active: int = 0,
 ) -> Result:
+    """Replay ``weeks`` of work. ``start_seven`` gives each account's 7d use
+    at the start (default all fresh) and ``start_active`` the account on duty."""
     accts = [
-        Acct(str(i + 1), reset_at=off * H) for i, off in enumerate(reset_offsets_h)
+        Acct(str(i + 1), reset_at=off * H, seven=start_seven[i] if start_seven else 0.0)
+        for i, off in enumerate(reset_offsets_h)
     ]
-    active = accts[0]
+    active = accts[start_active]
     res = Result()
     switch_times: list[float] = []
     pending: tuple[str, float] | None = None
@@ -138,10 +144,10 @@ def simulate(
         recent = [s for s in switch_times if t - s < H]
         budget_left = len(recent) < MAX_PER_HOUR
         others = [a for a in accts if a is not active]
-        healthy = [a for a in others if a.binding() < THRESHOLD]
-        if active.binding() >= THRESHOLD:
+        healthy = [a for a in others if a.binding() < threshold]
+        if active.binding() >= threshold:
             if budget_left and healthy:
-                order = _rank(strategy, healthy, t, burn, margin, similar_h)
+                order = _rank(strategy, healthy, t, burn, margin, similar_h, threshold)
                 move(next(a for a in healthy if a.number == order[0]))
             elif budget_left:
                 best = max(others, key=lambda a: 100 - a.binding())
@@ -154,12 +160,12 @@ def simulate(
             views = [a.view(t) for a in healthy]
             if strategy == "pace":
                 choice = pace_strategy.choose(
-                    active.view(t), views, threshold=THRESHOLD, margin=margin,
+                    active.view(t), views, threshold=threshold, margin=margin,
                     hysteresis_pct=HYSTERESIS, burn_pct_per_h=burn, now=t,
                 )
             else:
                 choice = ef.choose(
-                    active.view(t), views, threshold=THRESHOLD,
+                    active.view(t), views, threshold=threshold,
                     similar_reset_s=similar_h * H, hysteresis_pct=HYSTERESIS,
                     burn_pct_per_h=burn, now=t,
                 )
@@ -175,11 +181,11 @@ def simulate(
     return res
 
 
-def _rank(strategy, healthy, t, burn, margin, similar_h) -> list[str]:
+def _rank(strategy, healthy, t, burn, margin, similar_h, threshold) -> list[str]:
     views = [a.view(t) for a in healthy]
     if strategy == "pace":
         return pace_strategy.rank(
-            views, threshold=THRESHOLD, margin=margin, burn_pct_per_h=burn, now=t
+            views, threshold=threshold, margin=margin, burn_pct_per_h=burn, now=t
         )
     if strategy == "expiring-first":
         return ef.rank(views, similar_reset_s=similar_h * H, burn_pct_per_h=burn, now=t)
