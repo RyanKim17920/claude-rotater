@@ -46,6 +46,7 @@ RECENT_HOURS = 7 * 24  # the hourly series: the weekly and hourly charts
 
 Identity = tuple[str, str]  # (email, organization uuid), as the usage history keys it
 Cell = tuple[str, str]  # (account key, model name)
+TokenCount = tuple[float, float, float, float]  # costs.TOKEN_KINDS order, split by duty share
 
 
 
@@ -292,6 +293,10 @@ class CostReport:
     # and the days older than the priced range never had an account
     history_cells: tuple[tuple[float, dict[Cell, float]], ...]
     hour_cells: tuple[tuple[float, dict[Cell, float]], ...]
+    # the same buckets' token counts; days archived before token counts were
+    # kept have none
+    history_tokens: tuple[tuple[float, dict[Cell, TokenCount]], ...]
+    hour_tokens: tuple[tuple[float, dict[Cell, TokenCount]], ...]
     today: float
     week: float  # last 7 x 24h
     month: float  # the whole range
@@ -323,6 +328,8 @@ def build_report(
     days: list[dict[Cell, float]] = [{} for _ in midnights]
     first_hour = (now // HOUR_S - (RECENT_HOURS - 1)) * HOUR_S
     hours: list[dict[Cell, float]] = [{} for _ in range(RECENT_HOURS)]
+    day_tokens: list[dict[Cell, TokenCount]] = [{} for _ in midnights]
+    hour_tokens: list[dict[Cell, TokenCount]] = [{} for _ in range(RECENT_HOURS)]
     per_model: dict[str, list[float]] = {}  # name -> [cost, in, out, cw, cr, last7, prev7]
     per_account: dict[str, float] = {}
     week_ago, fortnight_ago = now - WEEK_S, now - 2 * WEEK_S
@@ -337,10 +344,13 @@ def build_report(
         for who, frac in parts(r, fixed, spans, starts):
             usd = r.cost * frac
             per_account[who] = per_account.get(who, 0.0) + usd
+            cell = (who, name)
             if day >= 0:
-                days[day][(who, name)] = days[day].get((who, name), 0.0) + usd
+                days[day][cell] = days[day].get(cell, 0.0) + usd
+                _add_tokens(day_tokens[day], cell, r.tokens, frac)
             if 0 <= hour < RECENT_HOURS:
-                hours[hour][(who, name)] = hours[hour].get((who, name), 0.0) + usd
+                hours[hour][cell] = hours[hour].get(cell, 0.0) + usd
+                _add_tokens(hour_tokens[hour], cell, r.tokens, frac)
         m = per_model.setdefault(name, [0.0] * 7)
         m[0] += r.cost
         m[1] += r.input
@@ -377,6 +387,13 @@ def build_report(
                 cell = (UNATTRIBUTED, model_name(model))
                 cells[cell] = cells.get(cell, 0.0) + usd
     history_cells = (*sorted(archived.items()), *zip(midnights, days))
+    archived_tokens: dict[float, dict[Cell, TokenCount]] = {day: {} for day in archived}
+    for day_start, raw_tokens in cache.archive_tokens.items():
+        if day_start in archived_tokens:
+            for model, counts in raw_tokens.items():
+                _add_tokens(archived_tokens[day_start], (UNATTRIBUTED, model_name(model)),
+                            counts, 1.0)
+    history_tokens = (*sorted(archived_tokens.items()), *zip(midnights, day_tokens))
     return CostReport(
         now=now,
         days=tuple((t, by_model(c)) for t, c in zip(midnights, days)),
@@ -385,6 +402,8 @@ def build_report(
         hour_duty=tuple(majority(spans, h, h + HOUR_S) for h in hour_starts),
         history_cells=history_cells,
         hour_cells=tuple(zip(hour_starts, hours)),
+        history_tokens=history_tokens,
+        hour_tokens=tuple(zip(hour_starts, hour_tokens)),
         today=today,
         week=week,
         month=month,
@@ -395,6 +414,12 @@ def build_report(
         built_at=cache.built_at,
         took_s=cache.took_s,
     )
+
+
+def _add_tokens(cells: dict[Cell, TokenCount], cell: Cell, counts: Sequence[float],
+                frac: float) -> None:
+    before = cells.get(cell, (0.0, 0.0, 0.0, 0.0))
+    cells[cell] = tuple(a + b * frac for a, b in zip(before, counts))
 
 
 def by_model(cells: dict[Cell, float]) -> dict[str, float]:

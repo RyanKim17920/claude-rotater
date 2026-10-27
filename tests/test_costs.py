@@ -654,6 +654,23 @@ class TestBuildReport:
             assert t == t2 and by_model == pytest.approx(cr.by_model(cells))
         assert sum(sum(d.values()) for _, d in report.history_cells) == pytest.approx(9.0)
 
+    def test_token_buckets_split_like_the_dollars_and_sum_to_the_rows(self, now):
+        now += 1200
+        hour = int(now // HOUR * HOUR)
+        rows = [costs.Row("s0", hour - 3600, "claude-opus-4-7", 4.0, 10, 20, 30, 40),
+                costs.Row("s0", hour, "claude-opus-4-7", 2.0, 2, 4, 6, 8)]
+        # #1 until a quarter into the second row's slot, #2 after
+        spans = [(now - 40 * HOUR, hour + 225, "1"), (hour + 225, now, "2")]
+        report = cr.build_report(make_cache(rows, now), [costs.Source("s0", "/a")], spans, now)
+        assert report.hour_tokens[-2][1][("1", "Opus 4.7")] == pytest.approx((10, 30, 40, 20))
+        split = report.hour_tokens[-1][1]
+        assert split[("1", "Opus 4.7")] == pytest.approx((0.5, 1.5, 2.0, 1.0))
+        assert split[("2", "Opus 4.7")] == pytest.approx((1.5, 4.5, 6.0, 3.0))
+        for buckets in (report.hour_tokens, report.history_tokens):
+            totals = [sum(c[i] for _, cells in buckets for c in cells.values()) for i in range(4)]
+            assert totals == pytest.approx([12, 36, 48, 24])  # input, cache w, cache r, output
+        assert [t for t, _ in report.history_tokens] == [t for t, _ in report.history_cells]
+
     def test_history_puts_the_folded_days_before_the_range(self, now):
         cache = make_cache([costs.Row("s0", int(now) // 900 * 900, "claude-opus-4-7", 3.0,
                                       0, 0, 0, 0)], now)
@@ -665,6 +682,10 @@ class TestBuildReport:
         assert report.history[1:] == report.days
         assert report.history[-1][1] == {"Opus 4.7": 3.0}
         assert report.history_cells[0][1] == {("", "Opus 4.7"): 5.0, ("", "Sonnet 4.5"): 1.0}
+        assert report.history_tokens[0] == (old, {})  # archived before tokens were kept
+        cache.archive_tokens[old] = {"claude-opus-4-7": (1, 2, 3, 4)}
+        report = cr.build_report(cache, [], [], now)
+        assert report.history_tokens[0] == (old, {("", "Opus 4.7"): (1, 2, 3, 4)})
 
     def test_accounts_carry_their_figures_even_without_spend(self, now):
         fig = dpp.PerPct(2.0, True)

@@ -87,10 +87,22 @@ def report(now: float | None = None, *, n_models: int = 3, n_accounts: int = 2,
                             for who, f in share.items() if usd * f > 0}))
         return tuple(out)
 
+    history_cells = cells(older, False) + cells(days)
+    hour_cells = cells(hours)
     return CostReport(now=now, days=days, history=older + days, hours=hours, hour_duty=duty,
-                      history_cells=cells(older, False) + cells(days), hour_cells=cells(hours),
+                      history_cells=history_cells, hour_cells=hour_cells,
+                      history_tokens=token_cells(history_cells), hour_tokens=token_cells(hour_cells),
                       today=12.3, week=245.0, month=1020.0, week_change=0.18, models=models,
                       accounts=accounts, unattributed=0.0, built_at=now - 120, took_s=1.2)
+
+
+TOKENS_PER_USD = (100.0, 2_000.0, 50_000.0, 1_000.0)  # input, cache write, cache read, output
+
+
+def token_cells(buckets):
+    """Token counts for dollar cells: each dollar is :data:`TOKENS_PER_USD`."""
+    return tuple((t, {cell: tuple(usd * k for k in TOKENS_PER_USD) for cell, usd in c.items()})
+                 for t, c in buckets)
 
 
 def with_days(rep: CostReport, days) -> CostReport:
@@ -99,7 +111,8 @@ def with_days(rep: CostReport, days) -> CostReport:
     cells = tuple((t, {("1", m): usd for m, usd in d.items()}) for t, d in days)
     return CostReport(**{**rep.__dict__, "days": tuple(days),
                          "history": rep.history[:older] + tuple(days),
-                         "history_cells": rep.history_cells[:older] + cells})
+                         "history_cells": rep.history_cells[:older] + cells,
+                         "history_tokens": rep.history_tokens[:older] + token_cells(cells)})
 
 
 class FakeCosts:
