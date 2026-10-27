@@ -52,7 +52,14 @@ Windows.
   5-hour window is a constraint only: never a target near its limit, 5-hour
   room breaks ties, and a 5-hour window about to hit is handled by the
   early move below. Every verdict reads like
-  `switch → #2: #2's week resets in 9h with 40% left (needs 4.4%/h) …`. Other
+  `switch → #2: #2's week resets in 9h with 40% left (needs 4.4%/h) …`.
+  A switch makes every warm session re-write its prompt cache on the new
+  account, so a pace move waits until no local session has answered for an
+  hour (Claude Code's cache lifetime), shown as `switch → #2 when idle
+  (cache warm)`. It never waits when that could leave the target's week
+  unspent at your usual spend (`— moving now`), and an account that needs
+  using three times as fast waits half an hour at most. Moves at a limit
+  never wait. Other
   strategies: `expiring-first`, `best` or `consume-first`
   (`autoswitch.strategy`). Below the threshold a move is confirmed by two
   readings. It moves early when the
