@@ -44,12 +44,15 @@ Windows.
   little data says it is provisional and gives its change over the days it
   saw, not stretched to 4 weeks. Without `ccusage`, `bunx` or `npx` the page says so.
 - Automatic switching while the TUI is open, or headless with `rota auto`.
-  By default (`pace`) it spreads usage while every account's weekly quota is
-  safe, moving only when the 5-hour window gets tight and keeping a fresh
-  5-hour backup, and concentrates on an account once the pace its weekly
-  headroom needs before its reset leads the rest by `autoswitch.paceMargin`
-  (1.5x), unless your own burn would use it up anyway. Every verdict reads
-  like `switch → #2: #2 resets in 9h with 40% left (needs 4.4%/h) …`. Other
+  By default (`pace`) it rotates on the weekly (7d) windows only: it keeps
+  every account on track to finish its week by following the one that needs
+  spending fastest (7d headroom ÷ hours to its reset), stays put while the
+  active account is within `autoswitch.paceMargin` (1.5x) of it, and so
+  concentrates on a week that is about to roll over with quota left. The
+  5-hour window is a constraint only: never a target near its limit, 5-hour
+  room breaks ties, and a 5-hour window about to hit is handled by the
+  early move below. Every verdict reads like
+  `switch → #2: #2's week resets in 9h with 40% left (needs 4.4%/h) …`. Other
   strategies: `expiring-first`, `best` or `consume-first`
   (`autoswitch.strategy`). Below the threshold a move is confirmed by two
   readings. It moves early when the

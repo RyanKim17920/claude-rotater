@@ -22,10 +22,10 @@ whose refresh token is dead gets quarantined instead of activated. When the
 active account's own usage becomes unreadable for ``unhealthy_ticks``
 consecutive ticks, the engine fails over to any healthy candidate.
 
-The ``pace`` strategy (the default) also moves BELOW the threshold: it
-spreads usage across accounts while every account's weekly quota is safe,
-and concentrates on an account whose quota would otherwise expire unused —
-see ``pace_strategy.py``; ``expiring-first`` (``expiring_first.py``) spends
+The ``pace`` strategy (the default) also moves BELOW the threshold, on the
+weekly windows only: it keeps every account on track to finish its week and
+concentrates on one whose quota would otherwise expire unused; the 5-hour
+window only constrains it — see ``pace_strategy.py``; ``expiring-first`` (``expiring_first.py``) spends
 the soonest-expiring account first. Their proactive moves wait out the
 cooldown and, after a manual switch, ``manual_hold_minutes``; at the
 threshold they only re-order the targets the usual gates admit. Every verdict, any strategy,
