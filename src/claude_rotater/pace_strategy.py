@@ -34,6 +34,17 @@ up a 5-hour window. When the active account's 5-hour window is about to hit,
 the engine's pre-empt and threshold paths make the move, ordered by
 ``rank``: highest 7-day need first among accounts with 5-hour room.
 
+**A move costs a cache rebuild.** The prompt cache belongs to the account,
+so a switch while sessions are warm makes each one re-write its whole
+context on its next turn, at cache-write prices, on the new account's
+windows (about 0.3-0.7% of a week per switch, measured). A move the policy
+wants while the caches are warm therefore waits for them to go cold (no
+local turn for ``CACHE_TTL_S``), for as long as waiting costs no week: the
+target must still be able to spend what it has after one more cache
+lifetime at the user's burn, with ``DEFER_SAFETY`` to spare. Limit moves
+(pre-empt, at the threshold, a dead login) never wait: a blocked turn costs
+more than a rebuild.
+
 The engine adds two agreeing evaluations, the cooldown, the manual-switch
 hold and the hourly cap.
 """
@@ -61,6 +72,18 @@ SIMILAR_NEED_RATIO = 1.1
 # moving on: leave it now and the rest is under what a later move would come
 # back for (``MEANINGFUL_ABSORB_PCT``), so it would expire unused.
 FINISH_PCT = 10.0
+# Claude Code writes its prompt cache with a one-hour lifetime (every
+# transcript turn reports ``cache_creation.ephemeral_1h_input_tokens``): an
+# hour after a session's last turn its cache is gone whichever account is on.
+CACHE_TTL_S = 3600.0
+# A move waits for cold caches only while the target could spend this many
+# times what it has left in the hours after one more cache lifetime.
+DEFER_SAFETY = 1.5
+# A target this many times as needy as the active account is urgent: its
+# move waits for idle caches at most ``URGENT_WAIT_S``, not as long as the
+# week allows.
+URGENT_RATIO = 3.0
+URGENT_WAIT_S = 30 * 60.0
 
 
 def seven_day_left(view: AccountView, threshold: float) -> float:
@@ -80,6 +103,31 @@ def required_pace(view: AccountView, *, threshold: float, now: float) -> float:
     """7d points per hour needed to use this account's headroom before its
     reset."""
     return seven_day_left(view, threshold) / hours_left(view, now)
+
+
+def caches_cold(last_activity_at: float | None, now: float) -> bool:
+    """Whether a switch now finds no warm prompt cache to throw away: no
+    local turn for a cache lifetime. Unknown activity counts as cold, so a
+    rota that cannot see the sessions moves as it always did."""
+    return last_activity_at is None or now - last_activity_at >= CACHE_TTL_S
+
+
+def can_wait(
+    target: AccountView,
+    *,
+    threshold: float,
+    burn_pct_per_h: float | None,
+    now: float,
+) -> bool:
+    """Whether putting a move to ``target`` off by one more cache lifetime
+    costs no 7d: at ``burn_pct_per_h`` (the user's typical spend per wall
+    hour, nights and breaks included) it can still spend what it has left
+    ``DEFER_SAFETY`` times over in the hours after the wait. An unknown burn
+    cannot promise that."""
+    if burn_pct_per_h is None:
+        return False
+    spare_h = hours_left(target, now) - CACHE_TTL_S / 3600.0
+    return seven_day_left(target, threshold) * DEFER_SAFETY <= burn_pct_per_h * spare_h
 
 
 def _five_used(view: AccountView) -> float:
@@ -164,10 +212,61 @@ def choose(
     hysteresis_pct: float,  # noqa: ARG001 - the policies share one signature
     burn_pct_per_h: float | None,
     now: float,
+    cold: bool = True,
+    waited_s: float = 0.0,
+    typical_burn_pct_per_h: float | None = None,
 ) -> Choice:
     """Stay or move, for an active account that is healthy and below the
     threshold. ``candidates`` must already be filtered to healthy accounts
-    (enabled, readable, under the threshold on every gating window)."""
+    (enabled, readable, under the threshold on every gating window).
+
+    ``cold``: no local session has a warm prompt cache (``caches_cold``).
+    While they are warm a move waits for them (a stay with ``waiting_for``)
+    unless waiting could cost the target's week (``can_wait`` at
+    ``typical_burn_pct_per_h``, the user's spend per wall hour over the last
+    days; ``burn_pct_per_h`` when unknown) or the target is urgent
+    (``URGENT_RATIO``) and has waited ``URGENT_WAIT_S`` already
+    (``waited_s``: how long the caller has been holding this move)."""
+    choice = _choose(
+        active, candidates, threshold=threshold, margin=margin,
+        burn_pct_per_h=burn_pct_per_h, now=now,
+    )
+    if choice.action != "switch" or cold:
+        return choice
+    target = next(v for v in candidates if v.number == choice.target)
+    _, _, why = choice.reason.partition(": ")
+    num = target.number
+    typical = typical_burn_pct_per_h if typical_burn_pct_per_h is not None else burn_pct_per_h
+    if not can_wait(target, threshold=threshold, burn_pct_per_h=typical, now=now):
+        when = fmt_duration(hours_left(target, now) * 3600.0)
+        return Choice(
+            "switch", num,
+            f"switch → #{num}: #{num} has {seven_day_left(target, threshold):.0f}% "
+            f"to spend in {when} — moving now; {why}",
+        )
+    mine = required_pace(active, threshold=threshold, now=now)
+    theirs = required_pace(target, threshold=threshold, now=now)
+    if theirs >= mine * URGENT_RATIO and waited_s >= URGENT_WAIT_S:
+        return Choice(
+            "switch", num,
+            f"switch → #{num}: waited {fmt_duration(waited_s)} for idle; {why}",
+        )
+    return Choice(
+        "stay", active.number,
+        f"stay: switch → #{num} when idle (cache warm); {why}",
+        waiting_for=num,
+    )
+
+
+def _choose(
+    active: AccountView,
+    candidates: list[AccountView],
+    *,
+    threshold: float,
+    margin: float,
+    burn_pct_per_h: float | None,
+    now: float,
+) -> Choice:
     me = active.number
 
     def stay(why: str) -> Choice:

@@ -56,7 +56,13 @@ from pathlib import Path
 from typing import TYPE_CHECKING, ClassVar
 
 from claude_rotater import expiring_first, login_alerts, oauth, pace_strategy, poll_policy, preempt
-from claude_rotater.estimator import WindowEstimate, carried_burn, estimate_window
+from claude_rotater.estimator import (
+    WindowEstimate,
+    carried_burn,
+    estimate_window,
+    last_rise,
+    typical_burn,
+)
 from claude_rotater.exceptions import ClaudeSwitchError
 from claude_rotater.json_output import (
     SCHEMA_VERSION,
@@ -966,6 +972,10 @@ class AutoSwitchEngine:
         # pace / expiring-first: the proactive target the previous evaluation
         # wanted and when it first wanted it (see PROACTIVE_CONFIRM_S).
         self._proactive_pending: tuple[str, float] | None = None
+        # pace: the move held for cold prompt caches as (active account,
+        # target, since): its ``waited_s`` (see pace_strategy.choose). Any
+        # switch, by whatever path, starts a new hold.
+        self._cache_wait: tuple[str, str, float] | None = None
         # Logs and notifies dead / ending logins (see ``_watch_logins``).
         self._login_notifier = login_alerts.LoginNotifier(switcher.backup_dir)
         # The latest tick's usage entries, handed to ``_watch_logins``.
@@ -2597,6 +2607,10 @@ class AutoSwitchEngine:
         ]
         burn = self._burn_rate(current, now) if healthy else None
         if settings.strategy == "pace":
+            cold, typical = self._cache_inputs(current, now) if healthy else (True, None)
+            waiting = self._cache_wait
+            if waiting is not None and waiting[0] != current:
+                waiting = None
             return pace_strategy.choose(
                 active,
                 healthy,
@@ -2605,6 +2619,9 @@ class AutoSwitchEngine:
                 hysteresis_pct=settings.hysteresis_pct,
                 burn_pct_per_h=burn,
                 now=now,
+                cold=cold,
+                waited_s=0.0 if waiting is None else now - waiting[2],
+                typical_burn_pct_per_h=typical,
             )
         return expiring_first.choose(
             active,
@@ -2615,6 +2632,26 @@ class AutoSwitchEngine:
             burn_pct_per_h=burn,
             now=now,
         )
+
+    def _cache_inputs(self, current: str, now: float) -> tuple[bool, float | None]:
+        """``(cold, typical burn)`` for pace's cache rule. Cold: no local
+        turn for a cache lifetime, read off the statusline feed when it has
+        reported one, else off the active account's last usage rise (which
+        also counts use elsewhere, so it errs on waiting). Typical burn: the
+        user's 7d spend per wall hour over the last week, every account
+        summed (``estimator.typical_burn``). History is advisory: unreadable
+        reads as cold and unknown, which moves as before."""
+        activity = self.feed.last_activity_at if self.feed is not None else None
+        typical = None
+        try:
+            identities = self.switcher.usage_identities()
+            series = self.switcher.usage_history.series(identities)
+            typical = typical_burn(series.values(), now=now)
+            if activity is None:
+                activity = last_rise(series.get(current, {}))
+        except Exception as e:  # never break a tick over advice
+            _logger.debug("cache inputs unavailable: %r", e)
+        return pace_strategy.caches_cold(activity, now), typical
 
     def _policy_move(
         self,
@@ -2639,6 +2676,15 @@ class AutoSwitchEngine:
             )
             usage = {num: entry.decision_value() for num, entry in entries.items()}
             choice = self._policy_choice(current, oauth_candidates, usage)
+        # A hold lasts through the move it ends in (confirming takes another
+        # evaluation); a plain stay ends it, and so does any switch (the
+        # active account no longer matches).
+        held = choice.waiting_for
+        if held is not None:
+            if self._cache_wait is None or self._cache_wait[:2] != (current, held):
+                self._cache_wait = (current, held, self.clock())
+        elif choice.action == "stay":
+            self._cache_wait = None
         if choice.action == "stay":
             self._proactive_pending = None
             self._emit(NoSwitchEvent(reason=STAY_REASON, detail=choice.reason))

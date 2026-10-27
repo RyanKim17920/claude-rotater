@@ -92,6 +92,9 @@ class Choice:
     action: Literal["stay", "switch"]
     target: str  # the account to be on; the active one for "stay"
     reason: str  # one line for humans: "stay: ..." / "switch → #2: ..."
+    # A stay that puts off a move to this account until the prompt caches
+    # are cold (pace_strategy.choose); None for every other choice.
+    waiting_for: str | None = None
 
 
 def fmt_duration(seconds: float) -> str:

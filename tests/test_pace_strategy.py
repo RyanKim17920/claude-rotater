@@ -675,6 +675,10 @@ class TestEngine:
             )
         h.clock.now = start + 6 * H
         assert h.engine._burn_rate("1", h.clock.now) == pytest.approx(6.0, rel=0.05)
+        # The readings just rose: the caches are warm and B can wait.
+        assert h.tick_with_usage(fleet(h.clock.now)) is TickOutcome.NO_ACTION
+        assert "switch → #2 when idle (cache warm)" in no_switch(h)[-1].detail
+        h.clock.now += ps.CACHE_TTL_S
         assert confirmed(h, fleet(h.clock.now)) is TickOutcome.SWITCHED
         assert h.active_number() == 2
         assert "#2's week resets in" in switches(h)[0].reason
@@ -720,3 +724,268 @@ class TestSettings:
         assert spec.group in dict(SETTING_GROUPS) and spec.label and spec.unit == "x"
         set_setting(tmp_path, "autoswitch.paceMargin", "2.5")
         assert load_settings(tmp_path).pace_margin == 2.5
+
+
+# ---------------------------------------------------------------------------
+# Prompt-cache cost of a move
+# ---------------------------------------------------------------------------
+
+
+def warm_choose(active, *candidates, burn=None, typical=None, waited_s=0.0,
+                margin=1.5, threshold=90.0):
+    """``choose`` with the local prompt caches warm."""
+    return ps.choose(
+        active, list(candidates), threshold=threshold, margin=margin,
+        hysteresis_pct=10.0, burn_pct_per_h=burn, now=NOW, cold=False,
+        waited_s=waited_s, typical_burn_pct_per_h=typical,
+    )
+
+
+class TestCachesCold:
+    def test_unknown_activity_counts_as_cold(self):
+        assert ps.caches_cold(None, NOW)
+
+    @pytest.mark.parametrize(
+        "idle_s, cold", [(0.0, False), (59 * 60.0, False), (3600.0, True), (5 * H, True)]
+    )
+    def test_cold_after_one_cache_lifetime(self, idle_s, cold):
+        assert ps.CACHE_TTL_S == 3600.0  # Claude Code writes 1h cache entries
+        assert ps.caches_cold(NOW - idle_s, NOW) is cold
+
+
+class TestCanWait:
+    def test_spare_time_at_the_burn_allows_waiting(self):
+        # 40 left (to 90), 30h away: 60 <= 2/h * 29h = 58? no; at 3/h yes.
+        target = view("2", seven=50, reset_h=30)
+        assert not ps.can_wait(target, threshold=90.0, burn_pct_per_h=2.0, now=NOW)
+        assert ps.can_wait(target, threshold=90.0, burn_pct_per_h=3.0, now=NOW)
+
+    def test_unknown_burn_cannot_promise(self):
+        target = view("2", seven=0, reset_h=160)
+        assert not ps.can_wait(target, threshold=90.0, burn_pct_per_h=None, now=NOW)
+
+    def test_nothing_left_can_always_wait(self):
+        target = view("2", seven=90, reset_h=5)
+        assert ps.can_wait(target, threshold=90.0, burn_pct_per_h=0.0, now=NOW)
+
+
+class TestCacheDeferral:
+    def test_cold_caches_move_as_before(self):
+        a, b = view("1", seven=85, reset_h=50), view("2", seven=63, reset_h=19 + 40 / 60)
+        assert ps.choose(
+            a, [b], threshold=90.0, margin=1.5, hysteresis_pct=10.0,
+            burn_pct_per_h=6.0, now=NOW, cold=True,
+        ) == choose(a, b, burn=6.0)
+
+    def test_warm_spread_move_waits_for_idle(self):
+        # #2 needs 0.9%/h, #1 0.5%/h: past the margin, under urgent, and #2
+        # has days to spend its 30 at 3%/h.
+        a = view("1", seven=10, reset_h=160)
+        b = view("2", seven=30, reset_h=64)
+        assert choose(a, b, burn=3.0).action == "switch"
+        got = warm_choose(a, b, burn=3.0)
+        assert got.action == "stay" and got.target == "1"
+        assert got.waiting_for == "2"
+        assert got.reason.startswith("stay: switch → #2 when idle (cache warm); ")
+        assert "#2's week resets in" in got.reason
+        # Not urgent: it keeps waiting, however long the user works.
+        assert warm_choose(a, b, burn=3.0, waited_s=10 * H).waiting_for == "2"
+
+    def test_users_case_moves_to_the_earlier_reset_now(self):
+        """The current account has 20% left and resets in 6 days; the other
+        has all 100% left and resets in 2. At the user's typical spend it
+        cannot be used up if rota waits, so it moves now, caches or not."""
+        current = view("1", seven=80, reset_h=6 * 24)
+        early = view("2", seven=0, reset_h=2 * 24)
+        got = warm_choose(current, early, burn=6.0, typical=2.0, threshold=100.0)
+        assert got.action == "switch" and got.target == "2"
+        assert got.reason.startswith(
+            "switch → #2: #2 has 100% to spend in 2d — moving now; "
+        )
+
+    def test_users_case_with_room_to_spare_waits_at_most_the_urgent_wait(self):
+        """At a typical spend that could finish it either way, the 15x need
+        ratio is urgent: wait for idle caches half an hour, no longer."""
+        current = view("1", seven=80, reset_h=6 * 24)
+        early = view("2", seven=0, reset_h=2 * 24)
+        kw = dict(burn=6.0, typical=6.0, threshold=100.0)
+        assert ps.required_pace(early, threshold=100.0, now=NOW) >= 14 * ps.required_pace(
+            current, threshold=100.0, now=NOW
+        )
+        first = warm_choose(current, early, **kw)
+        assert first.action == "stay" and first.waiting_for == "2"
+        assert warm_choose(current, early, waited_s=ps.URGENT_WAIT_S - 60, **kw).action == "stay"
+        late = warm_choose(current, early, waited_s=ps.URGENT_WAIT_S, **kw)
+        assert late.action == "switch" and late.target == "2"
+        assert late.reason.startswith("switch → #2: waited 30m for idle; ")
+
+    def test_three_accounts_go_to_the_earliest_reset(self):
+        current = view("1", seven=80, reset_h=6 * 24)
+        mid = view("2", seven=20, reset_h=5 * 24)
+        early = view("3", seven=0, reset_h=2 * 24)
+        got = warm_choose(current, mid, early, burn=6.0, typical=2.0, threshold=100.0)
+        assert (got.action, got.target) == ("switch", "3")
+        assert "moving now" in got.reason
+
+    def test_similar_resets_spread_and_stay(self):
+        a = view("1", seven=40, reset_h=100)
+        b = view("2", seven=45, reset_h=96)
+        got = warm_choose(a, b, burn=3.0, typical=3.0)
+        assert got.action == "stay" and got.waiting_for is None
+        assert "when idle" not in got.reason
+
+    def test_a_small_lead_waits_for_the_cache(self):
+        """Ahead by 1.6x (past the 1.5 margin, far from urgent): the move is
+        not worth a rebuild while the user works."""
+        a = view("1", seven=10, reset_h=100)
+        need_a = 80 / 100
+        b_left = need_a * 1.6 * 60  # #2 needs 1.6x as much, 60h out
+        b = view("2", seven=90 - b_left, reset_h=60)
+        got = warm_choose(a, b, burn=5.0, typical=5.0, waited_s=4 * H)
+        assert got.action == "stay" and got.waiting_for == "2"
+
+    def test_unknown_burn_does_not_wait(self):
+        a = view("1", seven=10, reset_h=160)
+        b = view("2", seven=30, reset_h=64)
+        got = warm_choose(a, b, burn=None, typical=None)
+        assert got.action == "switch"
+        assert "moving now" in got.reason
+
+    def test_typical_burn_rules_over_the_duty_burn(self):
+        a = view("1", seven=10, reset_h=160)
+        b = view("2", seven=30, reset_h=64)
+        assert warm_choose(a, b, burn=3.0, typical=0.5).action == "switch"
+        assert warm_choose(a, b, burn=0.5, typical=3.0).action == "stay"
+
+    def test_spent_active_move_waits_too_when_the_target_can(self):
+        a = view("1", seven=98, reset_h=100)  # under 3% left
+        b = view("2", seven=20, reset_h=120)
+        assert warm_choose(a, b, burn=None, typical=None, threshold=100.0).action == "switch"
+        got = warm_choose(a, b, burn=3.0, typical=3.0, threshold=100.0)
+        assert got.action == "stay" and got.waiting_for == "2"
+
+
+class _StubFeed:
+    """A statusline feed that reports one activity time and nothing else."""
+
+    def __init__(self, at):
+        self.last_activity_at = at
+
+    def ingest(self):
+        from claude_rotater.feed_ingest import IngestResult
+
+        return IngestResult()
+
+
+def burning(h, *, hours=6):
+    """#1's history: 7d 52% -> 70% over ``hours`` (3 points an hour)."""
+    history = h.switcher.usage_history
+    history.clock = h.clock
+    ident = {"1": ("a@example.com", "")}
+    start = h.clock.now
+    for k in range(hours + 1):
+        history.record(
+            {"1": usage_at(start, seven=52 + 3 * k, reset_h=100 + hours)},
+            ident, start + k * H,
+        )
+    h.clock.now = start + hours * H
+
+
+def urgent(h) -> dict:
+    """#1 needs 0.2%/h, #2 0.75%/h (3.75x): urgent, and at the burn the
+    estimator reads off ``burning`` (well over 1.2 an hour)
+    #2's 30 can still be spent in its 40h, so the move may wait."""
+    now = h.clock.now
+    return {
+        "1": usage_at(now, seven=70, reset_h=100, five=10),
+        "2": usage_at(now, seven=60, reset_h=40, five=0),
+    }
+
+
+class TestEngineCache:
+    def test_warm_with_unknown_burn_moves_at_once(self, temp_home):
+        h = make_pace(temp_home)
+        h.engine.feed = _StubFeed(h.clock.now)
+        assert confirmed(h, owners(h, a="1", b="2")) is TickOutcome.SWITCHED
+        assert "moving now" in switches(h)[0].reason
+
+    def test_forced_move_ignores_warm_caches(self, temp_home):
+        h = make_pace(temp_home)
+        h.engine.feed = _StubFeed(h.clock.now)
+        now = h.clock.now
+        usage = {
+            "1": usage_at(now, seven=100, reset_h=50, five=10),
+            "2": usage_at(now, seven=20, reset_h=100, five=0),
+        }
+        assert h.tick_with_usage(usage) is TickOutcome.SWITCHED
+        assert h.active_number() == 2
+        assert switches(h)[0].trigger != "pace"
+
+    def test_urgent_hold_ends_after_the_urgent_wait(self, temp_home):
+        """The user keeps working: the first evaluations wait for idle
+        caches, the one after half an hour moves."""
+        h = make_pace(temp_home)
+        burning(h)
+        feed_ = _StubFeed(h.clock.now)
+        h.engine.feed = feed_
+        assert h.tick_with_usage(urgent(h)) is TickOutcome.NO_ACTION
+        assert "switch → #2 when idle (cache warm)" in no_switch(h)[-1].detail
+        h.clock.advance(ps.URGENT_WAIT_S / 2)
+        feed_.last_activity_at = h.clock.now
+        assert h.tick_with_usage(urgent(h)) is TickOutcome.NO_ACTION
+        assert "when idle" in no_switch(h)[-1].detail
+        h.clock.advance(ps.URGENT_WAIT_S / 2)
+        feed_.last_activity_at = h.clock.now
+        assert confirmed(h, urgent(h)) is TickOutcome.SWITCHED
+        # Half an hour plus the confirming evaluation.
+        assert "waited 32m for idle; " in switches(h)[0].reason
+
+    def test_idle_caches_release_a_held_move(self, temp_home):
+        h = make_pace(temp_home)
+        burning(h)
+        h.engine.feed = _StubFeed(h.clock.now)
+        assert h.tick_with_usage(urgent(h)) is TickOutcome.NO_ACTION
+        assert "when idle" in no_switch(h)[-1].detail
+        h.clock.advance(ps.CACHE_TTL_S)  # no turn since: cold
+        assert confirmed(h, urgent(h)) is TickOutcome.SWITCHED
+        assert "when idle" not in switches(h)[0].reason
+
+    def test_without_a_feed_the_last_usage_rise_says_warm(self, temp_home):
+        h = make_pace(temp_home)
+        assert h.engine.feed is None
+        burning(h)
+        cold, _ = h.engine._cache_inputs("1", h.clock.now)
+        assert not cold
+        cold, _ = h.engine._cache_inputs("1", h.clock.now + ps.CACHE_TTL_S)
+        assert cold
+
+
+class TestSimulatedCacheCost:
+    """``tests/_week_sim.py`` with each warm switch charged the measured
+    rebuild (0.35% of a week): waiting for cold caches loses less (expired
+    plus rebuilt), blocks no more, and switches less than moving at once;
+    with no rebuild charge it expires no more 7d than before."""
+
+    def totals(self, **kw):
+        lost = blocked = switches = wasted = 0.0
+        for offsets in _week_sim.RESET_OFFSETS_H[:3]:
+            for share in _week_sim.DEMAND_SHARES:
+                rate = share * 100.0 * len(offsets) / _week_sim.WORK_H_PER_WEEK
+                r = _week_sim.simulate("pace", list(offsets), rate=rate, weeks=4, **kw)
+                lost += r.lost
+                wasted += r.wasted
+                blocked += r.blocked_h
+                switches += r.switches
+        return lost, wasted, blocked, switches
+
+    def test_waiting_for_idle_pays_off(self):
+        now = self.totals(switch_cost=0.35)
+        idle = self.totals(switch_cost=0.35, idle_aware=True)
+        assert idle[0] <= now[0]
+        assert idle[2] <= now[2] + 1.0
+        assert idle[3] < now[3]
+
+    def test_waiting_costs_no_week_without_a_rebuild(self):
+        now = self.totals()
+        idle = self.totals(idle_aware=True)
+        assert idle[1] <= now[1] * 1.01

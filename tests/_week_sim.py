@@ -13,6 +13,11 @@ hours. ``FIVE_PER_SEVEN`` 5h points cost one 7d point (a full 5h window is
 about an eighth of a week). Usage over 100 is impossible: work that finds the
 active account at a limit is blocked.
 
+A switch while the user worked within the last cache lifetime
+(``pace_strategy.CACHE_TTL_S``) throws the prompt caches away: with
+``switch_cost`` the next turns re-write them on the new account, charged as
+that many 7d points (and the matching 5h points) at the switch.
+
 Waste is every 7d point that expired unused, counting the windows still open
 when the replay ends as expiring then, so every policy is charged for the
 same windows: waste is total capacity minus total use, and the only way to
@@ -77,6 +82,13 @@ class Result:
     blocked_h: float = 0.0  # hours the user wanted to work and could not
     switches: int = 0
     used: float = 0.0
+    rebuild: float = 0.0  # 7d points spent re-writing caches after switches
+
+    @property
+    def lost(self) -> float:
+        """7d points that did no work: expired, or spent re-writing caches
+        (a rebuild uses quota, so it lowers ``wasted`` while doing nothing)."""
+        return self.wasted + self.rebuild
     log: list[str] = field(default_factory=list)
 
 
@@ -103,9 +115,15 @@ def simulate(
     threshold: float = THRESHOLD,
     start_seven: list[float] | None = None,
     start_active: int = 0,
+    switch_cost: float = 0.0,
+    idle_aware: bool = False,
+    min_dwell_s: float = 0.0,
 ) -> Result:
     """Replay ``weeks`` of work. ``start_seven`` gives each account's 7d use
-    at the start (default all fresh) and ``start_active`` the account on duty."""
+    at the start (default all fresh) and ``start_active`` the account on duty.
+    ``switch_cost``: 7d points a switch on warm caches costs the target.
+    ``idle_aware``: tell pace whether the caches are cold. ``min_dwell_s``:
+    no proactive move sooner than this after the last switch."""
     accts = [
         Acct(str(i + 1), reset_at=off * H, seven=start_seven[i] if start_seven else 0.0)
         for i, off in enumerate(reset_offsets_h)
@@ -115,6 +133,8 @@ def simulate(
     switch_times: list[float] = []
     pending: tuple[str, float] | None = None
     burn_log: list[tuple[float, float]] = []  # (t, points) for the burn estimate
+    last_work: float | None = None
+    wanted_since: float | None = None  # a move held for cold caches, since
     t = 0.0
     while t < weeks * WEEK_S:
         for a in accts:
@@ -129,15 +149,27 @@ def simulate(
             active.five += got * FIVE_PER_SEVEN
             res.used += got
             burn_log.append((t, got))
+            if got > 0:
+                last_work = t + STEP_S
             if got < want - 1e-9:
                 res.blocked_h += (1 - got / want) * STEP_S / H
         burn_log = [(bt, p) for bt, p in burn_log if t - bt < 24 * H]
         burn = sum(p for _, p in burn_log) / 24.0 or None
 
+        cold = pace_strategy.caches_cold(last_work, t)
+
         def move(target: Acct) -> None:
-            nonlocal active, pending
+            nonlocal active, pending, wanted_since
+            if switch_cost and not cold:
+                spend = min(switch_cost, 100.0 - target.seven)
+                if target.five_reset is None:
+                    target.five_reset = t + FIVE_S
+                target.seven += spend
+                target.five = min(100.0, target.five + spend * FIVE_PER_SEVEN)
+                res.rebuild += spend
             active = target
             pending = None
+            wanted_since = None
             switch_times.append(t)
             res.switches += 1
 
@@ -154,7 +186,7 @@ def simulate(
                 if best.binding() < active.binding() - HYSTERESIS:
                     move(best)
         elif strategy in ("pace", "expiring-first") and healthy and budget_left:
-            if switch_times and t - switch_times[-1] < COOLDOWN_S:
+            if switch_times and t - switch_times[-1] < max(COOLDOWN_S, min_dwell_s):
                 t += STEP_S
                 continue
             views = [a.view(t) for a in healthy]
@@ -162,7 +194,14 @@ def simulate(
                 choice = pace_strategy.choose(
                     active.view(t), views, threshold=threshold, margin=margin,
                     hysteresis_pct=HYSTERESIS, burn_pct_per_h=burn, now=t,
+                    cold=cold if idle_aware else True,
+                    waited_s=0.0 if wanted_since is None else t - wanted_since,
                 )
+                if choice.waiting_for is not None:
+                    if wanted_since is None:
+                        wanted_since = t
+                elif choice.action == "stay":
+                    wanted_since = None
             else:
                 choice = ef.choose(
                     active.view(t), views, threshold=threshold,

@@ -100,10 +100,14 @@ def page(app) -> dict:
 
 
 @pytest.mark.asyncio
-async def test_pace_switch_moves_cursor_charts_and_forecasts(world):
+async def test_pace_switch_moves_cursor_charts_and_forecasts(world, monkeypatch):
+    from claude_rotater import pace_strategy
     from claude_rotater.tui.app import RotaApp
 
     h, usage = world
+    # The user works throughout, so a pace move would wait for the prompt
+    # caches; this test is about the TUI following a switch, not that wait.
+    monkeypatch.setattr(pace_strategy, "CACHE_TTL_S", 0.0)
     home = h.temp_home
     now = time.time()
     r5_a, r5_b, r7 = now + 3 * H, now + 2 * H, now + 4 * 24 * H
