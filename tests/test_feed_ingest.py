@@ -609,3 +609,46 @@ class TestStaleness:
             ing.ingest()
         series = h.switcher.usage_history.series({"1": ID1})["1"]["5h"]
         assert [p.t for p in series] == [at]
+
+
+class TestActivity:
+    """When a local session last answered: the prompt caches' warmth."""
+
+    def append(self, h, **kw):
+        record = rec(t=h.clock.now, config_dir=str(h.temp_home / ".claude"))
+        record.update(kw)
+        feed.append_record(feed.feed_path(h.switcher.backup_dir), record)
+
+    def test_newest_assistant_turn_of_any_record(self, h):
+        ing = FeedIngestor(h.switcher, clock=h.clock)
+        assert ing.last_activity_at is None
+        h.clock.advance(100)
+        self.append(h, at=h.clock.now - 50, session_id="s1")
+        self.append(h, at=h.clock.now - 80, session_id="s2")
+        ing.ingest()
+        assert ing.last_activity_at == h.clock.now - 50
+
+    def test_rerenders_and_rejected_records_still_count(self, h):
+        ing = FeedIngestor(h.switcher, clock=h.clock)
+        self.append(h, at=h.clock.now, session_id="s1")
+        ing.ingest()
+        h.clock.advance(30)
+        # Same numbers again (a re-render), from another config dir.
+        self.append(h, at=h.clock.now, session_id="s1", config_dir="/elsewhere")
+        ing.ingest()
+        assert ing.last_activity_at == h.clock.now
+
+    def test_never_moves_back_or_past_now(self, h):
+        ing = FeedIngestor(h.switcher, clock=h.clock)
+        self.append(h, at=h.clock.now + 999, session_id="s1")
+        ing.ingest()
+        assert ing.last_activity_at == h.clock.now
+        self.append(h, at=h.clock.now - 500, session_id="s2")
+        ing.ingest()
+        assert ing.last_activity_at == h.clock.now
+
+    def test_records_without_a_turn_time_say_nothing(self, h):
+        ing = FeedIngestor(h.switcher, clock=h.clock)
+        self.append(h, session_id="s1")
+        ing.ingest()
+        assert ing.last_activity_at is None

@@ -343,6 +343,10 @@ class FeedIngestor:
         self._cursor: feed.FeedCursor | None = None
         self._last_sample: dict[str, tuple[float, tuple]] = {}
         self._sessions: OrderedDict[str, tuple] = OrderedDict()
+        # The newest assistant turn any local session reported (its ``at``),
+        # read off every record, re-renders included: when the prompt caches
+        # were last warmed. None until a record carrying ``at`` is seen.
+        self.last_activity_at: float | None = None
 
     @property
     def watch_dir(self) -> str:
@@ -361,6 +365,13 @@ class FeedIngestor:
         if result.rejected:
             _logger.debug("Statusline feed records dropped: %s", dict(result.rejected))
         return result
+
+    def _note_activity(self, record: dict) -> None:
+        at = record.get("at")
+        if isinstance(at, (int, float)) and not isinstance(at, bool):
+            at = min(float(at), self.clock())
+            if self.last_activity_at is None or at > self.last_activity_at:
+                self.last_activity_at = at
 
     def _rerender(self, record: dict) -> tuple[bool, bool]:
         """``(repeat, news)``: whether ``record`` repeats its session's
@@ -394,6 +405,7 @@ class FeedIngestor:
 
         accepted: dict[str, list[dict]] = {}
         for record in records:
+            self._note_activity(record)
             repeat, news = self._rerender(record)
             if repeat:
                 result.rejected["rerender"] += 1
