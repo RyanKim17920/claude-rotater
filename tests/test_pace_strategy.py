@@ -59,7 +59,7 @@ def choose(active, *candidates, burn=None, margin=1.5, threshold=90.0):
         (85.0, 50.0, 90.0, 0.1),
         (0.0, 168.0, 90.0, 90.0 / 168.0),  # a fresh week, evenly paced
         (95.0, 10.0, 90.0, 0.0),  # already past the threshold: nothing left
-        (40.0, None, 90.0, 0.0),  # reset unknown: never urgent
+        (40.0, None, 90.0, 50.0 / 168.0),  # week not started: a week away
         (40.0, 0.0, 90.0, 50.0 * 60.0),  # a reset now counts as a minute away
     ],
 )
@@ -76,7 +76,7 @@ def test_required_pace(seven, reset_h, threshold, expected):
 class TestOwnersCase:
     """A: 7d 85%, resets in 2d2h, 5h 2%. B: 7d 63%, resets in 19h40m, 5h 37%.
     B needs 27 points in 19h40m (1.4%/h), A 5 points in 50h (0.1%/h): B
-    dominates by far more than the margin, so pace concentrates on B."""
+    leads by far more than the margin, so pace concentrates on B."""
 
     A = dict(seven=85.0, reset_h=50.0, five=2.0)
     B = dict(seven=63.0, reset_h=19 + 40 / 60, five=37.0)
@@ -84,231 +84,238 @@ class TestOwnersCase:
     def test_on_a_moves_to_b(self):
         assert choose(view("a", **self.A), view("b", **self.B)) == Choice(
             "switch", "b",
-            "switch → #b: #b resets in 19h40m with 27% left (needs 1.4%/h) "
-            "vs #a needs 0.1%/h",
+            "switch → #b: #b's week resets in 19h40m with 27% left (needs 1.4%/h) "
+            "vs #a 0.1%/h",
         )
 
     def test_on_b_stays(self):
         assert choose(view("b", **self.B), view("a", **self.A)) == Choice(
             "stay", "b",
-            "stay: #b resets in 19h40m with 27% left (needs 1.4%/h), next #a 0.1%/h",
+            "stay: most 7d to spend: #b's week resets in 19h40m with 27% left "
+            "(needs 1.4%/h)",
         )
 
-    @pytest.mark.parametrize("burn", [None, 1.0, 2.5])
-    def test_concentrates_unless_the_burn_dwarfs_the_need(self, burn):
-        assert choose(view("a", **self.A), view("b", **self.B), burn=burn).target == "b"
+    @pytest.mark.parametrize("burn", [2.0, 6.0])
+    def test_a_known_burn_finishes_a_first_when_b_can_still_be_spent(self, burn):
+        # A's last 5 points take 2.5h at 2%/h (50m at 6%/h); B still has
+        # time for its 27 after that, so A is finished rather than stranded.
+        choice = choose(view("a", **self.A), view("b", **self.B), burn=burn)
+        assert choice == Choice(
+            "stay", "a", "stay: finishing #a's last 5% of 7d before #b (1.4%/h)"
+        )
 
-    def test_a_burn_this_heavy_spreads_instead(self):
-        # At 6%/h the user empties B in under five hours: nothing to rescue,
-        # so A's running 5h window is used instead of opening B's.
-        choice = choose(view("a", **self.A), view("b", **self.B), burn=6.0)
-        assert choice.action == "stay"
-        assert choice.reason.startswith("stay: #a's 5h resets in 3h with 98% left — using it first; no 7d reset is close")
+    @pytest.mark.parametrize("burn", [0.5, 1.0])
+    def test_a_slower_burn_goes_to_b_at_once(self, burn):
+        # Finishing A first would leave B less time than its 27 points need.
+        choice = choose(view("a", **self.A), view("b", **self.B), burn=burn)
+        assert choice.target == "b"
 
 
-class TestStaysOnARunning5hWindow:
-    """Work profile, 2026-10-17: on #2 (5h 20% resetting in 25m, 7d 28%
-    resetting in 5d8h) beside an idle #3 (5h 0%, 7d 1%, resets in 5d21h),
-    threshold 99.9. Weekly needs are similar (0.6 vs 0.7%/h), so pace
-    spreads: it uses up #2's running 5h window, which resets in 25 minutes
-    anyway, and keeps #3's fresh window in reserve. The line says so."""
+class TestFiveHourIsNotAGoal:
+    """The 5h window never drives a proactive move or a stay: the owner's
+    header "stay: #1's 5h resets in 3h56m with 52% left — using it first"
+    explained a stay by a 5h window that would never be hit."""
 
-    def test_stays_and_says_why_in_plain_words(self):
+    def test_a_running_5h_window_is_not_a_reason_to_stay(self):
+        # 2026-10-17: on #2 (5h 20% resetting in 25m, 7d 28% in 5d8h) beside
+        # an idle #3 (7d 1% in 5d21h): the 7d needs are within the margin.
         on_2 = view("2", seven=28, reset_h=5 * 24 + 8, five=20, five_reset_h=25 / 60)
         idle_3 = view("3", seven=1, reset_h=5 * 24 + 21)
         for burn in (None, 1.0):
             choice = choose(on_2, idle_3, burn=burn, threshold=99.9)
             assert choice == Choice(
                 "stay", "2",
-                "stay: #2's 5h resets in 25m with 80% left — using it first; "
-                "7d needs similar (0.6–0.7%/h)",
+                "stay: 7d spread evenly: #2 needs 0.6%/h, #3 0.7%/h (within 1.5x)",
             )
+
+    def test_a_tight_5h_window_is_not_a_reason_to_move(self):
+        # The engine's pre-empt and threshold paths move when 5h is about to
+        # hit; the policy itself only moves for the week.
+        active = view("1", seven=10, reset_h=150, five=75)
+        others = [view("2", seven=5, reset_h=160, five=30), view("3", seven=0, reset_h=165)]
+        choice = choose(active, *others)
+        assert choice.action == "stay"
+        assert "5h" not in choice.reason
+
+    def test_a_heavy_burn_still_moves_to_the_account_that_needs_it(self):
+        # One account fresh, another half used (0.8 vs 0.3%/h): the old
+        # policy stayed because 2%/h "covers" both; the week says move.
+        choice = choose(
+            view("1", seven=50, reset_h=150, five=30),
+            view("2", seven=0, reset_h=110),
+            burn=2.0,
+        )
+        assert choice == Choice(
+            "switch", "2",
+            "switch → #2: #2's week resets in 4d14h with 90% left (needs 0.8%/h) "
+            "vs #1 0.3%/h",
+        )
 
 
 class TestNothingToCompareWith:
     """Personal profile, 2026-10-19 23:30: on #1 (5h 1%, 7d 0% resetting in
     6d2h) beside #4 (7d 67%, resets in 4d19h), with a near-zero burn since
     the switch. #4 cannot take meaningful work at that burn, so only #1
-    counts; the line said "7d needs similar (0.7%/h)", a comparison with
-    nobody."""
+    counts."""
 
     def test_says_no_other_account_needs_using_first(self):
         on_1 = view("1", seven=0, reset_h=6 * 24 + 2, five=1, five_reset_h=50 / 60)
         busy_4 = view("4", seven=67, reset_h=4 * 24 + 19, five=6)
         choice = choose(on_1, busy_4, burn=0.01, threshold=99.9)
-        assert choice.action == "stay"
-        assert choice.reason.endswith("using it first; no other account needs using first")
+        assert choice == Choice(
+            "stay", "1",
+            "stay: no other account needs using first; #1's week resets in 6d2h "
+            "with 100% left (needs 0.7%/h)",
+        )
 
 
 @pytest.mark.parametrize(
     "active, candidates, burn, expected_action, expected_target, reason",
     [
-        # -- start of week: everyone has low, similar needs -> spread --------
+        # -- spread: needs within the margin stay put --------------------------
         pytest.param(
             view("1", seven=10, reset_h=150, five=30),
             [view("2", seven=5, reset_h=160)],
             None, "stay", "1",
-            "stay: #1's 5h resets in 3h with 70% left — using it first; 7d needs similar (0.5%/h)",
-            id="start-of-week-no-burn",
+            "stay: most 7d to spend: #1's week resets in 6d6h with 80% left (needs 0.5%/h)",
+            id="start-of-week-active-leads",
         ),
-        pytest.param(
-            view("1", seven=10, reset_h=150, five=30),
-            [view("2", seven=5, reset_h=160)],
-            2.0, "stay", "1",
-            "stay: #1's 5h resets in 3h with 70% left — using it first; "
-            "no 7d reset is close (needs ≤0.5%/h vs burn 2.0%/h)",
-            id="start-of-week-with-burn",
-        ),
-        pytest.param(
-            # One account fresh, another half used: needs differ (0.8 vs 0.3)
-            # but the user's 2%/h would empty either in time.
-            view("1", seven=50, reset_h=150, five=30),
-            [view("2", seven=0, reset_h=110)],
-            2.0, "stay", "1", "no 7d reset is close",
-            id="start-of-week-burn-covers-a-dominant-need",
-        ),
-        pytest.param(
-            view("1", seven=10, reset_h=150, five=75),
-            [view("2", seven=5, reset_h=160, five=30), view("3", seven=0, reset_h=165)],
-            None, "switch", "2",
-            "switch → #2: 5h 75% used; spreading to #2 (5h 30% used, "
-            "#3 kept fresh as backup)",
-            id="start-of-week-5h-tight-keeps-a-fresh-backup",
-        ),
-        # -- mid-week -------------------------------------------------------
         pytest.param(
             view("1", seven=50, reset_h=80, five=30),
             [view("2", seven=40, reset_h=100)],
-            None, "stay", "1", "7d needs similar (0.5%/h)",
-            id="mid-week-tie",
+            None, "stay", "1", "most 7d to spend", id="mid-week-tie",
         ),
         pytest.param(
             # 0.7 vs 0.5: a 1.4x lead is under the 1.5x margin.
             view("1", seven=50, reset_h=80, five=30),
             [view("2", seven=55, reset_h=50)],
-            None, "stay", "1", "7d needs similar (0.5–0.7%/h)",
+            None, "stay", "1",
+            "stay: 7d spread evenly: #1 needs 0.5%/h, #2 0.7%/h (within 1.5x)",
             id="mid-week-lead-under-margin",
         ),
         pytest.param(
-            # 0.8 vs 0.5: a 1.6x lead concentrates.
+            # 0.8 vs 0.5: a 1.6x lead moves.
             view("1", seven=50, reset_h=80, five=30),
             [view("2", seven=50, reset_h=50)],
             None, "switch", "2",
-            "switch → #2: #2 resets in 2d2h with 40% left (needs 0.8%/h) "
-            "vs #1 needs 0.5%/h",
+            "switch → #2: #2's week resets in 2d2h with 40% left (needs 0.8%/h) "
+            "vs #1 0.5%/h",
             id="mid-week-lead-over-margin",
         ),
-        # -- near reset: concentrate -----------------------------------------
+        # -- finish first: a near reset with headroom takes the lead -----------
         pytest.param(
             view("1", seven=40, reset_h=100, five=30),
             [view("2", seven=50, reset_h=9, five=10)],
             2.0, "switch", "2",
-            "switch → #2: #2 resets in 9h with 40% left (needs 4.4%/h) "
-            "vs #1 needs 0.5%/h",
+            "switch → #2: #2's week resets in 9h with 40% left (needs 4.4%/h) "
+            "vs #1 0.5%/h",
             id="near-reset-concentrates",
         ),
         pytest.param(
             view("2", seven=50, reset_h=9, five=10),
             [view("1", seven=40, reset_h=100, five=30)],
             2.0, "stay", "2",
-            "stay: #2 resets in 9h with 40% left (needs 4.4%/h), next #1 0.5%/h",
+            "stay: most 7d to spend: #2's week resets in 9h with 40% left (needs 4.4%/h)",
             id="near-reset-holds-the-leader",
-        ),
-        pytest.param(
-            view("1", seven=40, reset_h=100, five=30),
-            [view("2", seven=50, reset_h=9, five=80)],
-            2.0, "stay", "1", "stay: #2 needs 4.4%/h but its 5h is 80% used",
-            id="near-reset-target-5h-near-limit",
         ),
         pytest.param(
             # Sooner but implausible: 30 minutes at 2%/h absorbs 1 point.
             view("1", seven=40, reset_h=100),
             [view("2", seven=40, reset_h=0.5)],
-            2.0, "stay", "1", "stay: #1's 5h has 100% left — using it first",
+            2.0, "stay", "1", "no other account needs using first",
             id="near-reset-implausible",
         ),
         pytest.param(
             # The same account is worth it at a heavier burn (30%/h -> 15).
             view("1", seven=40, reset_h=100),
             [view("2", seven=40, reset_h=0.5)],
-            30.0, "switch", "2", "#2 resets in 30m with 50% left",
+            30.0, "switch", "2", "#2's week resets in 30m with 50% left",
             id="near-reset-plausible-at-heavy-burn",
         ),
-        # -- ties -------------------------------------------------------------
+        # -- 5h as a constraint ----------------------------------------------
         pytest.param(
-            # Two leaders tied on need: the one with more 5h room wins.
+            view("1", seven=40, reset_h=100, five=30),
+            [view("2", seven=50, reset_h=9, five=80)],
+            2.0, "stay", "1", "stay: #2 needs 4.4%/h but its 5h is 80% used",
+            id="leader-5h-near-limit-is-not-a-target",
+        ),
+        pytest.param(
+            # The leader's 5h is tight: the next account ahead takes it.
+            view("1", seven=40, reset_h=100, five=30),
+            [view("2", seven=50, reset_h=9, five=80), view("3", seven=50, reset_h=20)],
+            2.0, "switch", "3", "#3's week resets in 20h with 40% left",
+            id="next-leader-with-5h-room",
+        ),
+        pytest.param(
+            # Two leaders the week cannot tell apart: more 5h room wins.
             view("1", seven=40, reset_h=100),
             [
                 view("2", seven=50, reset_h=10, five=50),
                 view("3", seven=50, reset_h=10, five=5),
             ],
-            None, "switch", "3", "#3 resets in 10h with 40% left (needs 4.0%/h)",
+            None, "switch", "3", "#3's week resets in 10h with 40% left (needs 4.0%/h)",
             id="tie-leaders-by-5h-room",
+        ),
+        pytest.param(
+            # Needs 10% apart are still a tie: 5h room decides.
+            view("1", seven=40, reset_h=100),
+            [
+                view("2", seven=50, reset_h=9.5, five=50),
+                view("3", seven=50, reset_h=10, five=5),
+            ],
+            None, "switch", "3", "#3's week", id="near-tie-leaders-by-5h-room",
         ),
         pytest.param(
             # Active tied with the leader: no move, it is as urgent.
             view("1", seven=50, reset_h=10, five=30),
             [view("2", seven=50, reset_h=10), view("3", seven=10, reset_h=150)],
-            None, "stay", "1", "as urgent as #2, next #3 0.5%/h",
+            None, "stay", "1", "most 7d to spend: #1's week resets in 10h",
             id="tie-active-with-leader",
         ),
-        # -- 5h rules ----------------------------------------------------------
+        # -- weeks that have not started ---------------------------------------
         pytest.param(
-            # Two fresh accounts: taking one still leaves the other fresh.
-            view("1", seven=10, reset_h=150, five=75),
-            [view("2", seven=5, reset_h=160, five=30), view("3", seven=0, reset_h=165),
-             view("4", seven=0, reset_h=166)],
-            None, "switch", "3", "spreading to #3 (5h 0% used, #4 kept fresh",
-            id="5h-two-fresh-takes-one",
+            # A fresh account is planned a whole week out: 0.5%/h.
+            view("1", seven=70, reset_h=120, five=30),
+            [view("2", seven=0, reset_h=None)],
+            None, "switch", "2",
+            "switch → #2: #2's week has not started, 90% to spend (needs 0.5%/h) "
+            "vs #1 0.2%/h",
+            id="candidate-week-not-started",
         ),
         pytest.param(
-            # The only other account is fresh: it is the backup and the target.
-            view("1", seven=10, reset_h=150, five=75),
-            [view("2", seven=5, reset_h=160)],
-            None, "switch", "2", "spreading to #2 (5h 0% used)",
-            id="5h-only-fresh-is-taken",
+            view("1", seven=70, reset_h=40, five=30),
+            [view("2", seven=0, reset_h=None)],
+            None, "stay", "1", "7d spread evenly: #1 needs 0.5%/h, #2 0.5%/h",
+            id="candidate-week-not-started-behind-a-sooner-reset",
         ),
         pytest.param(
-            view("1", seven=10, reset_h=150, five=75),
-            [view("2", seven=5, reset_h=160, five=68)],
-            None, "stay", "1", "no account has 10 points more 5h room",
-            id="5h-tight-no-roomier-backup",
+            view("1", seven=0, reset_h=None),
+            [view("2", seven=10, reset_h=5)],
+            None, "switch", "2", "#2's week resets in 5h with 80% left (needs 16.0%/h)",
+            id="active-week-not-started",
+        ),
+        # -- finishing an account ----------------------------------------------
+        pytest.param(
+            view("1", seven=82, reset_h=100, five=10),
+            [view("2", seven=40, reset_h=140)],
+            2.0, "stay", "1", "stay: finishing #1's last 8% of 7d before #2 (0.4%/h)",
+            id="finish-the-last-points",
         ),
         pytest.param(
-            # The sole leader's 5h is tight: concentrate until the threshold.
-            view("1", seven=50, reset_h=9, five=75),
-            [view("2", seven=40, reset_h=100)],
-            None, "stay", "1", "5h 75% used; #1 resets in 9h with 40% left "
-            "(needs 4.4%/h), staying until the threshold",
-            id="5h-tight-sole-leader-stays",
+            # The leader's 5h reset-in-time: finishing first would cost it.
+            view("1", seven=82, reset_h=100, five=10),
+            [view("2", seven=40, reset_h=5)],
+            1.0, "switch", "2", "#2's week resets in 5h",
+            id="finish-not-at-the-leader's-cost",
         ),
         pytest.param(
-            # Two leaders: the tight one hands over to the roomy one.
-            view("1", seven=50, reset_h=9, five=75),
-            [view("2", seven=50, reset_h=10), view("3", seven=10, reset_h=150)],
-            None, "switch", "2", "5h 75% used; #2 resets in 10h with 40% left "
-            "(needs 4.0%/h), as urgent as #1",
-            id="5h-tight-leader-hands-over",
-        ),
-        pytest.param(
-            # 5h room is never a reason to open a fresh window while spreading.
-            view("1", seven=10, reset_h=150, five=60),
-            [view("2", seven=5, reset_h=160)],
-            None, "stay", "1", "stay: #1's 5h resets in 3h with 40% left — using it first",
-            id="5h-room-left-no-fresh-window",
+            # Without a burn estimate there is no telling: the leader wins.
+            view("1", seven=82, reset_h=100, five=10),
+            [view("2", seven=40, reset_h=140)],
+            None, "switch", "2", "#2's week resets in 5d20h",
+            id="finish-needs-a-burn",
         ),
         # -- gates --------------------------------------------------------------
-        pytest.param(
-            view("1", seven=40, reset_h=100),
-            [view("2", seven=10, reset_h=None)],
-            None, "stay", "1", "using it first", id="candidate-reset-unknown",
-        ),
-        pytest.param(
-            view("1", seven=40, reset_h=None),
-            [view("2", seven=10, reset_h=5)],
-            None, "stay", "1", "stay: this account's 7d reset time is unknown",
-            id="active-reset-unknown",
-        ),
         pytest.param(
             view("1", seven=40, reset_h=100), [], None, "stay", "1",
             "stay: no other account is under the threshold", id="no-candidates",
@@ -317,7 +324,8 @@ class TestNothingToCompareWith:
             # 3 points to the threshold: under the 5 a move must be worth.
             view("1", seven=50, reset_h=100, five=10),
             [view("2", seven=87, reset_h=5)],
-            None, "stay", "1", "using it first", id="candidate-nothing-to-absorb",
+            None, "stay", "1", "no other account needs using first",
+            id="candidate-nothing-to-absorb",
         ),
     ],
 )
@@ -328,8 +336,9 @@ def test_choose_table(active, candidates, burn, expected_action, expected_target
     assert choice.reason.startswith(expected_action)
 
 
-def test_spent_active_spreads_keeping_the_fresh_backup():
-    # threshold 99 lets a 7d-spent active (98%) still sit below it.
+def test_spent_active_moves_to_the_most_7d_need():
+    # threshold 99 lets a 7d-spent active (98%) still sit below it. #2 and
+    # #3 need the same; #3 has more 5h room.
     choice = choose(
         view("1", seven=98, reset_h=100, five=10),
         view("2", seven=40, reset_h=140, five=40),
@@ -337,8 +346,20 @@ def test_spent_active_spreads_keeping_the_fresh_backup():
         threshold=99.0,
     )
     assert choice == Choice(
-        "switch", "2",
-        "switch → #2: #1 has under 3% 7d left; spreading to #2 (5h 40% used)",
+        "switch", "3",
+        "switch → #3: #1 has under 3% 7d left; #3's week resets in 5d20h with "
+        "59% left (needs 0.4%/h)",
+    )
+
+
+def test_spent_active_stays_when_every_target_5h_is_near_its_limit():
+    choice = choose(
+        view("1", seven=98, reset_h=100, five=10),
+        view("2", seven=40, reset_h=140, five=85),
+        threshold=99.0,
+    )
+    assert choice == Choice(
+        "stay", "1", "stay: #1 has under 3% 7d left; #2's 5h is 85% used"
     )
 
 
@@ -358,6 +379,18 @@ def test_margin_is_a_setting():
     cand = view("2", seven=55, reset_h=50)  # 0.7%/h
     assert choose(active, cand, margin=1.5).action == "stay"
     assert choose(active, cand, margin=1.2).action == "switch"
+
+
+def test_no_line_mentions_5h_unless_it_binds():
+    """Stays and moves are explained in 7d terms; 5h shows up only when it
+    is what stops a move."""
+    cases = [
+        (view("1", seven=10, reset_h=150, five=75), [view("2", seven=5, reset_h=160)]),
+        (view("1", seven=50, reset_h=80, five=60), [view("2", seven=50, reset_h=50, five=40)]),
+        (view("2", seven=50, reset_h=9, five=60), [view("1", seven=40, reset_h=100, five=30)]),
+    ]
+    for active, candidates in cases:
+        assert "5h" not in choose(active, *candidates).reason
 
 
 class TestFlapping:
@@ -399,26 +432,34 @@ class TestFlapping:
 
 
 class TestRank:
-    def test_concentrating_puts_the_leaders_first(self):
+    def test_7d_need_first_among_accounts_with_5h_room(self):
         pool = [
             view("far", seven=10, reset_h=150),
             view("lead-busy", seven=50, reset_h=9, five=80),  # 5h near limit
             view("lead", seven=50, reset_h=10, five=20),
             view("mid", seven=40, reset_h=60),
-            view("unknown", seven=0, reset_h=None),
+            view("unknown", seven=0, reset_h=None),  # week not started
             view("spent", seven=89, reset_h=2),
         ]
         order = ps.rank(pool, threshold=90.0, margin=1.5, burn_pct_per_h=None, now=NOW)
-        assert order == ["lead", "mid", "far", "lead-busy", "unknown", "spent"]
+        assert order == ["lead", "mid", "unknown", "far", "lead-busy", "spent"]
 
-    def test_spreading_orders_by_5h_room_keeping_a_fresh_backup(self):
+    def test_equal_7d_needs_go_to_5h_room(self):
         pool = [
             view("busy", seven=10, reset_h=150, five=60),
             view("fresh", seven=10, reset_h=150),
             view("running", seven=10, reset_h=150, five=30),
         ]
         order = ps.rank(pool, threshold=90.0, margin=1.5, burn_pct_per_h=2.0, now=NOW)
-        assert order == ["running", "fresh", "busy"]
+        assert order == ["fresh", "running", "busy"]
+
+    def test_5h_room_never_beats_a_clearly_higher_7d_need(self):
+        pool = [
+            view("roomy", seven=10, reset_h=150, five=0),
+            view("urgent", seven=40, reset_h=20, five=60),
+        ]
+        order = ps.rank(pool, threshold=90.0, margin=1.5, burn_pct_per_h=None, now=NOW)
+        assert order == ["urgent", "roomy"]
 
 
 # ---------------------------------------------------------------------------
@@ -506,8 +547,8 @@ class TestEngine:
         (event,) = switches(h)
         assert event.trigger == "pace"
         assert event.reason == (
-            "switch → #2: #2 resets in 19h38m with 27% left (needs 1.4%/h) "
-            "vs #1 needs 0.1%/h"
+            "switch → #2: #2's week resets in 19h38m with 27% left (needs 1.4%/h) "
+            "vs #1 0.1%/h"
         )
         assert event.to_json()["reason"] == event.reason
         assert h.engine.last_decision == Decision(
@@ -517,24 +558,27 @@ class TestEngine:
     def test_owners_case_on_b_stays_with_reason(self, temp_home):
         h = make_pace(temp_home)  # slot 1 active = B
         assert h.tick_with_usage(owners(h, a="2", b="1")) is TickOutcome.NO_ACTION
-        line = "stay: #1 resets in 19h40m with 27% left (needs 1.4%/h), next #2 0.1%/h"
+        line = "stay: most 7d to spend: #1's week resets in 19h40m with 27% left (needs 1.4%/h)"
         assert [(e.reason, e.detail) for e in no_switch(h)] == [("stay", line)]
         assert h.engine.last_decision.line == line
 
-    def test_start_of_week_spreads_then_hands_over_on_a_tight_5h(self, temp_home):
+    def test_a_tight_5h_moves_only_at_the_limit_and_by_7d_need(self, temp_home):
+        """A 5h window filling up is no proactive reason to move; when it
+        reaches the threshold the forced move goes to the most 7d need
+        among accounts with 5h room (#2 and #3 tie on need: #3 has the
+        fresh window)."""
         h = make_pace(temp_home, n=3)
         now = h.clock.now
         u = {
-            "1": usage_at(now, seven=10, reset_h=150, five=40),
+            "1": usage_at(now, seven=10, reset_h=150, five=75),
             "2": usage_at(now, seven=5, reset_h=160, five=30),
             "3": usage_at(now, seven=0, reset_h=165, five=0, five_reset_h=None),
         }
         assert h.tick_with_usage(u) is TickOutcome.NO_ACTION
-        assert no_switch(h)[-1].detail.startswith("stay: #1's 5h resets in ")
-        u["1"] = usage_at(now, seven=10, reset_h=150, five=75)
-        assert confirmed(h, u) is TickOutcome.SWITCHED
-        assert h.active_number() == 2  # #3's fresh window stays in reserve
-        assert "#3 kept fresh as backup" in switches(h)[0].reason
+        assert "5h" not in no_switch(h)[-1].detail
+        u["1"] = usage_at(now, seven=10, reset_h=150, five=91)
+        assert h.tick_with_usage(u) is TickOutcome.SWITCHED
+        assert h.active_number() == 3
 
     def test_dry_run_reports_the_reason_and_moves_nothing(self, temp_home):
         h = make_pace(temp_home)
@@ -610,21 +654,15 @@ class TestEngine:
         h.clock.advance(PROACTIVE_CONFIRM_S)
         assert h.tick_with_usage(u) is outcome
 
-    def test_heavy_burn_from_history_spreads(self, temp_home):
-        """B needs 1.4%/h, A 0.9%/h: B leads by the margin, but the active
-        account's own history says the user burns 6 points an hour, so B
-        needs no rescuing and A's running 5h window is used."""
+    def test_heavy_burn_from_history_still_follows_the_week(self, temp_home):
+        """B needs 1.4%/h, A 0.9%/h: B leads by the margin. The active
+        account's own history says the user burns 6 points an hour, which
+        once kept pace on A's running 5h window; the week still says B."""
         def fleet(now):
             return {
                 "1": usage_at(now, seven=40, reset_h=56, five=20),
                 "2": usage_at(now, seven=63, reset_h=19 + 40 / 60, five=37),
             }
-
-        without_history = choose(
-            view("1", seven=40, reset_h=56, five=20),
-            view("2", seven=63, reset_h=19 + 40 / 60, five=37),
-        )
-        assert without_history.target == "2"
 
         h = make_pace(temp_home)
         history = h.switcher.usage_history
@@ -637,8 +675,9 @@ class TestEngine:
             )
         h.clock.now = start + 6 * H
         assert h.engine._burn_rate("1", h.clock.now) == pytest.approx(6.0, rel=0.05)
-        assert h.tick_with_usage(fleet(h.clock.now)) is TickOutcome.NO_ACTION
-        assert "using it first; no 7d reset is close" in no_switch(h)[-1].detail
+        assert confirmed(h, fleet(h.clock.now)) is TickOutcome.SWITCHED
+        assert h.active_number() == 2
+        assert "#2's week resets in" in switches(h)[0].reason
 
     def test_walk_does_not_flap(self, temp_home):
         """Sixty ticks with jittering 5h readings: one move, then it holds."""

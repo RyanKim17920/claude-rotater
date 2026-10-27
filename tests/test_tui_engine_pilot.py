@@ -136,14 +136,15 @@ async def test_pace_switch_moves_cursor_charts_and_forecasts(world):
         assert before["cursor"] == before["active"] == "1"
         assert before["charts"].startswith("› #1 a@example.com")
         assert "~5h limit in" in before["rows"]["1"]  # the user is burning #1
-        # The user keeps working on #1: its 5h climbs past pace's "tight"
-        # line, one statusline record at a time. Only the feed says so (the
-        # endpoint still answers 70%), so the switch proves the ingestion.
-        pct = 70.0
+        # The user keeps working on #1, one statusline record at a time:
+        # its week fills until #2 needs using more than it by pace's margin
+        # (#1 past about 63%). Only the feed says so (the endpoint still
+        # answers 43%), so the switch proves the ingestion.
+        five, seven = 70.0, 43.0
         while not any(isinstance(e, SwitchEvent) for e in seen):
-            assert pct < 95.0, [e.human() for e in seen]
-            pct += 1.0
-            feed.append_record(path, feed_record(home, pct, 43.0, r5_a, r7, time.time()))
+            assert seven < 85.0, [e.human() for e in seen]
+            five, seven = five + 1.0, seven + 2.0
+            feed.append_record(path, feed_record(home, five, seven, r5_a, r7, time.time()))
             await pilot.pause(0.4)
         switch = next(e for e in seen if isinstance(e, SwitchEvent))
         assert switch.trigger == "pace" and switch.to_ref["number"] == 2

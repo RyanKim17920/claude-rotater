@@ -1,37 +1,41 @@
 """The ``pace`` auto-switch policy (the default). Pure decision math, no I/O.
 
-Weekly (7-day) quota is perishable, but spending the soonest-expiring account
-first (``expiring-first``) piles every hour onto one account, burning through
-its 5-hour windows while the others sit idle. ``pace`` asks a sharper
-question per account: how fast would you have to spend it, from now on, to
-use what it has left before its window rolls over?
+What rotation is for is the weekly (7-day) quota: whatever an account has
+left when its week rolls over is gone. The 5-hour window is a speed limit on
+the way, not something to spend for its own sake: a 5-hour window that rolls
+over unused wastes nothing. So every proactive choice here is made on the
+7-day windows, and the 5-hour window only ever constrains it.
 
-    required pace = 7d headroom (to the threshold) / hours until its 7d reset
+Per account the policy asks: how fast would you have to spend it, from now
+on, to use what it has left before its week rolls over?
 
-Early in a week every account's required pace is low and roughly equal:
-whatever you do, all of it gets used. Then the policy **spreads**: it stays
-put until the active account's 5-hour window gets tight, then moves to the
-account with the most 5-hour room, so several accounts keep a fresh 5-hour
-window in reserve. As one account's reset approaches with headroom left, its
-required pace climbs above the rest; once it leads by the dominance margin
-(``autoswitch.paceMargin``, 1.5x by default) the policy **concentrates** on
-it, so that quota is not wasted.
+    required pace (need) = 7d headroom (to the threshold) / hours to its 7d reset
 
-Spreading also wins whenever the highest required pace is well below the
-user's actual burn rate (from the active account's history): at that burn
-no single account's quota is at risk, so there is nothing to rescue.
-Without a burn estimate only the dominance margin can start concentrating.
+A week that has not started yet (no reset reported) is planned as a whole
+week away: that is the soonest it can roll over once it starts.
 
-Anti-flap is structural: a move toward the leader needs it to lead the
-active account by the margin, and the move back needs the reverse, a swing
-of margin squared that only real usage and time produce. Spreading only
-moves when the 5-hour window is tight. The engine adds two agreeing
-evaluations, the cooldown, the manual-switch hold and the hourly cap.
+**Spread.** Being on the account with the highest need lowers that need and
+leaves the others' to climb as their resets near, so following the leader
+keeps every account on track to finish its week: an even spread. To keep
+that from flapping, the policy stays while the active account's need is
+within the margin (``autoswitch.paceMargin``, 1.5x by default) of the
+leader's, and moves only when the leader is ahead by more. The move back
+needs the reverse, a swing of margin squared that only real use and time
+produce.
 
-The 5-hour rules: never move to an account whose 5-hour window is near its
-limit; when spreading, take an account with a window already running and
-keep the last fresh one as a backup; and never open a fresh window elsewhere
-just to balance while the current one still has room.
+**Finish first.** As an account's reset nears with headroom left, its need
+climbs (hours shrink, headroom does not), so it takes the lead and the
+policy concentrates on it until that quota is spent. No separate rule.
+
+**5 hours is a constraint only.** The policy never moves to an account whose
+5-hour window is near its limit, and between accounts the 7-day picture
+cannot tell apart it prefers 5-hour room. It never moves, or stays, to use
+up a 5-hour window. When the active account's 5-hour window is about to hit,
+the engine's pre-empt and threshold paths make the move, ordered by
+``rank``: highest 7-day need first among accounts with 5-hour room.
+
+The engine adds two agreeing evaluations, the cooldown, the manual-switch
+hold and the hourly cap.
 """
 
 from __future__ import annotations
@@ -45,14 +49,18 @@ from claude_rotater.expiring_first import (
     fmt_duration,
 )
 
-# Spread whenever the highest required pace is under this fraction of the
-# user's actual burn: even half of the user's time would empty the most
-# urgent account before its reset.
-SPREAD_BURN_FRACTION = 0.5
-# A 5-hour window at most this full is a fresh backup.
-FRESH_FIVE_HOUR_USED_PCT = 20.0
 # A reset closer than this counts as this close (no division blow-up).
 MIN_HOURS_LEFT = 1.0 / 60.0
+# A week with no reported reset has not started: once it does, it rolls over
+# a week later, so that is the plan.
+WEEK_HOURS = 7 * 24.0
+# Two needs within this ratio are the same to the 7-day picture; 5-hour room
+# breaks the tie.
+SIMILAR_NEED_RATIO = 1.1
+# An active account with at most this many 7d points left is finished before
+# moving on: leave it now and the rest is under what a later move would come
+# back for (``MEANINGFUL_ABSORB_PCT``), so it would expire unused.
+FINISH_PCT = 10.0
 
 
 def seven_day_left(view: AccountView, threshold: float) -> float:
@@ -60,32 +68,26 @@ def seven_day_left(view: AccountView, threshold: float) -> float:
     return max(0.0, view.seven_day_headroom - (100.0 - threshold))
 
 
-def hours_left(view: AccountView, now: float) -> float | None:
+def hours_left(view: AccountView, now: float) -> float:
+    """Hours until this account's week rolls over; a whole week when no
+    reset is reported (the week has not started)."""
     if view.seven_day_reset is None:
-        return None
+        return WEEK_HOURS
     return max(MIN_HOURS_LEFT, (view.seven_day_reset - now) / 3600.0)
 
 
 def required_pace(view: AccountView, *, threshold: float, now: float) -> float:
     """7d points per hour needed to use this account's headroom before its
-    reset. 0 when the reset is unknown: nothing says it is urgent."""
-    hours = hours_left(view, now)
-    if hours is None:
-        return 0.0
-    return seven_day_left(view, threshold) / hours
+    reset."""
+    return seven_day_left(view, threshold) / hours_left(view, now)
 
 
 def _five_used(view: AccountView) -> float:
     return 100.0 - view.five_hour_headroom
 
 
-def _fresh(view: AccountView) -> bool:
-    return _five_used(view) <= FRESH_FIVE_HOUR_USED_PCT
-
-
 class _Fleet:
-    """One evaluation's numbers: who counts, their required paces, and the
-    group worth being on (everyone when spreading, the leaders otherwise)."""
+    """One evaluation's numbers: who can take work, and their needs."""
 
     def __init__(
         self,
@@ -98,8 +100,8 @@ class _Fleet:
         now: float,
     ) -> None:
         self.threshold = threshold
+        self.margin = margin
         self.now = now
-        self.burn = burn_pct_per_h
         self.need = {
             v.number: required_pace(v, threshold=threshold, now=now) for v in views
         }
@@ -110,92 +112,47 @@ class _Fleet:
             # gap keeps a wobbling burn estimate from toggling either.
             if v.number == active:
                 return v.seven_day_headroom >= SPENT_7D_PCT
-            if v.seven_day_reset is None:
-                return False  # a target needs a known reset to plan on
             left = seven_day_left(v, threshold)
             if burn_pct_per_h is not None:
                 left = min(left, burn_pct_per_h * hours_left(v, now))
             return left >= MEANINGFUL_ABSORB_PCT
 
         self.pool = [v for v in views if counts(v)]
-        self.top_need = max((self.need[v.number] for v in self.pool), default=0.0)
-        # Without a burn estimate only dominance can say "concentrate".
-        self.burn_covers_all = bool(burn_pct_per_h) and (
-            self.top_need < SPREAD_BURN_FRACTION * burn_pct_per_h
-        )
-        if self.burn_covers_all:
-            self.group = list(self.pool)
-        else:
-            self.group = [
-                v for v in self.pool if self.need[v.number] * margin >= self.top_need
-            ]
-        self.spreading = len(self.group) == len(self.pool)
 
     def roomy(self, view: AccountView) -> bool:
         """Its 5h window is not near its limit."""
         return _five_used(view) < self.threshold - FIVE_HOUR_NEAR_MARGIN_PCT
 
     def by_need(self, views: list[AccountView]) -> list[AccountView]:
-        """Most urgent first; equal needs go to the one with more 5h room."""
-        return sorted(
-            views, key=lambda v: (-self.need[v.number], -v.five_hour_headroom)
-        )
-
-    def spread_order(
-        self, views: list[AccountView], others: list[AccountView]
-    ) -> list[AccountView]:
-        """Most 5h room first (then most need), except that the last fresh
-        5h window among ``others`` (everyone who would stay behind) is kept
-        as a backup while a running window can take the work instead."""
-        ordered = sorted(
-            views, key=lambda v: (-v.five_hour_headroom, -self.need[v.number])
-        )
-        if ordered and _fresh(ordered[0]):
-            first = ordered[0]
-            spare_fresh = any(
-                _fresh(v) for v in others if v.number != first.number
-            )
-            running = next((v for v in ordered if not _fresh(v)), None)
-            if not spare_fresh and running is not None:
-                ordered.remove(running)
-                ordered.insert(0, running)
-        return ordered
+        """Most 7d need first. Needs the 7d picture cannot tell apart (within
+        ``SIMILAR_NEED_RATIO`` of the one ahead) go to more 5h room."""
+        ordered = sorted(views, key=lambda v: -self.need[v.number])
+        out: list[AccountView] = []
+        while ordered:
+            head = self.need[ordered[0].number]
+            tied = [v for v in ordered if self.need[v.number] * SIMILAR_NEED_RATIO >= head]
+            tied.sort(key=lambda v: -v.five_hour_headroom)
+            out.extend(tied)
+            ordered = [v for v in ordered if v not in tied]
+        return out
 
     def pace(self, view: AccountView) -> str:
         return f"{self.need[view.number]:.1f}%/h"
 
     def deadline(self, view: AccountView) -> str:
-        """``#2 resets in 9h with 40% left (needs 4.4%/h)``."""
-        hours = hours_left(view, self.now)
-        when = fmt_duration(hours * 3600.0) if hours is not None else "unknown"
+        """``#2's week resets in 9h with 40% left (needs 4.4%/h)``."""
+        if view.seven_day_reset is None:
+            return (
+                f"#{view.number}'s week has not started, "
+                f"{seven_day_left(view, self.threshold):.0f}% to spend "
+                f"(needs {self.pace(view)})"
+            )
+        when = fmt_duration(hours_left(view, self.now) * 3600.0)
         return (
-            f"#{view.number} resets in {when} with "
+            f"#{view.number}'s week resets in {when} with "
             f"{seven_day_left(view, self.threshold):.0f}% left "
             f"(needs {self.pace(view)})"
         )
-
-    def using_first(self, view: AccountView) -> str:
-        """``#2's 5h resets in 25m with 80% left — using it first``: why a
-        spreading fleet stays on a 5h window that still has room."""
-        left = f"{view.five_hour_headroom:.0f}% left"
-        if view.five_hour_reset is None:
-            return f"#{view.number}'s 5h has {left} — using it first"
-        when = fmt_duration(view.five_hour_reset - self.now)
-        return f"#{view.number}'s 5h resets in {when} with {left} — using it first"
-
-    def why_spread(self) -> str:
-        """Why no account's weekly quota calls for concentrating on it."""
-        if self.burn_covers_all:
-            vs = f" vs burn {self.burn:.1f}%/h" if self.burn else ""
-            return f"no 7d reset is close (needs ≤{self.top_need:.1f}%/h{vs})"
-        if len(self.pool) < 2:
-            # The others cannot take meaningful work before their resets at
-            # the user's burn: there is no second need to compare with.
-            return "no other account needs using first"
-        low = f"{min(self.need[v.number] for v in self.pool):.1f}"
-        high = f"{self.top_need:.1f}"
-        span = high if low == high else f"{low}–{high}"
-        return f"7d needs similar ({span}%/h)"
 
 
 def choose(
@@ -204,7 +161,7 @@ def choose(
     *,
     threshold: float,
     margin: float,
-    hysteresis_pct: float,
+    hysteresis_pct: float,  # noqa: ARG001 - the policies share one signature
     burn_pct_per_h: float | None,
     now: float,
 ) -> Choice:
@@ -221,76 +178,60 @@ def choose(
 
     if not candidates:
         return stay("no other account is under the threshold")
-    if active.seven_day_reset is None:
-        return stay("this account's 7d reset time is unknown")
     fleet = _Fleet(
         [active, *candidates], active=me, threshold=threshold, margin=margin,
         burn_pct_per_h=burn_pct_per_h, now=now,
     )
-    if not fleet.pool:
-        return stay("no account has meaningful 7d headroom left")
-    five_used = _five_used(active)
-    others = [v for v in candidates if v in fleet.pool]
-
-    if active in fleet.group:
-        if fleet.roomy(active):
-            if fleet.spreading:
-                return stay(f"{fleet.using_first(active)}; {fleet.why_spread()}")
-            rivals = [v for v in fleet.group if v.number != me]
-            rest = fleet.by_need([v for v in others if v not in fleet.group])
-            vs = f", next #{rest[0].number} {fleet.pace(rest[0])}" if rest else ""
-            if rivals:
-                return stay(f"{fleet.deadline(active)}, as urgent as #{rivals[0].number}{vs}")
-            return stay(f"{fleet.deadline(active)}{vs}")
-        # 5h tight: hand over to a group member with clearly more 5h room.
-        backups = [
-            v for v in fleet.group
-            if v.number != me and fleet.roomy(v)
-            and v.five_hour_headroom - active.five_hour_headroom >= hysteresis_pct
-        ]
-        if not backups:
-            if fleet.spreading:
+    others = fleet.by_need([v for v in candidates if v in fleet.pool])
+    if active not in fleet.pool:
+        targets = [v for v in others if fleet.roomy(v)]
+        if not targets:
+            if others:
+                lead = others[0]
                 return stay(
-                    f"5h {five_used:.0f}% used but no account has "
-                    f"{hysteresis_pct:.0f} points more 5h room"
+                    f"#{me} has under {SPENT_7D_PCT:.0f}% 7d left; "
+                    f"#{lead.number}'s 5h is {_five_used(lead):.0f}% used"
                 )
-            return stay(
-                f"5h {five_used:.0f}% used; {fleet.deadline(active)}, "
-                "staying until the threshold"
-            )
-        if fleet.spreading:
-            target = fleet.spread_order(backups, others)[0]
-            kept = [v for v in others if v is not target and _fresh(v)]
-            backup = f", #{kept[0].number} kept fresh as backup" if kept else ""
-            return switch(
-                target,
-                f"5h {five_used:.0f}% used; spreading to #{target.number} "
-                f"(5h {_five_used(target):.0f}% used{backup})",
-            )
-        target = fleet.by_need(backups)[0]
+            return stay("no account has meaningful 7d headroom left")
+        target = targets[0]
         return switch(
             target,
-            f"5h {five_used:.0f}% used; {fleet.deadline(target)}, as urgent as #{me}",
+            f"#{me} has under {SPENT_7D_PCT:.0f}% 7d left; {fleet.deadline(target)}",
         )
+    if not others:
+        return stay(f"no other account needs using first; {fleet.deadline(active)}")
 
-    # The active account is out of the group: spent, or out-paced.
-    targets = [v for v in fleet.group if fleet.roomy(v)]
-    if not targets:
-        leader = fleet.by_need(fleet.group)[0]
+    mine = fleet.need[me]
+    ahead = [v for v in others if fleet.need[v.number] > mine * margin]
+    left = seven_day_left(active, threshold)
+    if ahead and left <= FINISH_PCT and burn_pct_per_h:
+        # Only when finishing costs the leader nothing: at the user's burn
+        # it can still spend all it has after this account is done.
+        lead = ahead[0]
+        finish_h = left / burn_pct_per_h
+        after_h = hours_left(lead, now) - finish_h
+        if after_h * burn_pct_per_h >= seven_day_left(lead, threshold):
+            return stay(
+                f"finishing #{me}'s last {left:.0f}% of 7d before "
+                f"#{lead.number} ({fleet.pace(lead)})"
+            )
+    if not ahead:
+        lead = others[0]
+        if mine >= fleet.need[lead.number]:
+            return stay(f"most 7d to spend: {fleet.deadline(active)}")
         return stay(
-            f"#{leader.number} needs {fleet.pace(leader)} but its 5h is "
-            f"{_five_used(leader):.0f}% used"
+            f"7d spread evenly: #{me} needs {fleet.pace(active)}, "
+            f"#{lead.number} {fleet.pace(lead)} (within {margin:g}x)"
         )
-    if fleet.spreading:
-        target = fleet.spread_order(targets, others)[0]
-        return switch(
-            target,
-            f"#{me} has under {SPENT_7D_PCT:.0f}% 7d left; spreading to "
-            f"#{target.number} (5h {_five_used(target):.0f}% used)",
+    targets = [v for v in ahead if fleet.roomy(v)]
+    if not targets:
+        lead = ahead[0]
+        return stay(
+            f"#{lead.number} needs {fleet.pace(lead)} but its 5h is "
+            f"{_five_used(lead):.0f}% used"
         )
-    target = fleet.by_need(targets)[0]
-    mine = f"#{me} needs {fleet.pace(active)}"
-    return switch(target, f"{fleet.deadline(target)} vs {mine}")
+    target = targets[0]
+    return switch(target, f"{fleet.deadline(target)} vs #{me} {fleet.pace(active)}")
 
 
 def rank(
@@ -302,32 +243,23 @@ def rank(
     now: float,
 ) -> list[str]:
     """Order would-be targets for a move the engine has to make anyway (the
-    active account is at its threshold or unreadable).
+    active account is at its threshold, about to hit a limit, or unreadable).
 
-    The group worth being on first (by need when concentrating, by 5h room
-    with a fresh backup kept when spreading), then other accounts with 5h
-    room by need, then everyone else that can absorb work by 5h room, then
-    the rest by most headroom. Sorting is stable, so the caller's order
-    breaks remaining ties.
+    Accounts that can take meaningful 7d work and have 5h room, by 7d need;
+    then those that can take 7d work but whose 5h is near its limit, by 5h
+    room; then the rest by most headroom. Sorting is stable, so the caller's
+    order breaks remaining ties.
     """
     fleet = _Fleet(
         pool, active=None, threshold=threshold, margin=margin,
         burn_pct_per_h=burn_pct_per_h, now=now,
     )
-    roomy_group = [v for v in fleet.group if fleet.roomy(v)]
-    if fleet.spreading:
-        first = fleet.spread_order(roomy_group, pool)
-    else:
-        first = fleet.by_need(roomy_group)
+    first = fleet.by_need([v for v in fleet.pool if fleet.roomy(v)])
     seen = {v.number for v in first}
-    second = fleet.by_need(
-        [v for v in fleet.pool if v.number not in seen and fleet.roomy(v)]
-    )
-    seen |= {v.number for v in second}
-    third = sorted(
+    second = sorted(
         (v for v in fleet.pool if v.number not in seen),
         key=lambda v: -v.five_hour_headroom,
     )
-    seen |= {v.number for v in third}
+    seen |= {v.number for v in second}
     rest = sorted((v for v in pool if v.number not in seen), key=lambda v: -v.headroom)
-    return [v.number for v in (*first, *second, *third, *rest)]
+    return [v.number for v in (*first, *second, *rest)]

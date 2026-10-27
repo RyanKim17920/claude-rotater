@@ -2818,7 +2818,7 @@ class TestEngineHosting:
 
         now = time.time()
         event = NoSwitchEvent(
-            reason="stay", detail="stay: #1's 5h resets in 47m with 99% left — using it first",
+            reason="stay", detail="stay: most 7d to spend: #1's week resets in 3d with 57% left (needs 0.8%/h)",
         )
 
         def world() -> FakeSwitcher:
@@ -2850,7 +2850,7 @@ class TestEngineHosting:
                 assert "~5h limit in" in engine_rows[0]
                 status = painted(viewer, "#status")
                 assert "auto view-only" in status
-                line = "stay: #1's 5h resets in 47m with 99% left"
+                line = "stay: most 7d to spend: #1's week resets in 3d"
                 assert line in engine_status and line in status
         finally:
             lock.release()
