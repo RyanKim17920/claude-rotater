@@ -188,6 +188,18 @@ class TestParseSessions:
         assert (opus.cost, opus.input, opus.output, opus.cache_write, opus.cache_read) == (
             1.25, 20, 900, 1000, 40000)
 
+    def test_token_counts_sum_to_the_sessions_totals_as_ccusage_reports_them(self):
+        payload = json.loads(FIXTURE.read_text())
+        rows = costs.parse_sessions(payload, ["s0", "s1"])
+        for session in payload["sessions"][:2]:
+            mine = [r for r in rows if str(r.slot) == session["sessionId"]]
+            assert [sum(r.tokens[i] for r in mine) for i in range(4)] == [
+                session["inputTokens"], session["cacheCreationTokens"],
+                session["cacheReadTokens"], session["outputTokens"]]
+        opus = next(r for r in rows if r.model == "claude-opus-4-7")
+        assert dict(zip(costs.TOKEN_KINDS, opus.tokens)) == {
+            "input": 20, "cache write": 1000, "cache read": 40000, "output": 900}
+
     def test_unknown_sources_and_garbage_are_skipped(self):
         assert costs.parse_sessions(json.loads(FIXTURE.read_text()), ["s9"]) == []
         assert costs.parse_sessions({"sessions": "x"}, ["s0"]) == []
@@ -342,6 +354,25 @@ class TestRefresh:
         assert costs.load_cache(tmp_path).archive == second.archive
         third = costs.refresh(second, source(home), ["x"], later + 86400, run=fake_ccusage())
         assert third.archive[d3] == {"claude-opus-4-7": 2.0}  # folded once, not again
+
+    def test_the_archive_keeps_token_counts_beside_the_dollars(self, tmp_path, home, now):
+        write(home / "projects" / "p" / "a.jsonl", entry(now - 3 * 86400, "d3", out=2000),
+              entry(now - 3 * 86400 + 60, "d3b", out=500), entry(now - 600, "t1"))
+        first = costs.refresh(None, source(home), ["x"], now, run=fake_ccusage())
+        later = now + costs.RANGE_DAYS * 86400
+        second = costs.refresh(first, source(home), ["x"], later, run=fake_ccusage())
+        d3 = costs.day_start(now - 3 * 86400)
+        assert second.archive_tokens[d3] == {"claude-opus-4-7": (6, 20, 200, 2500)}
+        costs.save_cache(tmp_path, second)
+        assert costs.load_cache(tmp_path).archive_tokens == second.archive_tokens
+        third = costs.refresh(second, source(home), ["x"], later + 86400, run=fake_ccusage())
+        assert third.archive_tokens[d3] == {"claude-opus-4-7": (6, 20, 200, 2500)}
+        raw = second.to_json()
+        del raw["archiveTokens"]  # rewritten by an older rota: the dollars stay
+        old = costs.CostCache.from_json(raw)
+        assert old.archive == second.archive and old.archive_tokens == {}
+        raw["archiveTokens"] = {str(int(d3)): {"m": [1, 2, 3], "n": [1, 2, 3, "x"], "o": [1, 2, 3, 4]}}
+        assert costs.CostCache.from_json(raw).archive_tokens == {d3: {"o": (1, 2, 3, 4)}}
 
     def test_the_archive_keeps_its_newest_days(self, now):
         rows = [costs.Row("s0", int(costs.day_start(now, d)), "m", 1.0, 0, 0, 0, 0)

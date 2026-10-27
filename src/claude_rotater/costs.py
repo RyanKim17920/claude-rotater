@@ -126,6 +126,12 @@ def run_ccusage(runner: list[str], config_dir: Path, *, timeout: float = RUNNER_
 # -- priced slots -------------------------------------------------------------
 
 
+# ccusage's four token counts per model (inputTokens, cacheCreationTokens,
+# cacheReadTokens, outputTokens), in the order the costs view shows them
+TOKEN_KINDS = ("input", "cache write", "cache read", "output")
+Tokens = tuple[int, int, int, int]  # one count per TOKEN_KINDS entry
+
+
 @dataclass(frozen=True)
 class Row:
     """One model's spend in one 15-minute slot of one transcript source."""
@@ -138,6 +144,11 @@ class Row:
     output: int
     cache_write: int
     cache_read: int
+
+    @property
+    def tokens(self) -> "Tokens":
+        """The four counts in :data:`TOKEN_KINDS` order."""
+        return (self.input, self.cache_write, self.cache_read, self.output)
 
     def to_json(self) -> list:
         return [self.source, self.slot, self.model, round(self.cost, 6),
@@ -427,6 +438,9 @@ class CostCache:
     # Spend per local day and model from before the priced range: the
     # slots that aged out, folded so the costs view can show all of it.
     archive: dict[float, dict[str, float]] = field(default_factory=dict)
+    # the same days' token counts per model (Tokens), kept apart so an older
+    # rota that rewrites the cache keeps the dollars it knows
+    archive_tokens: dict[float, dict[str, Tokens]] = field(default_factory=dict)
 
     def to_json(self) -> dict:
         return {
@@ -439,6 +453,8 @@ class CostCache:
             "rows": [row.to_json() for row in self.rows],
             "archive": {str(int(day)): {m: round(usd, 4) for m, usd in models.items()}
                         for day, models in sorted(self.archive.items())},
+            "archiveTokens": {str(int(day)): {m: list(t) for m, t in models.items()}
+                              for day, models in sorted(self.archive_tokens.items())},
         }
 
     @classmethod
@@ -461,6 +477,7 @@ class CostCache:
             built_at=float(built),
             took_s=float(raw.get("tookS") or 0.0) if _num(raw.get("tookS")) else 0.0,
             archive=_archive_from_json(raw.get("archive")),
+            archive_tokens=_archive_tokens_from_json(raw.get("archiveTokens")),
         )
 
 
@@ -472,6 +489,32 @@ def _archive_from_json(raw: object) -> dict[float, dict[str, float]]:
         kept = {m: float(v) for m, v in models.items() if isinstance(m, str) and _num(v)}
         if kept:
             out[float(day)] = kept
+    return out
+
+
+def _archive_tokens_from_json(raw: object) -> dict[float, dict[str, Tokens]]:
+    out: dict[float, dict[str, Tokens]] = {}
+    for day, models in (raw.items() if isinstance(raw, dict) else ()):
+        if not (isinstance(day, str) and day.isdigit() and isinstance(models, dict)):
+            continue
+        kept = {m: tuple(int(x) for x in t) for m, t in models.items()
+                if isinstance(m, str) and isinstance(t, list) and len(t) == len(TOKEN_KINDS)
+                and all(_num(x) for x in t)}
+        if kept:
+            out[float(day)] = kept
+    return out
+
+
+def fold_tokens(archive: dict[float, dict[str, Tokens]],
+                rows: Iterable[Row]) -> dict[float, dict[str, Tokens]]:
+    """As :func:`fold`, for the token counts."""
+    out = {day: dict(models) for day, models in archive.items()}
+    for r in rows:
+        day = out.setdefault(day_start(r.slot), {})
+        before = day.get(r.model, (0, 0, 0, 0))
+        day[r.model] = tuple(a + b for a, b in zip(before, r.tokens))
+    for day in sorted(out)[:-ARCHIVE_DAYS]:
+        del out[day]
     return out
 
 
@@ -549,7 +592,9 @@ def refresh(
     started = time.monotonic()
     lo = range_start(now)
     paths = [s.path for s in sources]
-    archive = fold(cache.archive, (r for r in cache.rows if r.slot < lo)) if cache else {}
+    aged = [r for r in cache.rows if r.slot < lo] if cache else []
+    archive = fold(cache.archive, aged) if cache else {}
+    archive_tokens = fold_tokens(cache.archive_tokens, aged) if cache else {}
     if cache is None or cache.sources != paths or cache.boundary < lo:
         since, offsets, kept = lo, {}, []
     else:
@@ -570,4 +615,5 @@ def refresh(
         built_at=now,
         took_s=time.monotonic() - started,
         archive=archive,
+        archive_tokens=archive_tokens,
     )
