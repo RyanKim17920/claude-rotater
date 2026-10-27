@@ -552,3 +552,61 @@ class TestRealReplays:
         assert 40.0 <= w.rate_pct_per_h <= 60.0
         eta = w.eta_s(100.0, NOW)
         assert 50 * 60 <= eta <= 80 * 60  # ~18:40, well before the 21:30 reset
+
+
+class TestTypicalBurn:
+    """The user's 7d spend per wall hour over the last week, every account."""
+
+    W1 = NOW + 3 * 86400.0
+    W2 = NOW + 5 * 86400.0
+
+    def test_sums_rises_across_accounts_over_the_hours_covered(self):
+        h = 3600.0
+        a = {"7d": [Point(NOW - 48 * h, 10.0, self.W1), Point(NOW - 24 * h, 30.0, self.W1),
+                    Point(NOW, 40.0, self.W1)]}
+        b = {"7d": [Point(NOW - 12 * h, 5.0, self.W2), Point(NOW, 15.0, self.W2)]}
+        # 30 + 10 points over the 48h covered.
+        assert est.typical_burn([a, b], now=NOW) == pytest.approx(40.0 / 48.0)
+
+    def test_a_reset_is_not_negative_spend(self):
+        h = 3600.0
+        a = {"7d": [Point(NOW - 30 * h, 80.0, self.W1), Point(NOW - 20 * h, 90.0, self.W1),
+                    Point(NOW - 10 * h, 0.0, self.W2), Point(NOW, 6.0, self.W2)]}
+        assert est.typical_burn([a], now=NOW) == pytest.approx(16.0 / 30.0)
+
+    def test_a_rise_across_a_reset_is_not_counted(self):
+        h = 3600.0
+        a = {"7d": [Point(NOW - 30 * h, 2.0, self.W1), Point(NOW, 9.0, self.W2)]}
+        assert est.typical_burn([a], now=NOW) == 0.0
+
+    def test_reset_jitter_is_one_window(self):
+        h = 3600.0
+        a = {"7d": [Point(NOW - 30 * h, 2.0, self.W1), Point(NOW, 9.0, self.W1 + 30)]}
+        assert est.typical_burn([a], now=NOW) == pytest.approx(7.0 / 30.0)
+
+    def test_needs_a_day_of_readings(self):
+        h = 3600.0
+        a = {"7d": [Point(NOW - 10 * h, 2.0, self.W1), Point(NOW, 9.0, self.W1)]}
+        assert est.typical_burn([a], now=NOW) is None
+        assert est.typical_burn([], now=NOW) is None
+
+    def test_looks_back_a_week_only(self):
+        h = 3600.0
+        old = Point(NOW - 9 * 24 * h, 0.0, self.W1)
+        a = {"7d": [old, Point(NOW - 48 * h, 50.0, self.W1), Point(NOW, 60.0, self.W1)]}
+        assert est.typical_burn([a], now=NOW) == pytest.approx(10.0 / 48.0)
+
+
+class TestLastRise:
+    def test_newest_rise_of_any_window(self):
+        series = {
+            "5h": [Point(NOW - 300, 10.0, RESET), Point(NOW - 200, 12.0, RESET),
+                   Point(NOW - 100, 12.0, RESET)],
+            "7d": [Point(NOW - 900, 3.0, RESET), Point(NOW - 50, 3.0, RESET)],
+        }
+        assert est.last_rise(series) == NOW - 200
+
+    def test_flat_or_falling_is_no_rise(self):
+        series = {"5h": [Point(NOW - 300, 10.0, RESET), Point(NOW - 100, 4.0, RESET)]}
+        assert est.last_rise(series) is None
+        assert est.last_rise({}) is None

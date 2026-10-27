@@ -378,6 +378,57 @@ def carried_burn(
     return best
 
 
+# How far back typical_burn looks, and the least history it needs.
+TYPICAL_SPAN_S = 7 * 24 * 3600.0
+TYPICAL_MIN_SPAN_S = 24 * 3600.0
+
+
+def _same_window(a: Point, b: Point) -> bool:
+    """Two readings of one window instance: their resets agree (feed and
+    poll timestamps differ by rounding)."""
+    if a.resets_at is None or b.resets_at is None:
+        return a.resets_at is b.resets_at
+    return abs(a.resets_at - b.resets_at) <= RESET_MATCH_S
+
+
+def typical_burn(
+    accounts: Iterable[dict[str, list[Point]]], *, now: float, window: str = "7d"
+) -> float | None:
+    """The user's spend of ``window`` points per wall hour over the last
+    ``TYPICAL_SPAN_S``, nights and breaks included: every rise any account
+    shows, summed, over the hours the readings cover. A fall is a reset (or
+    a lagging reading), never negative spend. None with under
+    ``TYPICAL_MIN_SPAN_S`` of readings.
+
+    It is what an account can count on being spent on it per hour from now
+    on: the active burn times the hours a day the user works, without having
+    to know either."""
+    lo = now - TYPICAL_SPAN_S
+    rise = 0.0
+    first: float | None = None
+    for series in accounts:
+        points = [p for p in series.get(window, []) if lo <= p.t <= now]
+        if points:
+            first = points[0].t if first is None else min(first, points[0].t)
+        for a, b in zip(points, points[1:]):
+            if b.pct > a.pct and _same_window(a, b):
+                rise += b.pct - a.pct
+    if first is None or now - first < TYPICAL_MIN_SPAN_S:
+        return None
+    return rise / ((now - first) / 3600.0)
+
+
+def last_rise(series: dict[str, list[Point]]) -> float | None:
+    """When any window of one account last read higher than the reading
+    before it: the newest sign of use (anywhere, this machine or not)."""
+    newest: float | None = None
+    for points in series.values():
+        for a, b in zip(points, points[1:]):
+            if b.pct > a.pct and (newest is None or b.t > newest):
+                newest = b.t
+    return newest
+
+
 def estimate_fleet(
     series: dict[str, dict[str, list[Point]]],
     *,
