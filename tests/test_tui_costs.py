@@ -29,6 +29,7 @@ from tests.test_tui import (  # noqa: F401  (autouse fixtures)
     fake_engine,
     fake_refresher,
     make_app,
+    prompt_plain,
     settle,
     three_accounts,
 )
@@ -237,7 +238,7 @@ def test_every_view_fits_and_keeps_the_essentials(v, width, height):
     assert len(lines) <= height
     assert all(line.cell_len <= width for line in lines[1:])  # the summary may ellipsize
     assert lines[0].plain.startswith("today $12.3")
-    if v in view.TREND_VIEWS:
+    if v == view.TREND:
         assert "$/1% 5h" not in text.split("\n")[1:2]  # no table header: the legend names them
     else:
         assert "$/1% 5h" in text and "#1" in text  # the accounts always stay
@@ -275,10 +276,13 @@ def test_the_note_and_gaps_go_before_the_chart_shrinks():
 
 
 def test_many_models_fold_into_one_other_row_only_when_rows_run_out():
-    lines = view.model_lines(report(n_models=7), 118, 5, P)
-    assert len(lines) == 6 and "3 other" in lines[-1].plain
-    every = view.model_lines(report(n_models=7), 118, 7, P)
-    assert len(every) == 8 and not any("other" in line.plain for line in every)
+    rep = report(n_models=7)
+    table = view.model_table(rep, "monthly", 118)
+    lines = view.model_lines(table, 118, 5, P, view.model_colors(rep, P))
+    assert len(lines) == 6 and "4 other" in lines[-2].plain
+    assert lines[-1].plain.lstrip().startswith("total")
+    every = view.model_lines(table, 118, 8, P, view.model_colors(rep, P))
+    assert len(every) == 9 and not any("other" in line.plain for line in every)
 
 
 def test_the_page_lists_every_model_with_spend_when_there_is_room():
@@ -404,12 +408,15 @@ def test_model_picks_take_every_model_with_spend_costliest_first():
     rep = with_days(rep, days)
     assert view.model_picks(rep, "monthly", 98) == [view.ALL_MODELS, "Opus 4.7", "Sonnet 4.5",
                                                     "Haiku 4.5", "Opus 4.8"]
-    assert view.model_picks(rep, "$/1% 5h", 98) == []  # a trend has no model to pick
+    assert view.model_picks(rep, view.TREND, 98) == []  # the trend has no model to pick
 
 
 def test_trend_picks_go_all_accounts_then_each_account_with_points():
     rep = trend_report(**{"1": trend_fig(5.0), "2": PerPct(1.8, False), "3": trend_fig(2.0)})
-    assert view.account_picks(rep, "$/1% 5h", 78) == [view.ALL_ACCOUNTS, "1", "3"]  # #2: no points
+    assert view.account_picks(rep, view.TREND, 78) == [view.ALL_ACCOUNTS, "1", "3"]  # #2: no points
+    only_7d = CostReport(**{**rep.__dict__, "accounts": (
+        *rep.accounts, AccountLine("4", 1.0, None, trend_fig(9.0)))})
+    assert view.account_picks(only_7d, view.TREND, 78)[-1] == "4"  # points in either window
 
 
 def test_a_pick_the_view_lacks_falls_back_to_all():
@@ -419,7 +426,7 @@ def test_a_pick_the_view_lacks_falls_back_to_all():
     assert view.resolve_model(rep, "monthly", 98, None) == view.ALL_MODELS
     assert view.resolve_pick(rep, "monthly", 98, "2") == "2"
     assert view.resolve_pick(rep, "monthly", 98, "7") == view.ALL
-    assert view.resolve_pick(rep, "$/1% 5h", 98, view.BY_ACCOUNT) == view.ALL_ACCOUNTS
+    assert view.resolve_pick(rep, view.TREND, 98, view.BY_ACCOUNT) == view.ALL_ACCOUNTS
 
 
 @pytest.mark.parametrize("v", ["total", "monthly", "weekly", "hourly"])
@@ -512,8 +519,8 @@ def test_the_title_names_both_picks_with_the_filtered_spend_and_share():
     assert title("monthly", "2", "Opus 4.7") == (
         f"‹ monthly ›  ←/→ · ↕ #2 · ⇥ Opus 4.7 · {view.money(part)} ({part / whole * 100:.0f}%)")
     assert "since" not in title("total", view.ALL, "Opus 4.7")  # the filtered total stands in
-    assert title("$/1% 5h", "1").startswith("‹ $/1% 5h ›  ←/→ · ↕ #1 me@x.com")
-    assert "⇥" not in title("$/1% 5h", view.ALL_ACCOUNTS)  # no model to pick on a trend
+    assert title(view.TREND, "1").startswith("‹ $/1% trend ›  ←/→ · ↕ #1 me@x.com")
+    assert "⇥" not in title(view.TREND, view.ALL_ACCOUNTS)  # no model to pick on the trend
 
 
 def test_accounts_are_tagged_by_number_removed_ones_by_email_and_nobody_by_a_question_mark():
@@ -527,10 +534,11 @@ def test_accounts_are_tagged_by_number_removed_ones_by_email_and_nobody_by_a_que
 
 def test_one_account_alone_on_a_trend_drops_the_others():
     rep = trend_report(**{"1": trend_fig(5.0, change=-0.3, steady=False), "2": trend_fig(20.0)})
-    both = view.chart_lines(rep, "$/1% 5h", 78, 8, {}, P)
-    one = view.chart_lines(rep, "$/1% 5h", 78, 8, {}, P, "2")
-    assert len(one) == len(both) - 1 == view.chart_rows(rep, "$/1% 5h", 78, 8, "2")
-    assert one[-1].plain.startswith("● #2")
+    both = view.chart_lines(rep, view.TREND, 78, 8, {}, P)
+    one = view.chart_lines(rep, view.TREND, 78, 8, {}, P, "2")
+    assert len(one) == len(both) - 1 == view.chart_rows(rep, view.TREND, 78, 8, "2")
+    assert one[-2].plain.startswith("● #2")
+    assert "no 7d climb" in one[-1].plain  # the 7d panel: nothing priced yet
     labels = [line.plain.split()[0] for line in one[1:-2] if line.plain.strip().startswith("$")]
     assert "$5" not in labels  # #1 at $5 no longer stretches the scale
 
@@ -545,6 +553,133 @@ def test_every_filter_of_every_view_fits(width, height):
                                          view=v, pick=pick, model=model)
                 assert len(lines) <= height
                 assert all(line.cell_len <= width for line in lines[1:]), (v, pick, model)
+
+
+# -- tokens ------------------------------------------------------------------------------
+
+
+def test_the_views_cycle_through_the_money_charts_then_the_one_trend():
+    assert view.VIEWS == ("total", "monthly", "weekly", "hourly", view.TREND)
+
+
+@pytest.mark.parametrize("n,text", [(500, "500"), (2_000, "2k"), (1_500_000, "1.5M"),
+                                    (3e9, "3B")])
+def test_short_tokens(n, text):
+    assert view.short_tokens(n) == text
+
+
+def test_the_model_table_has_every_token_count_and_a_total_matching_the_range():
+    rep = report(n_models=3)
+    table = view.model_table(rep, "monthly", 118)
+    assert [m.name for m in table] == ["Opus 4.7", "Sonnet 4.5", "Haiku 4.5"]
+    usd = sum(view.range_cells(rep, "monthly", 118).values())
+    assert sum(m.cost for m in table) == pytest.approx(usd)
+    for m in table:  # the fixture counts TOKENS_PER_USD tokens of each kind per dollar
+        assert (m.input, m.cache_write, m.cache_read, m.output) == tuple(
+            round(m.cost * k) for k in TOKENS_PER_USD)
+    lines = view.model_lines(table, 118, 10, P, view.model_colors(rep, P))
+    assert lines[0].plain.split() == ["model", "cost", "share", "input", "cache", "w", "cache",
+                                      "r", "output", "7d"]
+    total = lines[-1].plain.split()
+    assert total[0] == "total" and total[1] == view.money(usd) and total[2] == "100%"
+    assert total[-1] == view.tokens(sum(m.output for m in table))
+
+
+def test_the_model_table_follows_the_account_and_model_picks():
+    rep = report(n_models=3)
+    whole = view.model_table(rep, "weekly", 118)
+    mine = view.model_table(rep, "weekly", 118, "2")
+    assert [m.cost for m in mine] == pytest.approx([m.cost / 3 for m in whole])  # #2: a third
+    assert all(m.trend is None for m in mine)  # the week's trend is for everyone's spend
+    assert view.model_table(rep, "weekly", 118, view.BY_ACCOUNT) == whole
+    one = view.model_table(rep, "weekly", 118, "1", "Sonnet 4.5")
+    assert [m.name for m in one] == ["Sonnet 4.5"] and one[0].share == 1.0
+    assert one[0].output == round(whole[1].output * 2 / 3)
+    lines = view.model_lines(one, 118, 5, P, view.model_colors(rep, P), trend=False)
+    assert len(lines) == 2 and "7d" not in lines[0].plain  # one model: no total row
+
+
+def test_a_model_with_tokens_but_no_dollars_still_gets_a_row():
+    rep = report(n_models=1)
+    cells = dict(rep.history_tokens[-1][1])
+    cells[("1", "Opus 4.8")] = (5.0, 0.0, 0.0, 7.0)
+    rep = CostReport(**{**rep.__dict__, "history_tokens": rep.history_tokens[:-1] + (
+        (rep.history_tokens[-1][0], cells),)})
+    names = [m.name for m in view.model_table(rep, "monthly", 118)]
+    assert names == ["Opus 4.7", "Opus 4.8"]
+
+
+@pytest.mark.parametrize("width,kept", [
+    (70, ["cost", "share", "input", "cache w", "cache r", "output", "7d"]),
+    (69, ["cost", "share", "input", "cache w", "cache r", "output"]),
+    (61, ["cost", "share", "cache w", "cache r", "output"]),
+    (53, ["cost", "cache w", "cache r", "output"]),
+    (46, ["cost", "cache r", "output"]),
+    (37, ["cost", "output"]),
+    (20, ["cost"]),
+])
+def test_narrow_tables_drop_columns_in_order_keeping_cost_output_and_cache_reads(width, kept):
+    assert [h for h, _ in view.model_columns(10, width, True)] == kept
+
+
+@pytest.mark.parametrize("width", [40, 60, 78, 118])
+def test_the_model_table_fits_every_width(width):
+    rep = report(n_models=7)
+    lines = view.model_lines(view.model_table(rep, "monthly", width), width, 9, P,
+                             view.model_colors(rep, P))
+    assert all(line.cell_len <= width for line in lines)
+    assert "total" in lines[-1].plain
+
+
+def test_tokens_stack_by_kind_with_token_gridlines_and_the_filters_apply():
+    rep = report(n_models=3)
+    buckets, _, _ = view.money_series(rep, "hourly", 118, unit=view.TOKENS)
+    dollars, _, _ = view.money_series(rep, "hourly", 118)
+    for (_, kinds), (_, usd) in zip(buckets, dollars):
+        assert set(kinds) <= set(view.TOKEN_LABELS)
+        assert kinds.get("cache r", 0.0) == pytest.approx(sum(usd.values()) * TOKENS_PER_USD[2])
+    mine, _, _ = view.money_series(rep, "hourly", 118, "2", "Opus 4.7", view.TOKENS)
+    for (_, kinds), (_, usd) in zip(mine, dollars):
+        assert kinds.get("output", 0.0) == pytest.approx(usd.get("Opus 4.7", 0.0) / 3 * 1000)
+    by_account, _, _ = view.money_series(rep, "hourly", 118, view.BY_ACCOUNT, unit=view.TOKENS)
+    assert set().union(*(set(b) for _, b in by_account)) <= {"1", "2"}
+    lines = view.money_chart(rep, "hourly", 78, 8, P, unit=view.TOKENS)
+    labels = [line.plain.split()[0] for line in lines[:8] if line.plain.strip()[:1].isdigit()]
+    assert labels and all(label[-1] in "kMB" for label in labels)
+    assert not any("$" in line.plain for line in lines)
+
+
+def test_the_title_says_tokens_with_the_kinds_legend_and_the_token_share():
+    rep = report()
+
+    def title(*args, **kw) -> str:
+        return view.chart_title(rep, *args, palette=P, width=200, names={}, **kw).plain
+
+    assert title("weekly", pick=view.ALL, unit=view.TOKENS) == (
+        "‹ weekly ›  ←/→ · tokens · ↕ all · ⇥ all models ■ in ■ write ■ read ■ out")
+    assert "tokens (33%)" in title("weekly", pick="2", unit=view.TOKENS)
+    assert "tokens" not in title(view.TREND, pick=view.ALL_ACCOUNTS, unit=view.TOKENS)
+    assert "tokens since" not in title("total", pick=view.ALL)
+    assert title("total", pick=view.ALL, unit=view.TOKENS).endswith(" since " + time.strftime(
+        "%m-%d", time.localtime(rep.history[0][0])))
+
+
+def test_the_hint_names_only_the_keys_that_act_and_what_t_switches_to():
+    keys = dict(view.hint_keys("monthly"))
+    assert keys["t"] == "tokens" and keys["tab"] == "model"
+    assert dict(view.hint_keys("monthly", view.TOKENS))["t"] == "dollars"
+    trend = dict(view.hint_keys(view.TREND))
+    assert "t" not in trend and "tab" not in trend and trend["↑/↓"] == "account"
+
+
+def test_the_trend_shows_the_5h_panel_over_the_7d_one():
+    rep = trend_report(**{"1": trend_fig(5.0)})
+    rep = CostReport(**{**rep.__dict__, "accounts": (AccountLine("1", 10.0, trend_fig(5.0),
+                                                                 trend_fig(21.0)),)})
+    lines = [line.plain for line in view.chart_lines(rep, view.TREND, 78, 4, {}, P)]
+    axes = [i for i, line in enumerate(lines) if "$ per 1% of" in line]
+    assert len(axes) == 2 and "of 5h" in lines[axes[0]] and "of 7d" in lines[axes[1]]
+    assert len(lines) == view.chart_rows(rep, view.TREND, 78, 4) == 1 + 2 * (4 + 1 + 1)
 
 
 # -- the $ per 1% views ------------------------------------------------------------------
@@ -642,14 +777,14 @@ def test_a_trend_view_with_nothing_to_plot_says_so_in_one_line():
     rep = trend_report(**{"1": None})
     lines = view.trend_chart(rep, "7d", 78, 10, {}, P)
     assert len(lines) == 1 and "no 7d climb" in lines[0].plain
-    assert view.chart_rows(rep, "$/1% 7d", 78, 10) == 2
+    assert view.chart_rows(rep, view.TREND, 78, 10) == 3  # the title and a line per window
 
 
 @pytest.mark.parametrize("width", [40, 60, 78, 158])
 def test_trend_view_fits_narrow_widths(width):
     rep = trend_report(**{"1": trend_fig(5.0, change=-0.3, steady=False),
                           "2": trend_fig(20.0, sure=False, provisional=True, days=3)})
-    lines = view.chart_lines(rep, "$/1% 5h", width, 6, {"1": "someone@example.com"}, P)
+    lines = view.chart_lines(rep, view.TREND, width, 6, {"1": "someone@example.com"}, P)
     assert all(line.cell_len <= width for line in lines)
 
 
@@ -677,7 +812,7 @@ def test_the_account_table_ends_with_what_nobody_was_credited_with():
 
 def test_plain_page_has_every_part():
     text = view.plain_page(report(), {"1": "me@x.com"})
-    for part in ("today $12.3", "30 days", "model", "me@x.com", "$/1% 5h", "~ estimate",
+    for part in ("today $12.3", "30 days", "model", "me@x.com", "$/1% trend", "~ estimate",
                  "$ per 1% of 5h", "$ per 1% of 7d", "limit shrinking"):
         assert part in text
 
@@ -783,10 +918,10 @@ class TestCostsPage:
             await pilot.press("right")  # monthly: #2 is still there
             await pilot.pause()
             assert "↕ #2" in page(app)
-            for _ in range(3):  # on to the 5h trend: its own pick, all accounts
+            for _ in range(3):  # on to the trend: its own pick, all accounts
                 await pilot.press("right")
                 await pilot.pause()
-            assert costs_view.view == "$/1% 5h" and "↕ all accounts" in page(app)
+            assert costs_view.view == view.TREND and "↕ all accounts" in page(app)
             await pilot.press("down")
             await pilot.pause()
             assert costs_view.trend_pick == "1" and costs_view.money_pick == "2"
@@ -931,13 +1066,42 @@ class TestCostsPage:
             assert not app.screen.config_shown and not app.screen.keys_shown
             assert "remove" not in app.screen.prompt.render().plain
 
+    async def test_t_switches_dollars_and_tokens_on_the_page_only(self, tmp_path):
+        app = costs_app(tmp_path, FakeCosts())
+        async with app.run_test(size=(120, 40)) as pilot:
+            await settle(pilot)
+            await pilot.press("dollar_sign")
+            await settle(pilot)
+            costs_view = app.screen.query_one("#costs")
+            assert "t tokens" in prompt_plain(app)
+            await pilot.press("t")
+            await pilot.pause()
+            assert costs_view.unit == view.TOKENS and "· tokens ·" in page(app)
+            assert "t dollars" in prompt_plain(app)  # not the token prompt
+            for _ in range(4):  # on to the trend: no tokens there, nor their keys
+                await pilot.press("right")
+                await pilot.pause()
+            assert costs_view.view == view.TREND
+            assert "tab" not in prompt_plain(app) and "t dollars" not in prompt_plain(app)
+            await pilot.press("t")
+            await pilot.pause()
+            assert costs_view.unit == view.TOKENS  # kept for the money views
+            await pilot.press("right")
+            await pilot.pause()
+            assert "· tokens ·" in page(app) and "t dollars" in prompt_plain(app)
+            await pilot.press("escape")
+            await settle(pilot)
+            await pilot.press("t")  # the main page's t is still the token paste
+            await pilot.pause()
+            assert prompt_plain(app).startswith("token: ▌")
+
     async def test_the_key_list_names_the_costs(self, tmp_path):
         app = costs_app(tmp_path, FakeCosts())
         async with app.run_test(size=(80, 24)) as pilot:
             await settle(pilot)
             await pilot.press("question_mark")
             await pilot.pause()
-            assert "$      costs ←→↑↓⇥ (esc)" in app.screen.query_one("#detail").render().plain
+            assert "$      costs ←→↑↓⇥t (esc)" in app.screen.query_one("#detail").render().plain
             await pilot.press("dollar_sign")  # straight from the key list
             await settle(pilot)
             assert app.screen.costs_shown and not app.screen.keys_shown

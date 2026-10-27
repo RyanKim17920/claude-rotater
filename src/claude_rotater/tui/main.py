@@ -93,7 +93,6 @@ from claude_rotater.tui.plot import (
 )
 from claude_rotater.tui.config import HINT_KEYS as CONFIG_HINT_KEYS
 from claude_rotater.tui.config import ConfigView
-from claude_rotater.tui.costs import HINT_KEYS as COSTS_HINT_KEYS
 from claude_rotater.tui.costs import CostsView
 from claude_rotater.tui.prompt import PromptLine, hint_text
 from claude_rotater.tui.theme import Palette, blend, brand_chip
@@ -1371,7 +1370,7 @@ KEY_COLUMNS: tuple[tuple[KeyGroup, ...], ...] = (
         ("view", (
             ("y / Y", "copy row / table"),
             ("h", "history (esc back)"),
-            ("$", "costs ←→↑↓⇥ (esc)"),
+            ("$", "costs ←→↑↓⇥t (esc)"),
             ("f", "refresh now"),
             ("ctrl+t", "theme"),
         )),
@@ -1691,7 +1690,7 @@ class MainScreen(Screen):
         if self.config_shown:
             keys = CONFIG_HINT_KEYS
         elif self.costs_shown:
-            keys = COSTS_HINT_KEYS
+            keys = self.costs.hint_keys()
         else:
             keys = main_hint_keys(self.app.settings.mode)
         self.prompt.set_hint(hint_text(keys, self.palette))
@@ -1808,6 +1807,9 @@ class MainScreen(Screen):
         self.query_one("#body").display = False
         self.costs.display = True
         self.costs.open()
+        self._set_hint()
+
+    def on_costs_view_keys_changed(self, event: CostsView.KeysChanged) -> None:
         self._set_hint()
 
     def on_costs_view_closed(self, event: CostsView.Closed) -> None:

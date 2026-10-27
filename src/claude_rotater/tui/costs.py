@@ -6,16 +6,22 @@ to bottom, dropping the lower parts first when rows run out:
 - one summary line: today / 7d / 30d and the week's trend;
 - one chart, cycled with ←/→ (:data:`VIEWS`): the whole history, the last
   30 days, the last week, the last day (bars stacked by model, dashed
-  lines at round dollars, the top one at or above the tallest bar, who was
-  on duty under the week and the day), then each account's $ per 1% of the
-  5h and of the 7d window over time, one series and trendline per account;
-  ↑/↓ picks whose spend (all, stacked by account, one account alone) and
-  tab / shift+tab which model (all, or each with any spend alone), the two
-  combined (:func:`account_picks`, :func:`model_picks`); on a trend ↑/↓
-  picks all accounts or one alone and tab does nothing;
+  lines at round values, the top one at or above the tallest bar, who was
+  on duty under the week and the day), then the $ per 1% trend: each
+  account's $ per 1% of the 5h window over that of the 7d, one series and
+  trendline per account. On a money chart ↑/↓ picks whose spend (all,
+  stacked by account, one account alone), tab / shift+tab which model
+  (all, or each with any spend alone), the two combined
+  (:func:`account_picks`, :func:`model_picks`), and ``t`` counts dollars
+  or tokens (bars stacked by token kind). On the trend ↑/↓ picks all
+  accounts or one alone; tab and ``t`` do nothing there. The prompt line
+  names only the keys that act (:func:`hint_keys`);
 - per account (``#N`` in the account's own color; ``?`` for spend with no
   record of who was logged in): cost and $ per 1% of the 5h and 7d windows;
-- per model: cost, share and trend (tokens too when wide), every model;
+- per model, over the chart's range and picks: cost, share, ccusage's four
+  token counts (input, cache write, cache read, output) and the week's
+  trend, every model, then their total (:func:`model_table`); narrow
+  pages drop columns as :data:`MODEL_DROP_ORDER` says;
 - a note on what is estimated.
 
 Data comes from :class:`claude_rotater.cost_report.CostSource`, which runs
@@ -40,17 +46,28 @@ from claude_rotater.cost_report import CostReport, CostResult, ModelLine
 from claude_rotater.dollar_per_pct import PerPct
 from claude_rotater.tui.theme import Palette
 
+# the prompt line's hint on a money view (``t`` names what it switches to);
+# the trend shows only the keys that act there (:func:`hint_keys`). y / Y
+# (copy) work too but are left out so the line fits 80 columns.
 HINT_KEYS: tuple[tuple[str, str], ...] = (
     ("←/→", "chart"),
     ("↑/↓", "account"),
     ("tab", "model"),
+    ("t", "tokens"),
     ("r", "refresh"),
-    ("y / Y", "copy"),
     ("esc", "back"),
 )
+MONEY_ONLY_KEYS = frozenset({"tab", "t"})
 
-VIEWS: tuple[str, ...] = ("total", "monthly", "weekly", "hourly", "$/1% 5h", "$/1% 7d")
-TREND_VIEWS = {"$/1% 5h": "5h", "$/1% 7d": "7d"}
+TREND = "$/1% trend"  # both windows' $ per 1%, the 5h over the 7d
+VIEWS: tuple[str, ...] = ("total", "monthly", "weekly", "hourly", TREND)
+TREND_WINDOWS = ("5h", "7d")
+TREND_MIN_H = 2  # a trend panel's rows at the least: two of them share the page
+# what the money views' bars count, switched with ``t``
+DOLLARS = "$"
+TOKENS = "tokens"
+TOKEN_LABELS = ("input", "cache w", "cache r", "output")  # costs.TOKEN_KINDS, short
+TOKEN_LEGEND = ("in", "write", "read", "out")  # the same in the chart title's legend
 # the money views' two axes, combinable: ↑/↓ picks whose spend (all of it,
 # split by account, or one account's), tab which model (all, split by
 # model, or one alone); a trend view's ↑/↓ picks all accounts or one
@@ -115,12 +132,20 @@ def nice_top(peak: float, max_lines: int = MAX_GRID_LINES) -> tuple[float, float
     return step, math.ceil(peak / step - 1e-9) * step
 
 
-def tokens(n: int) -> str:
+def short_tokens(n: float) -> str:
+    """A round gridline count: ``500k``, ``2M``, ``1.5B``."""
+    for scale, unit in ((1e9, "B"), (1e6, "M"), (1e3, "k")):
+        if n >= scale:
+            return f"{n / scale:g}{unit}"
+    return f"{n:g}"
+
+
+def tokens(n: float) -> str:
     for scale, unit in ((1e9, "B"), (1e6, "M"), (1e3, "k")):
         if n >= scale:
             value = n / scale
             return f"{value:.1f}{unit}" if value < 10 else f"{value:.0f}{unit}"
-    return str(n)
+    return str(round(n))
 
 
 def arrow(change: float | None, *, flat: float = 0.10) -> str:
@@ -191,6 +216,12 @@ def model_colors(report: CostReport, palette: Palette) -> dict[str, str]:
     hues = (palette.accent, palette.sev_ok, palette.sev_warn)
     return {m.name: hues[i] if i < COLORED_MODELS else palette.muted
             for i, m in enumerate(report.models)}
+
+
+def token_colors(palette: Palette) -> dict[str, str]:
+    """One hue per token kind (:data:`TOKEN_LABELS`)."""
+    return dict(zip(TOKEN_LABELS, (palette.foreground, palette.sev_warn, palette.sev_ok,
+                                   palette.accent)))
 
 
 def account_colors(report: CostReport, palette: Palette,
@@ -283,6 +314,15 @@ def _midnight(t: float) -> float:
 # -- the parts -------------------------------------------------------------------
 
 
+def hint_keys(view: str, unit: str = DOLLARS) -> tuple[tuple[str, str], ...]:
+    """The prompt line's keys on ``view``: only the ones that act there,
+    ``t`` named by what it switches to."""
+    if view == TREND:
+        return tuple(k for k in HINT_KEYS if k[0] not in MONEY_ONLY_KEYS)
+    switch = "dollars" if unit == TOKENS else "tokens"
+    return tuple((key, switch if key == "t" else words) for key, words in HINT_KEYS)
+
+
 def summary_text(report: CostReport, palette: Palette, *, status: str = "") -> Text:
     """``today $35 · 7d $1,392 · 30d $5,757   ↑ 18% vs last week``."""
     text = Text(no_wrap=True, overflow="ellipsis")
@@ -306,7 +346,7 @@ def _stack(column: dict[str, float], order: Sequence[str]) -> list[tuple[str, fl
     return shown + ([("", rest)] if rest > 0 else [])
 
 
-def grid_rows(peak: float, height: int) -> tuple[float, dict[int, str]]:
+def grid_rows(peak: float, height: int, fmt=short_money) -> tuple[float, dict[int, str]]:
     """``(top, {row: label})``: the round value the chart tops out at (at or
     above ``peak``, labelled on the top row) and the gridlines, row 0 at the
     bottom, each at the row its value reaches, a shared row keeping the lower."""
@@ -317,9 +357,9 @@ def grid_rows(peak: float, height: int) -> tuple[float, dict[int, str]]:
     k = 1
     while k * step <= top * (1 + 1e-9):
         row = min(height - 1, max(0, math.ceil(k * step / top * height - 1e-9) - 1))
-        rows.setdefault(row, short_money(k * step))
+        rows.setdefault(row, fmt(k * step))
         k += 1
-    rows[height - 1] = short_money(top)  # the top is always labelled
+    rows[height - 1] = fmt(top)  # the top is always labelled
     return top, rows
 
 
@@ -334,15 +374,17 @@ def bar_chart(
     axis: tuple[str, str, str],
     under: Sequence[str | None] | None = None,
     under_colors: dict[str, str] | None = None,
+    fmt=short_money,
 ) -> list[Text]:
     """Stacked bars, ``height`` rows, then the optional ``under`` row (who
     was on duty, shown where it changes, each in ``under_colors``) and an
     axis of (left, middle,
     right) labels. A bar is cut in eighths at its top and colored by the
     model holding each cell; dashed rows mark round dollar values, the top
-    row the round value at or above the tallest bar."""
+    row the round value at or above the tallest bar (``fmt`` labels them:
+    dollars, or :func:`short_tokens`)."""
     totals = [sum(c.values()) for c in columns]
-    top, grid = grid_rows(max(totals, default=0.0), height)
+    top, grid = grid_rows(max(totals, default=0.0), height, fmt)
     label_w = max([2, *(len(v) for v in grid.values())]) + 1
     n = max(1, len(columns))
     col = max(1, min(4, (width - label_w) // n))
@@ -424,14 +466,16 @@ def _fits(n: int, width: int, label_w: int = 6) -> bool:
 
 
 Cells = dict[tuple[str, str], float]  # (account key, model) -> usd
+TokenCells = dict[tuple[str, str], tuple[float, ...]]  # -> counts, costs.TOKEN_KINDS order
 
 
-def _cells_series(report: CostReport, view: str) -> list[tuple[float, Cells]]:
+def _cells_series(report: CostReport, view: str, unit: str = DOLLARS) -> list[tuple[float, dict]]:
+    history = report.history_tokens if unit == TOKENS else report.history_cells
     if view == "total":
-        return fill_days(list(report.history_cells))
+        return fill_days(list(history))
     if view == "monthly":
-        return list(report.history_cells[-len(report.days):]) if report.days else []
-    return list(report.hour_cells)
+        return list(history[-len(report.days):]) if report.days else []
+    return list(report.hour_tokens if unit == TOKENS else report.hour_cells)
 
 
 def _keep(cell: tuple[str, str], account: str, model: str) -> bool:
@@ -439,39 +483,48 @@ def _keep(cell: tuple[str, str], account: str, model: str) -> bool:
     return (account in (ALL, BY_ACCOUNT) or who == account) and model in (ALL_MODELS, name)
 
 
-def stack_of(account: str, model: str) -> str:
-    """What a bar is split by: accounts on "by account", else models (one
-    series when one model is picked)."""
-    return "account" if account == BY_ACCOUNT else "model"
+def stack_of(account: str, model: str, unit: str = DOLLARS) -> str:
+    """What a bar is split by: accounts on "by account", else the token
+    kinds when counting tokens, else models (one series when one model is
+    picked)."""
+    if account == BY_ACCOUNT:
+        return "account"
+    return "kind" if unit == TOKENS else "model"
 
 
-def _select(cells: Cells, account: str, model: str) -> dict[str, float]:
-    by_account = stack_of(account, model) == "account"
+def _select(cells: dict, account: str, model: str, unit: str = DOLLARS) -> dict[str, float]:
+    stack = stack_of(account, model, unit)
     out: dict[str, float] = {}
-    for cell, usd in cells.items():
-        if _keep(cell, account, model):
-            key = cell[0] if by_account else cell[1]
-            out[key] = out.get(key, 0.0) + usd
+    for cell, value in cells.items():
+        if not _keep(cell, account, model):
+            continue
+        if stack == "kind":
+            for label, n in zip(TOKEN_LABELS, value):
+                out[label] = out.get(label, 0.0) + n
+            continue
+        key = cell[0] if stack == "account" else cell[1]
+        out[key] = out.get(key, 0.0) + (sum(value) if unit == TOKENS else value)
     return out
 
 
 def money_series(report: CostReport, view: str, width: int, account: str = ALL,
-                 model: str = ALL_MODELS):
+                 model: str = ALL_MODELS, unit: str = DOLLARS):
     """``(buckets, duty or None, axis)`` of a money view at ``width``, the
-    spend ``account`` and ``model`` pick, each bucket ``{key: usd}`` split
-    as :func:`stack_of` says (account ``""``: spend nobody was credited
-    with, which the days older than the priced range all are)."""
+    spend ``account`` and ``model`` pick, each bucket ``{key: usd}`` (or
+    token count, ``unit`` :data:`TOKENS`) split as :func:`stack_of` says
+    (account ``""``: spend nobody was credited with, which the days older
+    than the priced range all are)."""
     def stamp(fmt: str, t: float) -> str:
         return time.strftime(fmt, time.localtime(t))
 
-    series = [(t, _select(c, account, model)) for t, c in _cells_series(report, view)]
+    series = [(t, _select(c, account, model, unit)) for t, c in _cells_series(report, view, unit)]
     if view == "total":
-        for size, unit in ((1, "daily"), (7, "weekly"), (30, "monthly")):
+        for size, unit_name in ((1, "daily"), (7, "weekly"), (30, "monthly")):
             buckets = group(series, size)
             if _fits(len(buckets), width) or size == 30:
                 break
         first = stamp("%m-%d", buckets[0][0]) if buckets else ""
-        return buckets, None, (first, f"all, {unit}", "today")
+        return buckets, None, (first, f"all, {unit_name}", "today")
     if view == "monthly":
         return series, None, (stamp("%m-%d", series[0][0]) if series else "", "30 days", "today")
     duty = list(report.hour_duty)
@@ -486,15 +539,21 @@ def money_series(report: CostReport, view: str, width: int, account: str = ALL,
                                 f"{n} hours", "now")
 
 
-def range_cells(report: CostReport, view: str, width: int) -> Cells:
-    """Every (account, model)'s spend over what the money ``view`` shows."""
+def range_cells(report: CostReport, view: str, width: int, unit: str = DOLLARS) -> dict:
+    """Every (account, model)'s spend over what the money ``view`` shows:
+    dollars, or (``unit`` :data:`TOKENS`) its four token counts."""
     lo = money_series(report, view, width)[0]
     first = lo[0][0] if lo else float("inf")
-    out: Cells = {}
-    for t, cells in _cells_series(report, view):
-        if t >= first:
-            for cell, usd in cells.items():
-                out[cell] = out.get(cell, 0.0) + usd
+    out: dict = {}
+    for t, cells in _cells_series(report, view, unit):
+        if t < first:
+            continue
+        for cell, value in cells.items():
+            if unit == TOKENS:
+                before = out.get(cell, (0.0,) * len(TOKEN_LABELS))
+                out[cell] = tuple(a + b for a, b in zip(before, value))
+            else:
+                out[cell] = out.get(cell, 0.0) + value
     return out
 
 
@@ -505,18 +564,18 @@ def _ranked(spend: dict[str, float]) -> list[str]:
 def account_picks(report: CostReport, view: str, width: int) -> list[str]:
     """What ↑/↓ cycles on ``view``, in order. A money view: all, by
     account, then each account with spend in the range, as the account
-    table orders them. A trend view: all accounts, then each with
-    something to plot."""
-    if view in TREND_VIEWS:
-        return [ALL_ACCOUNTS, *(a.number for a, _ in trend_accounts(report, TREND_VIEWS[view]))]
+    table orders them. The trend: all accounts, then each with something
+    to plot in either window."""
+    if view == TREND:
+        return [ALL_ACCOUNTS, *trend_numbers(report)]
     spent = {who for (who, _), usd in range_cells(report, view, width).items() if usd > 0}
     return [ALL, BY_ACCOUNT, *(a.number for a in report.accounts if a.number in spent)]
 
 
 def model_picks(report: CostReport, view: str, width: int) -> list[str]:
     """What tab cycles on a money ``view``: all models, then every model
-    with any spend in the range, costliest first. None on a trend."""
-    if view in TREND_VIEWS:
+    with any spend in the range, costliest first. None on the trend."""
+    if view == TREND:
         return []
     spend: dict[str, float] = {}
     for (_, name), usd in range_cells(report, view, width).items():
@@ -538,12 +597,15 @@ def resolve_model(report: CostReport, view: str, width: int, model: str | None) 
 
 def money_chart(report: CostReport, view: str, width: int, height: int,
                 palette: Palette, pick: str = ALL, model: str = ALL_MODELS,
-                colors: dict[str, str] | None = None) -> list[Text]:
-    buckets, duty, axis = money_series(report, view, width, pick, model)
+                colors: dict[str, str] | None = None, unit: str = DOLLARS) -> list[Text]:
+    buckets, duty, axis = money_series(report, view, width, pick, model, unit)
     under = duty if duty is not None and any(d is not None for d in duty) else None
-    if stack_of(pick, model) == "account":
+    stack = stack_of(pick, model, unit)
+    if stack == "account":
         order = [a.number for a in report.accounts]
         hues = colors or account_colors(report, palette)
+    elif stack == "kind":
+        order, hues = list(TOKEN_LABELS), token_colors(palette)
     else:
         hues = model_colors(report, palette)
         order = [m.name for m in report.models[:COLORED_MODELS]]
@@ -551,7 +613,8 @@ def money_chart(report: CostReport, view: str, width: int, height: int,
             order = [model]
             hues = {model: hues.get(model, palette.accent)}
     return bar_chart([b for _, b in buckets], width, height, order, hues, palette,
-                     axis=axis, under=under, under_colors=colors)
+                     axis=axis, under=under, under_colors=colors,
+                     fmt=short_tokens if unit == TOKENS else short_money)
 
 
 def trend_accounts(report: CostReport, label: str, pick: str = ALL_ACCOUNTS):
@@ -563,6 +626,12 @@ def trend_accounts(report: CostReport, label: str, pick: str = ALL_ACCOUNTS):
         if p is not None and p.points and pick in (ALL_ACCOUNTS, acc.number):
             out.append((acc, p))
     return out
+
+
+def trend_numbers(report: CostReport) -> list[str]:
+    """The accounts with something to plot in either window, table order."""
+    return [a.number for a in report.accounts
+            if any(p is not None and p.points for p in (a.per_5h, a.per_7d))]
 
 
 def _columns(points, col_of) -> dict[int, tuple[float, float, float, bool]]:
@@ -681,23 +750,25 @@ def _named(key: str, names: dict[str, str], colors: dict[str, str], palette: Pal
     return text
 
 
-def _share(text: Text, part: float, whole: float, palette: Palette) -> None:
+def _share(text: Text, part: float, whole: float, palette: Palette, unit: str = DOLLARS) -> None:
     text.append(" · ", style=palette.muted)
-    text.append(money(part), style=f"bold {palette.foreground}")
+    amount = f"{tokens(part)} tokens" if unit == TOKENS else money(part)
+    text.append(amount, style=f"bold {palette.foreground}")
     text.append(f" ({part / whole * 100 if whole else 0:.0f}%)", style=palette.muted)
 
 
 def pick_title(report: CostReport, view: str, width: int, pick: str,
                names: dict[str, str], palette: Palette, model: str = ALL_MODELS,
-               colors: dict[str, str] | None = None) -> Text:
+               colors: dict[str, str] | None = None, unit: str = DOLLARS) -> Text:
     """What the chart shows: ``↕ #2 · ⇥ Opus 5.5 · $1,210 (31%)`` (the
-    picked spend and its share of the range), ``↕ by account ■ #1 ■ #2``
-    (a swatch per account, the bars' legend), ``↕ all · ⇥ all models`` or,
-    on a trend view, ``↕ all accounts`` / ``↕ #2 me@x.com``."""
+    picked spend and its share of the range; counting tokens, ``46B tokens
+    (31%)``), ``↕ by account ■ #1 ■ #2`` (a swatch per account, the bars'
+    legend; counting tokens, a swatch per token kind), ``↕ all · ⇥ all
+    models`` or, on the trend, ``↕ all accounts`` / ``↕ #2 me@x.com``."""
     colors = colors or account_colors(report, palette)
     text = Text(no_wrap=True)
     text.append("↕ ", style=palette.muted)
-    if view in TREND_VIEWS:
+    if view == TREND:
         if pick == ALL_ACCOUNTS:
             text.append(pick, style=f"bold {palette.foreground}")
         else:
@@ -712,9 +783,14 @@ def pick_title(report: CostReport, view: str, width: int, pick: str,
     model_hue = model_colors(report, palette).get(model, palette.muted)
     text.append(model, style=f"bold {palette.foreground if model == ALL_MODELS else model_hue}")
     if pick != ALL or model != ALL_MODELS:
-        cells = range_cells(report, view, width)
-        part = sum(usd for cell, usd in cells.items() if _keep(cell, pick, model))
-        _share(text, part, sum(cells.values()), palette)
+        cells = range_cells(report, view, width, unit)
+        amount = (lambda v: sum(v)) if unit == TOKENS else (lambda v: v)
+        part = sum(amount(v) for cell, v in cells.items() if _keep(cell, pick, model))
+        _share(text, part, sum(amount(v) for v in cells.values()), palette, unit)
+    if stack_of(pick, model, unit) == "kind":
+        for legend, hue in zip(TOKEN_LEGEND, token_colors(palette).values()):
+            text.append(" ■", style=hue)
+            text.append(f" {legend}", style=palette.muted)
     if pick == BY_ACCOUNT:
         spent = {who for (who, name), usd in range_cells(report, view, width).items()
                  if usd > 0 and model in (ALL_MODELS, name)}
@@ -727,26 +803,35 @@ def pick_title(report: CostReport, view: str, width: int, pick: str,
 
 def chart_title(report: CostReport, view: str, palette: Palette, *, width: int = 80,
                 pick: str | None = None, names: dict[str, str] | None = None,
-                model: str = ALL_MODELS, colors: dict[str, str] | None = None) -> Text:
-    """``‹ weekly ›  ←/→ · ↕ by account · ⇥ all models``, plus the
-    whole-history total on the total view and the marks' key on a trend."""
+                model: str = ALL_MODELS, colors: dict[str, str] | None = None,
+                unit: str = DOLLARS) -> Text:
+    """``‹ weekly ›  ←/→ · ↕ by account · ⇥ all models`` (``· tokens``
+    after the arrows when counting tokens), plus the whole-history total on
+    the total view and the marks' key on the trend."""
+    unit = DOLLARS if view == TREND else unit
     text = Text(no_wrap=True, overflow="ellipsis")
     text.append("‹ ", style=palette.muted)
     text.append(view, style=f"bold {palette.accent}")
     text.append(" ›", style=palette.muted)
     text.append("  ←/→", style=palette.muted)
+    if unit == TOKENS:
+        text.append(" · ", style=palette.muted)
+        text.append("tokens", style=f"bold {palette.accent}")
     if pick is not None:
         text.append(" · ", style=palette.muted)
         text.append_text(pick_title(report, view, width, pick, names or {}, palette, model,
-                                    colors))
+                                    colors, unit))
     if view == "total" and report.history and pick in (None, ALL, BY_ACCOUNT) \
             and model == ALL_MODELS:
-        total = sum(sum(m.values()) for _, m in report.history)
+        if unit == TOKENS:
+            total = tokens(sum(sum(v) for _, c in report.history_tokens for v in c.values()))
+        else:
+            total = money(sum(sum(m.values()) for _, m in report.history))
         since = time.strftime("%m-%d", time.localtime(report.history[0][0]))
         text.append("   ")
-        text.append(money(total), style=f"bold {palette.foreground}")
+        text.append(total, style=f"bold {palette.foreground}")
         text.append(f" since {since}", style=palette.muted)
-    elif view in TREND_VIEWS:
+    elif view == TREND:
         text.append(f"   ● sure  ○ used elsewhere  {_SPREAD} spread  ", style=palette.muted)
         text.append(f"{_FLAT} steady  {_SLOPE} moving", style=palette.muted)
     return text
@@ -754,29 +839,31 @@ def chart_title(report: CostReport, view: str, palette: Palette, *, width: int =
 
 def chart_lines(report: CostReport, view: str, width: int, height: int,
                 names: dict[str, str], palette: Palette, pick: str | None = None,
-                model: str | None = None, colors: dict[str, str] | None = None) -> list[Text]:
-    """The chosen view's title and chart, bars ``height`` rows high, the
-    spend ``pick`` and ``model`` say (each axis' first pick when the view
-    offers no such one)."""
+                model: str | None = None, colors: dict[str, str] | None = None,
+                unit: str = DOLLARS) -> list[Text]:
+    """The chosen view's title and chart, bars ``height`` rows high (each
+    trend panel as high), the spend ``pick`` and ``model`` say (each axis'
+    first pick when the view offers no such one), in dollars or tokens."""
     pick = resolve_pick(report, view, width, pick)
     model = resolve_model(report, view, width, model)
     colors = colors or account_colors(report, palette)
     title = chart_title(report, view, palette, width=width, pick=pick, names=names,
-                        model=model, colors=colors)
+                        model=model, colors=colors, unit=unit)
     title.truncate(width, overflow="ellipsis")
-    if view in TREND_VIEWS:
-        return [title, *trend_chart(report, TREND_VIEWS[view], width, height, names, palette,
-                                    pick, colors)]
-    return [title, *money_chart(report, view, width, height, palette, pick, model, colors)]
+    if view == TREND:
+        return [title, *(line for label in TREND_WINDOWS
+                         for line in trend_chart(report, label, width, height, names, palette,
+                                                 pick, colors))]
+    return [title, *money_chart(report, view, width, height, palette, pick, model, colors, unit)]
 
 
 def chart_rows(report: CostReport, view: str, width: int, height: int,
                pick: str | None = None) -> int:
     """How many rows :func:`chart_lines` takes for a chart ``height`` high."""
     pick = resolve_pick(report, view, width, pick)
-    if view in TREND_VIEWS:
-        shown = trend_accounts(report, TREND_VIEWS[view], pick)
-        return 1 + (height + 1 + len(shown) if shown else 1)
+    if view == TREND:
+        return 1 + sum(height + 1 + len(shown) if (shown := trend_accounts(report, label, pick))
+                       else 1 for label in TREND_WINDOWS)
     _, duty, _ = money_series(report, view, width)
     under = int(duty is not None and any(d is not None for d in duty))
     return 1 + height + under + 1
@@ -805,30 +892,92 @@ def _fold(models: Sequence[ModelLine], rows: int) -> list[ModelLine]:
     return keep + [other]
 
 
-def model_lines(report: CostReport, width: int, rows: int, palette: Palette) -> list[Text]:
-    colors = model_colors(report, palette)
-    models = _fold(report.models, rows)
-    name_w = max([len("model")] + [len(m.name) for m in models])
-    wide = width >= name_w + 50
-    head: list[tuple[str, int, str]] = [("model", -(name_w + 2), palette.muted),
-                                        ("cost", 7, palette.muted), ("share", 5, palette.muted)]
-    if wide:
-        head += [("output", 6, palette.muted), ("cache r", 7, palette.muted)]
-    head.append(("7d", -6, palette.muted))
-    out = [_row(head)]
-    for m in models:
+def model_table(report: CostReport, view: str, width: int, pick: str = ALL,
+                model: str = ALL_MODELS) -> list[ModelLine]:
+    """Each model's cost and exact token counts (as ccusage reports them)
+    over what the money ``view`` shows, only the spend the picks keep ("by
+    account" keeps all of it), costliest first, every model with any. The
+    week's trend comes along only for all accounts' spend."""
+    keep = ALL if pick == BY_ACCOUNT else pick
+    per: dict[str, list[float]] = {}  # name -> [usd, *counts in TOKEN_KINDS order]
+    for cell, usd in range_cells(report, view, width).items():
+        if _keep(cell, keep, model):
+            per.setdefault(cell[1], [0.0] * 5)[0] += usd
+    for cell, counts in range_cells(report, view, width, TOKENS).items():
+        if _keep(cell, keep, model):
+            row = per.setdefault(cell[1], [0.0] * 5)
+            for i, n in enumerate(counts):
+                row[1 + i] += n
+    total = sum(r[0] for r in per.values())
+    trends = {m.name: m.trend for m in report.models} if keep == ALL else {}
+    lines = [
+        ModelLine(name, r[0], r[0] / total if total else 0.0, input=round(r[1]),
+                  cache_write=round(r[2]), cache_read=round(r[3]), output=round(r[4]),
+                  trend=trends.get(name))
+        for name, r in per.items() if r[0] >= 0.005 or any(r[1:])
+    ]
+    return sorted(lines, key=lambda m: (-m.cost, m.name))
+
+
+# the model table's columns after the name: (header, width), and the order
+# they give way in when the page is narrow; cost stays, and output and cache
+# reads (what most of the spend is) go last
+MODEL_COLUMNS = (("cost", 7), ("share", 5), ("input", 6), ("cache w", 7), ("cache r", 7),
+                 ("output", 6), ("7d", -6))
+MODEL_DROP_ORDER = ("7d", "input", "share", "cache w", "cache r", "output")
+
+
+def model_columns(name_w: int, width: int, trend: bool) -> list[tuple[str, int]]:
+    """The columns that fit ``width`` beside names ``name_w`` wide."""
+    cols = [c for c in MODEL_COLUMNS if trend or c[0] != "7d"]
+    drop = iter(MODEL_DROP_ORDER)
+
+    def used() -> int:
+        return 2 + name_w + sum(abs(w) + 2 for _, w in cols)
+
+    while used() > width and (gone := next(drop, None)) is not None:
+        cols = [c for c in cols if c[0] != gone]
+    return cols
+
+
+def _model_cells(m: ModelLine, cols: Sequence[tuple[str, int]], palette: Palette,
+                 strong: str) -> list[tuple[str, int, str]]:
+    values = {
+        "cost": (money(m.cost), f"bold {strong}"),
+        "share": (f"{m.share * 100:.0f}%", palette.foreground),
+        "input": (tokens(m.input), palette.muted),
+        "cache w": (tokens(m.cache_write), palette.muted),
+        "cache r": (tokens(m.cache_read), palette.muted),
+        "output": (tokens(m.output), palette.muted),
+        "7d": ("" if m.name.endswith(" other") else (trend_words(m.trend) or arrow(m.trend)),
+               palette.foreground),
+    }
+    return [(values[h][0], w, values[h][1]) for h, w in cols]
+
+
+def model_lines(lines: Sequence[ModelLine], width: int, rows: int, palette: Palette,
+                colors: dict[str, str], *, trend: bool = True) -> list[Text]:
+    """The model table: a header, up to ``rows`` rows (the cheapest folded
+    into one when they run out) and, for more than one model with room, a
+    total row; columns give way as :data:`MODEL_DROP_ORDER` says."""
+    with_total = len(lines) > 1 and rows >= 3
+    models = _fold(lines, rows - with_total)
+    total = ModelLine("total", sum(m.cost for m in lines), 1.0 if lines else 0.0,
+                      sum(m.input for m in lines), sum(m.output for m in lines),
+                      sum(m.cache_write for m in lines), sum(m.cache_read for m in lines), None)
+    name_w = max([len("model"), len(total.name)] + [len(m.name) for m in models])
+    cols = model_columns(name_w, width, trend)
+    out = [_row([("model", -(name_w + 2), palette.muted),
+                 *((h, w, palette.muted) for h, w in cols)])]
+    for m in [*models, *([total] if with_total else [])]:
         line = Text(no_wrap=True, overflow="ellipsis")
-        line.append("■ ", style=colors.get(m.name, palette.muted))
-        line.append(f"{m.name:<{name_w}}", style=palette.foreground)
-        cells: list[tuple[str, int, str]] = [
-            (money(m.cost), 7, f"bold {palette.foreground}"),
-            (f"{m.share * 100:.0f}%", 5, palette.foreground),
-        ]
-        if wide:
-            cells += [(tokens(m.output), 6, palette.muted), (tokens(m.cache_read), 7, palette.muted)]
-        trend = "" if m.name.endswith(" other") else (trend_words(m.trend) or arrow(m.trend))
-        cells.append((trend, -6, palette.foreground))
+        is_total = m is total
+        line.append("  " if is_total else "■ ", style=colors.get(m.name, palette.muted))
+        line.append(f"{m.name:<{name_w}}", style=palette.muted if is_total else palette.foreground)
         line.append("  ")
+        cells = _model_cells(m, cols, palette, palette.foreground)
+        if is_total:
+            cells = [("" if h == "7d" else v, w, st) for (v, w, st), (h, _) in zip(cells, cols)]
         line.append(_row(cells))
         out.append(line)
     return out
@@ -895,6 +1044,7 @@ def costs_lines(
     pick: str | None = None,
     model: str | None = None,
     colors: dict[str, str] | None = None,
+    unit: str = DOLLARS,
     status: str = "",
     empty: str = LOADING,
 ) -> list[Text]:
@@ -902,14 +1052,18 @@ def costs_lines(
     richest layout that fits.
 
     Lower-priority parts give way first: the note, the gaps, model rows
-    (every model with spend, then five, then three), chart rows (down to three), then the chart and the
-    model table. The summary and the account table stay. A trend view
-    names every account in its legend, so it leaves the tables out.
+    (every model with spend and their total, then five, then three), chart
+    rows (down to three; two per trend panel), then the chart and the model
+    table. The summary and the account table stay. The trend names every
+    account in its legends, so it leaves the tables out.
     """
     if report is None:
         return [Text(status or empty, style=palette.muted)]
-    trend = view in TREND_VIEWS
-    n_models = 0 if trend else len(report.models)
+    trend = view == TREND
+    pick = resolve_pick(report, view, width, pick)
+    model = resolve_model(report, view, width, model)
+    table = [] if trend else model_table(report, view, width, pick, model)
+    n_models = len(table) + (len(table) > 1)  # and the total row
     n_accounts = 0 if trend else len(table_keys(report))
     summary = summary_text(report, palette, status=status)
     if summary.cell_len > width:  # the freshness note is the first to go
@@ -929,7 +1083,8 @@ def costs_lines(
 
     plans = [
         (note, gaps, rows, chart, min_h)
-        for chart, min_h in ((True, CHART_ROOMY_H), (True, CHART_MIN_H), (False, 0))
+        for chart, min_h in ((True, CHART_ROOMY_H), (True, TREND_MIN_H if trend else CHART_MIN_H),
+                             (False, 0))
         for rows in dict.fromkeys((n_models, min(n_models, 5), min(n_models, 3), 0))
         for gaps in (True, False)
         for note in (True, False)
@@ -946,11 +1101,13 @@ def costs_lines(
     blocks: list[list[Text]] = [[summary]]
     if chart:
         blocks.append(chart_lines(report, view, width, chart_h, names, palette, pick, model,
-                                  colors))
+                                  colors, unit))
     if n_accounts:
         blocks.append(account_lines(report, width, n_accounts, names, palette, colors))
     if model_rows:
-        blocks.append(model_lines(report, width, model_rows, palette))
+        blocks.append(model_lines(table, width, model_rows, palette,
+                                  model_colors(report, palette),
+                                  trend=pick in (ALL, BY_ACCOUNT)))
     if note:
         blocks.append([note_text(report, palette, width)])
     out: list[Text] = []
@@ -963,11 +1120,10 @@ def costs_lines(
 
 def plain_page(report: CostReport, names: dict[str, str], *, width: int = 100) -> str:
     """The whole page as text for ``Y``: the money views' parts once, with
-    the 30-day chart by account, then both trend charts."""
+    the 30-day chart by account, then the trend's two panels."""
     parts = [costs_lines(report, width=width, height=200, names=names, palette=Palette.DARK,
                          view="monthly", pick=BY_ACCOUNT)]
-    for view in TREND_VIEWS:
-        parts.append(chart_lines(report, view, width, 8, names, Palette.DARK))
+    parts.append(chart_lines(report, TREND, width, 8, names, Palette.DARK))
     return "\n\n".join("\n".join(line.plain.rstrip() for line in lines) for lines in parts)
 
 
@@ -975,10 +1131,15 @@ def plain_page(report: CostReport, names: dict[str, str], *, width: int = 100) -
 
 
 class CostsView(Widget, can_focus=True):
-    """The costs page; posts :class:`CostsView.Closed` on esc or ``$``."""
+    """The costs page; posts :class:`CostsView.Closed` on esc or ``$`` and
+    :class:`CostsView.KeysChanged` when the keys that act change."""
 
     class Closed(Message):
         """The user left the costs: the host shows its body again."""
+
+    class KeysChanged(Message):
+        """The keys that act changed (a money view to the trend, dollars to
+        tokens): the host repaints the hint from :meth:`CostsView.hint_keys`."""
 
     BINDINGS = [
         Binding("escape,dollar_sign", "close", show=False),
@@ -990,6 +1151,9 @@ class CostsView(Widget, can_focus=True):
         # held by the page while it has the keyboard, so tab never moves focus
         Binding("tab", "model(1)", show=False),
         Binding("shift+tab", "model(-1)", show=False),
+        # the page's own while it has the keyboard; the main page's t (paste a
+        # token) stands down meanwhile
+        Binding("t", "unit", show=False),
         Binding("y", "copy_summary", show=False),
         Binding("Y", "copy_page", show=False),
     ]
@@ -1013,6 +1177,7 @@ class CostsView(Widget, can_focus=True):
         self.money_pick = ALL
         self.model_pick = ALL_MODELS
         self.trend_pick = ALL_ACCOUNTS
+        self.unit = DOLLARS  # what the money views' bars count, switched with t
 
     # -- data ------------------------------------------------------------------------
 
@@ -1096,7 +1261,7 @@ class CostsView(Widget, can_focus=True):
         lines = costs_lines(report, width=width, height=height, names=self.names(),
                             palette=palette, view=self.view, pick=self.pick,
                             model=self.model_pick, colors=self.colors(report, palette),
-                            status=self.status())
+                            unit=self.unit, status=self.status())
         return Text("\n", no_wrap=True, overflow="ellipsis").join(lines)
 
     # -- actions ---------------------------------------------------------------------
@@ -1104,14 +1269,28 @@ class CostsView(Widget, can_focus=True):
     def action_close(self) -> None:
         self.post_message(self.Closed())
 
+    def hint_keys(self) -> tuple[tuple[str, str], ...]:
+        return hint_keys(self.view, self.unit)
+
     def action_cycle(self, step: int) -> None:
         """The next (or previous) chart, wrapping around."""
+        before = self.hint_keys()
         self.view = VIEWS[(VIEWS.index(self.view) + step) % len(VIEWS)]
+        if self.hint_keys() != before:
+            self.post_message(self.KeysChanged())
+        self.refresh()
+
+    def action_unit(self) -> None:
+        """Dollars or tokens on the money views; the trend has no tokens."""
+        if self.view == TREND:
+            return
+        self.unit = TOKENS if self.unit == DOLLARS else DOLLARS
+        self.post_message(self.KeysChanged())
         self.refresh()
 
     @property
     def pick(self) -> str:
-        return self.trend_pick if self.view in TREND_VIEWS else self.money_pick
+        return self.trend_pick if self.view == TREND else self.money_pick
 
     def _width(self) -> int:
         return max(20, self.size.width or 80)
@@ -1125,7 +1304,7 @@ class CostsView(Widget, can_focus=True):
         options = account_picks(report, self.view, self._width())
         current = resolve_pick(report, self.view, self._width(), self.pick)
         chosen = options[(options.index(current) + step) % len(options)]
-        if self.view in TREND_VIEWS:
+        if self.view == TREND:
             self.trend_pick = chosen
         else:
             self.money_pick = chosen
@@ -1135,7 +1314,7 @@ class CostsView(Widget, can_focus=True):
         """The next (or previous) model of a money chart, wrapping around;
         a trend has none to pick."""
         report = self.result.report if self.result else None
-        if report is None or self.view in TREND_VIEWS:
+        if report is None or self.view == TREND:
             return
         options = model_picks(report, self.view, self._width())
         current = resolve_model(report, self.view, self._width(), self.model_pick)
