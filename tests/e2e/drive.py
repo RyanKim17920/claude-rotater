@@ -37,6 +37,14 @@ def add_current(args) -> dict:
     return {"backup_dir": str(sw.backup_dir)}
 
 
+def add_key(args) -> dict:
+    """The TUI's ``a`` → ``k`` (API key): ``add_account_from_token``. The
+    key comes on stdin, never on a command line."""
+    sw = _switcher()
+    number = sw.add_account_from_token(token=sys.stdin.readline().strip(), assume_yes=True)
+    return {"number": number}
+
+
 def login(args) -> dict:
     """The TUI's ``l``: StagedLogin.authenticate, then import_into, then
     cleanup, in the order ``RotaApp.start_login``/``_import_login`` run them."""
@@ -104,6 +112,7 @@ def main(argv: list[str]) -> int:
     sub = parser.add_subparsers(dest="step", required=True)
     p = sub.add_parser("add-current")
     p.add_argument("--slot", type=int)
+    sub.add_parser("add-key")
     p = sub.add_parser("login")
     p.add_argument("--method", default="claudeai")
     p.add_argument("--email")
@@ -113,7 +122,7 @@ def main(argv: list[str]) -> int:
     args = parser.parse_args(argv)
     # A hung step dumps every thread's stack instead of timing out silently.
     faulthandler.dump_traceback_later(60, exit=True)
-    step = {"add-current": add_current, "login": login, "tui": tui}[args.step]
+    step = {"add-current": add_current, "add-key": add_key, "login": login, "tui": tui}[args.step]
     try:
         out = {"ok": True, **step(args)}
     except BaseException as e:  # noqa: BLE001 -- reported to the test
