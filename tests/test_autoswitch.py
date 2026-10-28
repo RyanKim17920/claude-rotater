@@ -7,6 +7,7 @@ import os
 import threading
 import time
 from dataclasses import replace
+from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import patch
 
@@ -1989,6 +1990,137 @@ class TestApiKeyAccounts:
         assert [e.reason for e in h.events if isinstance(e, NoSwitchEvent)] == [
             "active-api-key"
         ]
+
+    def test_exhausted_key_is_no_last_resort(self, temp_home):
+        from claude_rotater import api_keys
+
+        h = EngineHarness(temp_home, include_api_key_accounts=True)
+        h.seed(1, "a@example.com")
+        h.seed(2, "key@token.local")
+        h.make_live("a@example.com", 1)
+        self._mark_api_key(h, 2)
+        api_keys.mark_exhausted(h.switcher.backup_dir, "2", api_keys.OUT_OF_CREDIT, 1.0)
+        outcome = h.tick_with_usage({"1": _usage(100), "2": "api key"})
+        assert outcome is TickOutcome.BLOCKED
+        assert h.active_number() == 1
+
+
+def _refusal_line(when: float, text: str, error: str = "billing_error") -> str:
+    return json.dumps({
+        "type": "assistant",
+        "isApiErrorMessage": True,
+        "error": error,
+        "apiErrorStatus": 400,
+        "timestamp": datetime.fromtimestamp(when, timezone.utc).isoformat().replace("+00:00", "Z"),
+        "message": {"model": "<synthetic>", "content": [{"type": "text", "text": text}]},
+    })
+
+
+class TestKeyOnDuty:
+    """An API key on duty: off it when it runs out, and back to a
+    subscription per ``accounts.order``."""
+
+    def _harness(self, temp_home, order: str = "account-first") -> EngineHarness:
+        from claude_rotater.settings import set_setting
+
+        h = EngineHarness(temp_home, include_api_key_accounts=True)
+        set_setting(h.switcher.backup_dir, "accounts.order", order)
+        h.seed(1, "key@token.local")
+        h.seed(2, "b@example.com")
+        h.make_live("key@token.local", 1)
+        TestApiKeyAccounts._mark_api_key(None, h, 1)
+        self.sent: list = []
+        h.engine._login_notifier.send = lambda title, body: self.sent.append(body)
+        return h
+
+    def _refuse(self, h: EngineHarness, text: str = "Credit balance is too low") -> None:
+        project = h.temp_home / ".claude" / "projects" / "-tmp-x"
+        project.mkdir(parents=True, exist_ok=True)
+        (project / "s.jsonl").write_text(
+            _refusal_line(h.clock.now - 5, f"API Error: 400 {text}") + "\n", encoding="utf-8"
+        )
+
+    def test_refusal_marks_the_key_and_moves_off_it_once(self, temp_home):
+        from claude_rotater import api_keys
+
+        h = self._harness(temp_home, "api-first")
+        self._refuse(h)
+        outcome = h.tick_with_usage({"1": "api key", "2": _usage(40)})
+        assert outcome is TickOutcome.SWITCHED
+        assert h.active_number() == 2
+        state = api_keys.state_of(h.switcher.backup_dir, "1")
+        assert state.exhausted_reason == api_keys.OUT_OF_CREDIT
+        assert self.sent == ["API key #1 is out of credit: rota moved off it"]
+
+    def test_refusal_with_nowhere_to_go_blocks(self, temp_home):
+        h = self._harness(temp_home)
+        self._refuse(h, "You have reached your specified API usage limits")
+        outcome = h.tick_with_usage({"1": "api key", "2": _usage(99)})
+        assert outcome is TickOutcome.BLOCKED
+        assert h.active_number() == 1
+        assert [e.reason for e in h.events if isinstance(e, NoSwitchEvent)] == ["key-blocked"]
+        # Marked once: the next tick neither rescans into a second notice.
+        h.tick_with_usage({"1": "api key", "2": _usage(99)})
+        assert len(self.sent) == 1
+
+    def test_a_rate_limit_is_no_refusal(self, temp_home):
+        h = self._harness(temp_home, "api-first")
+        project = h.temp_home / ".claude" / "projects" / "-tmp-x"
+        project.mkdir(parents=True)
+        (project / "s.jsonl").write_text(
+            _refusal_line(h.clock.now - 5, "API Error: 429 rate limited", "rate_limit") + "\n"
+        )
+        assert h.tick_with_usage({"1": "api key", "2": _usage(10)}) is TickOutcome.NO_ACTION
+        assert h.active_number() == 1
+
+    def test_budget_reserve_moves_off_the_key(self, temp_home):
+        from claude_rotater import api_keys
+
+        h = self._harness(temp_home, "api-first")
+        data = h.switcher.backup_dir
+        budget = api_keys.Budget("topup", 20.0, h.clock.now - 86400)
+        api_keys.set_budget(data, "1", budget)
+        api_keys.record_spend(data, "1", 19.5, budget.since, h.clock.now)
+        assert h.tick_with_usage({"1": "api key", "2": _usage(10)}) is TickOutcome.SWITCHED
+        assert h.active_number() == 2
+
+    def test_api_first_stays_on_a_key_with_credit(self, temp_home):
+        h = self._harness(temp_home, "api-first")
+        assert h.tick_with_usage({"1": "api key", "2": _usage(10)}) is TickOutcome.NO_ACTION
+        assert [e.reason for e in h.events if isinstance(e, NoSwitchEvent)] == ["api-first"]
+
+    def test_account_first_returns_after_the_dwell(self, temp_home):
+        h = self._harness(temp_home)
+        h.engine._mutate_state(lambda state: state.update(lastSwitchAt=h.clock.now - 60))
+        assert h.tick_with_usage({"1": "api key", "2": _usage(10)}) is TickOutcome.NO_ACTION
+        assert [e.reason for e in h.events if isinstance(e, NoSwitchEvent)] == ["key-dwell"]
+        h.clock.advance(api_keys_dwell())
+        assert h.tick_with_usage({"1": "api key", "2": _usage(10)}) is TickOutcome.SWITCHED
+        assert h.active_number() == 2
+
+    def test_account_first_stays_while_no_subscription_has_room(self, temp_home):
+        h = self._harness(temp_home)
+        outcome = h.tick_with_usage({"1": "api key", "2": _usage(97)})
+        assert outcome is TickOutcome.NO_ACTION
+        assert [e.reason for e in h.events if isinstance(e, NoSwitchEvent)] == ["key-last-resort"]
+
+    def test_api_first_hands_a_subscription_over_to_a_key(self, temp_home):
+        from claude_rotater.settings import set_setting
+
+        h = EngineHarness(temp_home, include_api_key_accounts=True)
+        set_setting(h.switcher.backup_dir, "accounts.order", "api-first")
+        h.seed(1, "a@example.com")
+        h.seed(2, "key@token.local")
+        h.make_live("a@example.com", 1)
+        TestApiKeyAccounts._mark_api_key(None, h, 2)
+        assert h.tick_with_usage({"1": _usage(10), "2": "api key"}) is TickOutcome.SWITCHED
+        assert h.active_number() == 2
+
+
+def api_keys_dwell() -> float:
+    from claude_rotater import api_keys
+
+    return api_keys.RETURN_DWELL_S
 
 
 class TestFreshening:

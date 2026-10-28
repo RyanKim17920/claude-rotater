@@ -55,7 +55,16 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, ClassVar
 
-from claude_rotater import expiring_first, login_alerts, oauth, pace_strategy, poll_policy, preempt
+from claude_rotater import (
+    api_key_mode,
+    api_keys,
+    expiring_first,
+    login_alerts,
+    oauth,
+    pace_strategy,
+    poll_policy,
+    preempt,
+)
 from claude_rotater.estimator import (
     WindowEstimate,
     carried_burn,
@@ -1280,17 +1289,20 @@ class AutoSwitchEngine:
         if paused_until is not None:
             return self._emit_paused(state, paused_until)
 
-        if (
-            self.switcher.account_kind_for(current) == "api_key"
-            and not settings.include_api_key_accounts
-        ):
-            self._emit(
-                NoSwitchEvent(
-                    reason="active-api-key",
-                    detail="API-key accounts have no quota to watch",
+        if self.switcher.account_kind_for(current) == "api_key":
+            if not settings.include_api_key_accounts:
+                self._emit(
+                    NoSwitchEvent(
+                        reason="active-api-key",
+                        detail="API-key accounts have no quota to watch",
+                    )
                 )
-            )
-            return TickOutcome.NO_ACTION
+                return TickOutcome.NO_ACTION
+            return self._key_on_duty(current, entries, headroom, usage, quarantined, state, manual)
+        if settings.include_api_key_accounts and not manual:
+            moved = self._api_first_move(current, entries, headroom, usage, quarantined, state)
+            if moved is not None:
+                return moved
 
         active_headroom = headroom.get(current)
         failover_reason = ""
@@ -1463,7 +1475,7 @@ class AutoSwitchEngine:
         # in this census of what exists. See `_no_return_account` for the
         # incident, the scoping, and the release.
         api_key_candidates = (
-            [n for n in candidates if self.switcher.account_kind_for(n) == "api_key"]
+            [n for n in self._usable_keys(current, quarantined) if n in candidates]
             if settings.include_api_key_accounts
             else []
         )
@@ -1490,7 +1502,7 @@ class AutoSwitchEngine:
                 )
             )
             return TickOutcome.NO_ACTION
-        if trigger == PREEMPT_TRIGGER and not oauth_candidates:
+        if trigger == PREEMPT_TRIGGER and not oauth_candidates and not api_key_candidates:
             return self._no_headroom(current)
         if not oauth_candidates and not api_key_candidates:
             # Won't change until the user adds/recovers an account — no point
@@ -1641,18 +1653,19 @@ class AutoSwitchEngine:
             # account above the threshold the recovery ranking stays in charge.
             ordered = self._policy_order(current, ordered, usage)
 
-        if not ordered and trigger == PREEMPT_TRIGGER:
-            return self._no_headroom(current)
-
         if (
             not ordered
             and api_key_candidates
-            and trigger not in ("consume-first", PREEMPT_TRIGGER)
+            and trigger != "consume-first"
         ):
-            # Last resort when we must move: metered API-key accounts
-            # (unmeasurable headroom). Never for a below-threshold consume-first
-            # nudge — those API-key accounts have no weekly window to consume.
+            # Last resort when we must move (accounts.order account-first):
+            # metered API-key accounts with credit left. Never for a
+            # below-threshold consume-first nudge — those API-key accounts
+            # have no weekly window to consume.
             ordered = api_key_candidates
+
+        if not ordered and trigger == PREEMPT_TRIGGER:
+            return self._no_headroom(current)
 
         if not ordered:
             if not any_known:
@@ -2447,6 +2460,165 @@ class AutoSwitchEngine:
             seven_day_reset=seven_reset,
             five_hour_pct=five_pct,
             five_hour_reset=five_reset,
+        )
+
+    # -- API-key accounts -------------------------------------------------
+
+    def _accounts_order(self) -> str:
+        from claude_rotater.settings import load_accounts_settings
+
+        return load_accounts_settings(self.switcher.backup_dir).order
+
+    def _usable_keys(self, exclude: str, quarantined: set) -> list[str]:
+        """API-key accounts that may take duty: not out of credit and not
+        past their budget's reserve."""
+        keys = [
+            n
+            for n in self.switcher.switchable_account_numbers()
+            if n != exclude
+            and n not in quarantined
+            and self.switcher.account_kind_for(n) == "api_key"
+        ]
+        if not keys:
+            return []  # no clock read: the ranking owns this tick's "now"
+        now = self.clock()
+        states = api_keys.load(self.switcher.backup_dir)
+        return [n for n in keys if not states.get(n, api_keys.KeyState()).blocked(now)]
+
+    def _key_refusal(self, current: str, state: dict) -> api_keys.KeyState:
+        """The on-duty key's state, after looking for the API's refusal in
+        the transcripts written since it went on duty."""
+        data = self.switcher.backup_dir
+        key_state = api_keys.state_of(data, current)
+        if key_state.exhausted or self.dry_run:
+            return key_state
+        since = api_key_mode.mode(data).since or state.get("lastSwitchAt")
+        if not isinstance(since, (int, float)):
+            since = self.clock() - 3600.0
+        from claude_rotater.paths import get_claude_config_home
+
+        found = api_keys.scan_refusals(get_claude_config_home(), float(since))
+        if found is None:
+            return key_state
+        reason, when = found
+        api_keys.mark_exhausted(data, current, reason, when)
+        self._notify_key(current, reason)
+        return api_keys.state_of(data, current)
+
+    def _notify_key(self, number: str, reason: str) -> None:
+        """Log, and notify once, that a key ran out (the marker makes it
+        once: it is only set on the transition)."""
+        _logger.warning("API key account %s is %s; rota moves off it", number, reason)
+        try:
+            from claude_rotater.settings import load_ui_settings
+
+            if load_ui_settings(self.switcher.backup_dir).login_notify:
+                self._login_notifier.send(
+                    "rota", f"API key #{number} is {reason}: rota moved off it"
+                )
+        except Exception as e:  # pragma: no cover - safety net
+            _logger.debug("Key notification failed: %r", e)
+
+    def _key_on_duty(
+        self,
+        current: str,
+        entries: dict,
+        headroom: dict,
+        usage: dict,
+        quarantined: set,
+        state: dict,
+        manual: bool,
+    ) -> TickOutcome:
+        """An API key is on duty. Off it at once when it is out of credit
+        (or past its budget's reserve); with ``accounts.order``
+        account-first, back to a subscription once one has room and the key
+        has been on for :data:`api_keys.RETURN_DWELL_S`; api-first stays."""
+        now = self.clock()
+        key_state = self._key_refusal(current, state)
+        blocked = key_state.blocked(now)
+        room = [
+            n
+            for n in self.switcher.switchable_account_numbers()
+            if n != current
+            and n not in quarantined
+            and self.switcher.account_kind_for(n) != "api_key"
+            and _fetch_ok(entries.get(n))
+            and (headroom.get(n) if headroom.get(n) is not None else -1.0)
+            >= api_keys.RETURN_HEADROOM_PCT
+        ]
+        room.sort(key=lambda n: -(headroom.get(n) or 0.0))
+        if self.settings.strategy in _POLICY_STRATEGIES and len(room) > 1:
+            room = self._policy_order(current, room, usage)
+        left = (None, float("inf"))
+        if blocked:
+            targets = room or self._usable_keys(current, quarantined)
+            if not targets:
+                self._emit(NoSwitchEvent(
+                    reason="key-blocked",
+                    detail=f"stay: API key #{current} is {blocked}; no account has room",
+                ))
+                return TickOutcome.BLOCKED
+            return self._freshen_and_switch(
+                targets, "at-limit", entries, left,
+                f"at-limit: API key #{current} is {blocked}",
+            )
+        if manual:
+            self._emit(NoSwitchEvent(
+                reason=MANUAL_REASON,
+                detail="stay: you pick the account; rota leaves a key only when it runs out",
+            ))
+            return TickOutcome.NO_ACTION
+        if self._accounts_order() == "api-first":
+            self._emit(NoSwitchEvent(
+                reason="api-first",
+                detail=f"stay: API keys first, and #{current} has credit",
+            ))
+            return TickOutcome.NO_ACTION
+        if not room:
+            self._emit(NoSwitchEvent(
+                reason="key-last-resort",
+                detail="stay on the API key: no subscription has room yet",
+            ))
+            return TickOutcome.NO_ACTION
+        since = api_key_mode.mode(self.switcher.backup_dir).since or state.get("lastSwitchAt")
+        on_for = now - since if isinstance(since, (int, float)) else api_keys.RETURN_DWELL_S
+        wait = max(api_keys.RETURN_DWELL_S - on_for, self._manual_hold_left(state))
+        if wait > 0:
+            self._emit(NoSwitchEvent(
+                reason="key-dwell",
+                detail=(
+                    f"stay: #{room[0]} has room; back off the API key in "
+                    f"{expiring_first.fmt_duration(wait)}"
+                ),
+            ))
+            return TickOutcome.NO_ACTION
+        return self._freshen_and_switch(
+            room, "proactive", entries, left,
+            f"#{room[0]} has room again; the API key was the last resort",
+        )
+
+    def _api_first_move(
+        self,
+        current: str,
+        entries: dict,
+        headroom: dict,
+        usage: dict,
+        quarantined: set,
+        state: dict,
+    ) -> TickOutcome | None:
+        """accounts.order api-first: a subscription on duty hands over to a
+        key with credit (None: no such move, carry on)."""
+        if self._accounts_order() != "api-first" or self._manual_hold_left(state) > 0:
+            return None
+        keys = self._usable_keys(current, quarantined)
+        if not keys:
+            return None
+        left = (
+            headroom.get(current),
+            _binding_recovery_ts(usage.get(current), self._models, self.clock()),
+        )
+        return self._freshen_and_switch(
+            keys, "proactive", entries, left, f"API keys first: #{keys[0]} has credit",
         )
 
     def _no_headroom(self, current: str) -> TickOutcome:
