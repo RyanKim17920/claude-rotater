@@ -112,7 +112,8 @@ rota auto                      # headless auto-switch loop (see rota auto -h)
 
 Add accounts in the TUI: `a` asks how on the bottom line (`b` log in with
 the browser, `c` use the account Claude Code is logged in with now, `t`
-paste a token); `l` and `t` jump straight to logging in and pasting a token.
+paste a token, `k` an API key); `l` and `t` jump straight to logging in and
+pasting a token.
 Nothing pops up: every question (`y` / `n`, `esc` cancels), text entry and
 result shows on that one line. Do not use `/logout` to change accounts; it can
 revoke the stored refresh token.
@@ -122,9 +123,10 @@ revoke the stored refresh token.
 | Key | Action |
 |-----|--------|
 | `enter` | switch to the highlighted account |
-| `a` | add an account: log in, use the current login, or paste a token |
+| `a` | add an account: log in, use the current login, paste a token, or an API key |
 | `l` | log an account in (or re-log one marked *re-login needed*) |
 | `t` | add a setup-token or API key |
+| `b` | on an API key's row: set its budget (`50` = $50 from now, `100/m` monthly, empty clears) |
 | `d` | turn an account off or on for rotation |
 | `x` | remove an account |
 | `m` | auto or manual: in manual rota never switches on its own, and with `autoswitch.manualLimitGuard` (on by default) still steps in at a hard limit; the header shows which (click it to flip too) |
@@ -142,6 +144,38 @@ rota takes the mouse, so dragging does not select text. `y` and `Y` copy
 through `pbcopy` (macOS), `wl-copy` or `xclip`/`xsel` (Linux), or else the
 terminal's OSC 52. To select with the mouse anyway, hold Option (most macOS
 terminals) or Shift (most others) while dragging.
+
+### API keys
+
+A Console API key (`a` then `k`, typed masked) is an account like any other,
+billed per token instead of a plan's 5h and 7d windows. It is stored only in
+rota's own Keychain item (a 0600 file off macOS) and shown by its last four
+characters. Its row shows its spend this month, what is left of its budget
+with a bar, or *out of credit* in red.
+
+- **Order.** `accounts.order` (config page, *API keys*): `account-first`
+  (default) uses keys only when no subscription has room, and goes back to
+  one once it has 5% left and the key has been on for 10 minutes;
+  `api-first` stays on a key while it has credit and moves a subscription
+  over to one. Set `autoswitch.includeApiKeyAccounts` off to never pick keys.
+- **Switching.** rota points Claude Code's `apiKeyHelper` (in
+  `settings.json`) at `rota key`, which prints the key, so running chats
+  pick it up within seconds and going back to a subscription just removes
+  it. When `settings.json` is shared with another profile not yet on a key,
+  rota falls back to Claude Code's own API-key login, which only new chats
+  use; the bottom line says so, and also when `ANTHROPIC_API_KEY` or another
+  `apiKeyHelper` would win over rota's.
+- **Out of credit.** Anthropic has no API for a key's balance; when it runs
+  out the API refuses, and Claude Code writes that into the chat transcript
+  (*Credit balance is too low*, or a Console usage limit). rota reads the
+  newest transcripts while a key is on duty, marks it out of credit, moves
+  off it at once and notifies once. After a top-up, `enter` on the key (or a
+  new budget) tries it again.
+- **Budget.** Optional: rota prices the transcripts every 15 minutes while
+  a key is on duty (the costs view's numbers, needs `ccusage`) and moves off
+  the key $1 before its budget is spent. The estimate counts this machine's
+  chats only, and a top-up older than the costs' 30-day range is counted
+  from there.
 
 ### Statusline step
 
