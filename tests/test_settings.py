@@ -193,7 +193,7 @@ class TestSettingSpecs:
             f.name for f in PollCadence.__dataclass_fields__.values()
         }
         assert by_source["run"] == {"share_default"}
-        assert by_source["accounts"] == {"oauth_only", "proactive_token_refresh"}
+        assert by_source["accounts"] == {"oauth_only", "order", "proactive_token_refresh"}
 
     def test_every_spec_group_is_a_known_section(self):
         groups = {key for key, _ in SETTING_GROUPS}
@@ -563,3 +563,25 @@ class TestProfileSettings:
         rows = {spec.dotted: (value, is_set) for spec, value, is_set in effective_settings(tmp_path)}
         assert rows["accounts.oauthOnly"] == (True, True)
         assert rows["run.shareDefault"] == (True, False)
+
+
+class TestKeyOrder:
+    def test_default_is_account_first(self, tmp_path: Path):
+        from claude_rotater.settings import load_accounts_settings
+
+        assert load_accounts_settings(tmp_path).order == "account-first"
+
+    def test_set_and_load(self, tmp_path: Path):
+        from claude_rotater.settings import load_accounts_settings
+
+        assert set_setting(tmp_path, "accounts.order", "api-first") == "api-first"
+        assert load_accounts_settings(tmp_path).order == "api-first"
+        with pytest.raises(ConfigError):
+            set_setting(tmp_path, "accounts.order", "keys-first")
+
+    def test_unknown_value_reads_as_default(self, tmp_path: Path):
+        from claude_rotater.settings import load_accounts_settings
+
+        settings_path(tmp_path).write_text(json.dumps({"accounts": {"order": 3, "oauthOnly": True}}))
+        loaded = load_accounts_settings(tmp_path)
+        assert loaded.order == "account-first" and loaded.oauth_only is True

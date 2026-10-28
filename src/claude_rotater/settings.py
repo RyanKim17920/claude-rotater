@@ -57,7 +57,9 @@ class AutoSwitchSettings:
     # never set the key follows this default; an explicit value in
     # settings.json is kept.
     strategy: str = "pace"
-    include_api_key_accounts: bool = False
+    # Whether the engine may move onto an API-key account at all (when, is
+    # ``accounts.order``). A key is only ever added on purpose, so on.
+    include_api_key_accounts: bool = True
     unhealthy_ticks: int = 3
     # Comma-separated model display name(s) (e.g. "Fable" or "Fable,Opus"),
     # or "all" for every scoped window an account reports. Each named model's
@@ -123,6 +125,12 @@ class AccountsSettings:
     managed and listed."""
 
     oauth_only: bool = False
+    # When API-key accounts (billed per token) take turns with the
+    # subscription accounts: "account-first" uses a key only once every
+    # subscription is at its limit and goes back as soon as one has room;
+    # "api-first" uses a key until it is out of credit (or its budget),
+    # then the subscriptions.
+    order: str = "account-first"
     # Off by default: a proactive refresh rotates the stored refresh token,
     # and a running ``claude`` in any profile may still hold that same
     # token (a shared account, or a login copied by an older switch). It
@@ -227,6 +235,9 @@ STRATEGY_CHOICES: tuple[str, ...] = ("pace", "expiring-first", "best", "consume-
 # Who decides when to switch: rota ("auto", the default) or you ("manual").
 MODE_CHOICES: tuple[str, ...] = ("auto", "manual")
 
+# When API-key accounts are used, the default first (see AccountsSettings).
+ORDER_CHOICES: tuple[str, ...] = ("account-first", "api-first")
+
 # settings.json uses camelCase (matching the repo's other JSON artifacts);
 # dataclass fields stay snake_case.
 SETTING_SPECS: dict[str, SettingSpec] = {
@@ -284,7 +295,8 @@ SETTING_SPECS: dict[str, SettingSpec] = {
         ),
         SettingSpec(
             "autoswitch", "includeApiKeyAccounts", "include_api_key_accounts", "bool",
-            help="Allow rotating onto managed API-key accounts (bill per token)",
+            help="Let auto-switch use API-key accounts (billed per token); "
+            "when is the API keys setting",
             group="autoswitch", label="Include API-key accounts",
         ),
         SettingSpec(
@@ -335,6 +347,13 @@ SETTING_SPECS: dict[str, SettingSpec] = {
             "accounts", "oauthOnly", "oauth_only", "bool",
             help="Never switch onto API-key accounts, by hand or automatically",
             group="profile", label="OAuth accounts only",
+        ),
+        SettingSpec(
+            "accounts", "order", "order", "choice", choices=ORDER_CHOICES,
+            help="account-first: API keys only once every subscription is at "
+            "its limit; api-first: API keys until out of credit, then "
+            "subscriptions",
+            group="profile", label="API keys",
         ),
         SettingSpec(
             "accounts", "proactiveTokenRefresh", "proactive_token_refresh", "bool",
@@ -472,8 +491,8 @@ def load_ui_settings(backup_root: Path) -> UiSettings:
 
 
 def _load_flag_section(backup_root: Path, section: str):
-    """Load a section made only of bool specs (``run``, ``accounts``); a
-    missing section or a non-bool value reads as the default."""
+    """Load a section made of bool and choice specs (``run``, ``accounts``);
+    a missing section or a value of the wrong kind reads as the default."""
     cls = _DEFAULT_SOURCES[section]
     raw = _read_raw(settings_path(backup_root)).get(section)
     if not isinstance(raw, dict):
@@ -483,7 +502,15 @@ def _load_flag_section(backup_root: Path, section: str):
         if spec.source != section or spec.json_key not in raw:
             continue
         value = raw[spec.json_key]
-        if isinstance(value, bool):
+        if spec.kind == "choice":
+            if value in spec.choices:
+                kwargs[spec.field] = value
+            else:
+                _logger.warning(
+                    "settings.json: %s expects one of %s, got %r; using %r",
+                    spec.dotted, ", ".join(spec.choices), value, spec.default,
+                )
+        elif isinstance(value, bool):
             kwargs[spec.field] = value
         else:
             _logger.warning(

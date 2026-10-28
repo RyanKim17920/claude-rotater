@@ -1941,8 +1941,8 @@ class TestApiKeyAccounts:
         data["accounts"][str(num)]["kind"] = "api_key"
         harness.switcher._write_json(harness.switcher.sequence_file, data)
 
-    def test_api_key_candidate_excluded_by_default(self, temp_home):
-        h = EngineHarness(temp_home)
+    def test_api_key_candidate_excluded_when_turned_off(self, temp_home):
+        h = EngineHarness(temp_home, include_api_key_accounts=False)
         h.seed(1, "a@example.com")
         h.seed(2, "key@token.local")
         h.make_live("a@example.com", 1)
@@ -1978,8 +1978,8 @@ class TestApiKeyAccounts:
         assert outcome is TickOutcome.SWITCHED
         assert h.active_number() == 2
 
-    def test_active_api_key_idles_engine(self, temp_home):
-        h = EngineHarness(temp_home)
+    def test_active_api_key_idles_engine_when_keys_are_off(self, temp_home):
+        h = EngineHarness(temp_home, include_api_key_accounts=False)
         h.seed(1, "key@token.local")
         h.seed(2, "b@example.com")
         h.make_live("key@token.local", 1)

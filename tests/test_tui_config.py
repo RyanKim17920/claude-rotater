@@ -189,7 +189,7 @@ class TestLayout:
         async with app.run_test(size=(120, 40)) as pilot:
             await pilot.pause()
             line = next(l for l in plain(app).splitlines() if "Include API-key" in l)
-            assert "○ off" in line
+            assert "● on" in line
 
     async def test_defaults_and_custom_markers(self, tmp_path):
         settings_path(tmp_path).write_text(json.dumps({"autoswitch": {"threshold": 80}}))
@@ -363,12 +363,12 @@ class TestStepping:
             await pilot.pause()
             await go_to(pilot, app, "autoswitch.includeApiKeyAccounts")
             await pilot.press("right")
-            assert section(tmp_path, "autoswitch") == {"includeApiKeyAccounts": True}
-            assert "● on" in plain(app)
+            assert section(tmp_path, "autoswitch") == {"includeApiKeyAccounts": False}
+            assert "○ off" in plain(app)
             await pilot.press("left")
             assert read_file(tmp_path).get("autoswitch") is None
             await pilot.press("enter")
-            assert section(tmp_path, "autoswitch") == {"includeApiKeyAccounts": True}
+            assert section(tmp_path, "autoswitch") == {"includeApiKeyAccounts": False}
 
     async def test_choice_cycles(self, tmp_path):
         app = Host(tmp_path)
