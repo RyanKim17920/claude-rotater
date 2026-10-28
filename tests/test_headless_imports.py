@@ -62,3 +62,26 @@ def test_background_paths_never_load_the_costs_code():
         [sys.executable, "-c", code], capture_output=True, text=True, timeout=60
     )
     assert result.returncode == 0, result.stderr
+
+
+def test_rota_key_stays_import_light():
+    """``rota key`` runs on Claude Code's request path whenever an API key is
+    active: it must not load the switcher, HTTP stack, costs or TUI."""
+    code = (
+        "import sys\n"
+        "sys.argv = ['rota', 'key', '--route', '/nonexistent-cfg', '/nonexistent-data']\n"
+        "from claude_rotater import entry\n"
+        "try:\n"
+        "    entry.main()\n"
+        "except SystemExit as e:\n"
+        "    assert e.code == 1, e.code\n"
+        "heavy = sorted(m for m in sys.modules\n"
+        "               if m.split('.')[0] in ('textual', 'rich', 'urllib3', 'httpx')\n"
+        "               or m in ('claude_rotater.switcher', 'claude_rotater.cli',\n"
+        "                        'claude_rotater.costs', 'claude_rotater.autoswitch'))\n"
+        "assert not heavy, heavy\n"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", code], capture_output=True, text=True, timeout=60
+    )
+    assert result.returncode == 0, result.stderr

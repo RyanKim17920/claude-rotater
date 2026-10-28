@@ -186,27 +186,135 @@ class TestCrossKindCollision:
 # ---------------------------------------------------------------------------
 
 
-class TestWriteCredentialsLinux:
+def _share_settings_with_a_second_profile(temp_home: Path) -> None:
+    """Make the default profile's settings.json the file a registered second
+    profile also reads (a symlink, as an owner sharing hooks does)."""
+    from claude_rotater import profiles
+
+    work = temp_home / ".claude-work"
+    work.mkdir()
+    (temp_home / ".claude" / "settings.json").write_text("{}\n", encoding="utf-8")
+    (work / "settings.json").symlink_to(temp_home / ".claude" / "settings.json")
+    profiles.add("work", str(temp_home / "work-data"), str(work), [str(temp_home / "job")])
+
+
+def _settings() -> dict:
+    from claude_rotater.paths import get_claude_config_home
+
+    path = get_claude_config_home() / "settings.json"
+    return json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
+
+
+class TestWriteCredentialsHelper:
+    """A key goes to running sessions through rota's apiKeyHelper; the OAuth
+    login stays put underneath it."""
+
     @pytest.mark.parametrize("key", [API_KEY, PERSONAL_KEY])
-    def test_activate_key_then_oauth(self, temp_home: Path, key):
+    def test_activate_key_then_oauth_linux(self, temp_home: Path, key):
         s = _linux_switcher()
         cred_file = get_credentials_path()
         cred_file.parent.mkdir(parents=True, exist_ok=True)
         cred_file.write_text(OAUTH_JSON, encoding="utf-8")
 
-        # Activate the API key: primaryApiKey + approved set, OAuth file cleared.
         s._write_credentials(key)
-        cfg = _read_global_config()
-        assert cfg["primaryApiKey"] == key
-        assert key[-20:] in cfg["customApiKeyResponses"]["approved"]
-        assert not cred_file.exists()
+        helper = _settings()["apiKeyHelper"]
+        assert helper.endswith("# rota-key") and " key --route " in helper
+        assert key not in json.dumps(_settings())  # the key never lands in settings
+        assert (s.backup_dir / "active-key").read_text(encoding="utf-8") == key
+        assert oct((s.backup_dir / "active-key").stat().st_mode & 0o777) == "0o600"
+        assert cred_file.read_text(encoding="utf-8") == OAUTH_JSON  # login kept
+        assert s._read_credentials() == key  # the key is what sessions use
 
-        # Switch back to OAuth: file restored, primaryApiKey dropped, approved kept.
+        s._write_credentials(OAUTH_JSON)
+        assert "apiKeyHelper" not in _settings()
+        assert not (s.backup_dir / "active-key").exists()
+        assert s._read_credentials() == OAUTH_JSON
+
+    def test_activate_key_macos_uses_rota_keychain_item(self, temp_home, block_real_keychain):
+        from claude_rotater import api_key_mode
+
+        store = block_real_keychain
+        s = _macos_switcher()
+        acct = macos_keychain.keychain_account_name()
+        store.set_password(CLAUDE_CODE_KEYCHAIN_SERVICE, acct, OAUTH_JSON)
+
+        s._write_credentials(API_KEY)
+        assert store.get_password(api_key_mode.key_service(s.backup_dir), acct) == API_KEY
+        # Claude Code's own items are untouched: the login stays, no managed key.
+        assert store.get_password(CLAUDE_CODE_KEYCHAIN_SERVICE, acct) == OAUTH_JSON
+        assert store.get_password(CLAUDE_CODE_MANAGED_KEYCHAIN_SERVICE, acct) is None
+        assert not get_global_config_path().exists() or "primaryApiKey" not in _read_global_config()
+
+        s._write_credentials(OAUTH_JSON)
+        assert store.get_password(api_key_mode.key_service(s.backup_dir), acct) is None
+        assert "apiKeyHelper" not in _settings()
+
+    def test_other_settings_survive(self, temp_home: Path):
+        s = _linux_switcher()
+        path = temp_home / ".claude" / "settings.json"
+        path.write_text('{\n    "theme": "dark",\n    "hooks": {"a": 1}\n}\n', encoding="utf-8")
+        s._write_credentials(API_KEY)
+        data = _settings()
+        assert data["theme"] == "dark" and data["hooks"] == {"a": 1}
+        assert path.read_text(encoding="utf-8").startswith('{\n    "theme"')  # indent kept
+        s._write_credentials(OAUTH_JSON)
+        assert _settings() == {"theme": "dark", "hooks": {"a": 1}}
+
+    def test_a_foreign_helper_is_never_replaced(self, temp_home: Path):
+        s = _linux_switcher()
+        path = temp_home / ".claude" / "settings.json"
+        path.write_text(json.dumps({"apiKeyHelper": "~/bin/my-key"}), encoding="utf-8")
+        s._write_credentials(API_KEY)
+        assert _settings()["apiKeyHelper"] == "~/bin/my-key"
+        # fell back to the managed key instead
+        assert _read_global_config()["primaryApiKey"] == API_KEY
+        s._write_credentials(OAUTH_JSON)
+        assert _settings()["apiKeyHelper"] == "~/bin/my-key"
+
+
+class TestWriteCredentialsManagedFallback:
+    """Where the helper would reach another profile, the key goes in as
+    Claude Code's managed-key login instead (new sessions; clears OAuth)."""
+
+    def test_shared_settings_fall_back_linux(self, temp_home: Path):
+        from claude_rotater import api_key_mode
+
+        _share_settings_with_a_second_profile(temp_home)
+        s = _linux_switcher()
+        cred_file = get_credentials_path()
+        cred_file.write_text(OAUTH_JSON, encoding="utf-8")
+
+        s._write_credentials(API_KEY)
+        assert "apiKeyHelper" not in _settings()
+        cfg = _read_global_config()
+        assert cfg["primaryApiKey"] == API_KEY
+        assert API_KEY[-20:] in cfg["customApiKeyResponses"]["approved"]
+        assert not cred_file.exists()
+        state = api_key_mode.mode(s.backup_dir)
+        assert state.on and state.via == "managed" and "shared" in state.note
+
         s._write_credentials(OAUTH_JSON)
         assert cred_file.read_text(encoding="utf-8") == OAUTH_JSON
+        assert "primaryApiKey" not in _read_global_config()
+        assert not api_key_mode.mode(s.backup_dir).on
+
+    def test_shared_settings_fall_back_macos(self, temp_home, block_real_keychain):
+        _share_settings_with_a_second_profile(temp_home)
+        store = block_real_keychain
+        s = _macos_switcher()
+        acct = macos_keychain.keychain_account_name()
+        store.set_password(CLAUDE_CODE_KEYCHAIN_SERVICE, acct, OAUTH_JSON)
+
+        s._write_credentials(API_KEY)
+        assert store.get_password(CLAUDE_CODE_MANAGED_KEYCHAIN_SERVICE, acct) == API_KEY
+        assert store.get_password(CLAUDE_CODE_KEYCHAIN_SERVICE, acct) is None
         cfg = _read_global_config()
+        assert API_KEY[-20:] in cfg["customApiKeyResponses"]["approved"]
         assert "primaryApiKey" not in cfg
-        assert key[-20:] in cfg["customApiKeyResponses"]["approved"]
+
+        s._write_credentials(OAUTH_JSON)
+        assert store.get_password(CLAUDE_CODE_MANAGED_KEYCHAIN_SERVICE, acct) is None
+        assert store.get_password(CLAUDE_CODE_KEYCHAIN_SERVICE, acct) == OAUTH_JSON
 
     def test_read_credentials_returns_active_key(self, temp_home: Path):
         s = _linux_switcher()
@@ -225,38 +333,6 @@ class TestWriteCredentialsLinux:
             json.dumps({"primaryApiKey": API_KEY}), encoding="utf-8"
         )
         assert s._read_credentials() == OAUTH_JSON
-
-
-class TestWriteCredentialsMacOS:
-    def test_activate_key_uses_keychain_not_config(self, temp_home, block_real_keychain):
-        store = block_real_keychain
-        s = _macos_switcher()
-        acct = macos_keychain.keychain_account_name()
-        store.set_password(CLAUDE_CODE_KEYCHAIN_SERVICE, acct, OAUTH_JSON)
-
-        s._write_credentials(API_KEY)
-
-        # Key in the managed keychain service; OAuth keychain item cleared.
-        assert store.get_password(CLAUDE_CODE_MANAGED_KEYCHAIN_SERVICE, acct) == API_KEY
-        assert store.get_password(CLAUDE_CODE_KEYCHAIN_SERVICE, acct) is None
-        # approved recorded, but the full key stays OUT of plaintext config.
-        cfg = _read_global_config()
-        assert API_KEY[-20:] in cfg["customApiKeyResponses"]["approved"]
-        assert "primaryApiKey" not in cfg
-
-    def test_switch_back_to_oauth_clears_key(self, temp_home, block_real_keychain):
-        store = block_real_keychain
-        s = _macos_switcher()
-        s._write_credentials(API_KEY)
-        acct = macos_keychain.keychain_account_name()
-        assert store.get_password(CLAUDE_CODE_MANAGED_KEYCHAIN_SERVICE, acct) == API_KEY
-
-        s._write_credentials(OAUTH_JSON)
-        # managed keychain cleared, OAuth keychain populated, approved kept.
-        assert store.get_password(CLAUDE_CODE_MANAGED_KEYCHAIN_SERVICE, acct) is None
-        assert store.get_password(CLAUDE_CODE_KEYCHAIN_SERVICE, acct) == OAUTH_JSON
-        cfg = _read_global_config()
-        assert API_KEY[-20:] in cfg["customApiKeyResponses"]["approved"]
 
     def test_read_credentials_from_managed_keychain(self, temp_home, block_real_keychain):
         store = block_real_keychain

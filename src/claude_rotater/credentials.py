@@ -27,7 +27,7 @@ import time
 from pathlib import Path
 from typing import NamedTuple, Protocol
 
-from claude_rotater import macos_keychain
+from claude_rotater import api_key_mode, macos_keychain
 from claude_rotater.claude_locks import claude_storage_write_lock
 from claude_rotater.exceptions import (
     CredentialReadError,
@@ -593,6 +593,12 @@ class CredentialStore:
         rather than "no credentials" for a merely-unreadable slot — which would
         otherwise nudge the user into an unnecessary re-login.
         """
+        # 0. An API key rota's apiKeyHelper hands this profile's sessions:
+        # Claude Code prefers it over the login below, so it is the active
+        # credential (see api_key_mode).
+        key = api_key_mode.active_key(self._data_dir(), get_claude_config_home())
+        if key:
+            return ActiveCredentials(key, False)
         keychain_failed = False
         # 1. OAuth Keychain (macOS, when usable), with a bounded retry.
         #
@@ -835,10 +841,34 @@ class CredentialStore:
         """
         with claude_storage_write_lock():
             if looks_like_api_key(credentials):
-                self._write_managed_credentials(credentials.strip())
+                self._activate_api_key(credentials.strip())
             else:
                 self._write_oauth_credentials(credentials)
                 self._clear_managed_key()
+                api_key_mode.deactivate(self._data_dir(), get_claude_config_home())
+
+    def _data_dir(self) -> Path:
+        return self._host.credentials_dir.parent
+
+    def _activate_api_key(self, api_key: str) -> None:
+        """Hand the key to this profile's sessions through rota's
+        apiKeyHelper, leaving the OAuth login in place (the helper outranks
+        it, and switching back is then instant). When the helper cannot be
+        used here, fall back to Claude Code's managed-key login, which new
+        sessions pick up and which clears the OAuth login."""
+        why = api_key_mode.activate(
+            api_key, self._data_dir(), get_claude_config_home(),
+            keychain=self._use_keychain(),
+        )
+        if why is None:
+            self._clear_managed_key()
+            return
+        self._host._logger.warning(
+            f"API key through apiKeyHelper not possible ({why}); "
+            "using the managed-key login, which new sessions pick up"
+        )
+        self._write_managed_credentials(api_key)
+        api_key_mode.note_managed(self._data_dir(), api_key, why)
 
     def _write_managed_credentials(self, api_key: str) -> None:
         """Activate a managed API key, then clear OAuth (mutual exclusion).

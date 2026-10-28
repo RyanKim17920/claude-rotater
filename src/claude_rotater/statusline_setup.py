@@ -243,7 +243,7 @@ def _classify(command: str | None) -> str:
 # -- settings.json I/O ------------------------------------------------------------
 
 
-def _read(path: Path) -> tuple[dict, str | None]:
+def read_settings(path: Path) -> tuple[dict, str | None]:
     """``(settings, raw_text)``; ``({}, None)`` when the file does not exist."""
     try:
         raw = path.read_text(encoding="utf-8")
@@ -341,7 +341,7 @@ def _atomic_write(path: Path, text: str) -> None:
         raise
 
 
-def _write(path: Path, settings: dict, raw: str | None, backup_dir: Path | None) -> None:
+def write_settings(path: Path, settings: dict, raw: str | None, backup_dir: Path | None) -> None:
     try:
         _backup(path, raw, backup_dir)
         _atomic_write(path, _render(settings, raw))
@@ -357,7 +357,7 @@ def status(backup_dir: Path | None = None, *, now: float | None = None) -> Statu
     Never raises: an unreadable settings.json reads as no statusline."""
     path = settings_path()
     try:
-        settings, _ = _read(path)
+        settings, _ = read_settings(path)
     except StatuslineSetupError:
         settings = {}
     command = _command_of(settings)
@@ -391,7 +391,7 @@ def install(backup_dir: Path | None = None) -> StatuslineStatus:
     """Make the statusline feed rota (see the module docstring). A no-op when
     it already does. Raises :class:`StatuslineSetupError` on failure."""
     path = settings_path()
-    settings, raw = _read(path)
+    settings, raw = read_settings(path)
     command = _command_of(settings)
     root = _backup_root(backup_dir)
     split = _split_feed(command) if command else None
@@ -401,7 +401,7 @@ def install(backup_dir: Path | None = None) -> StatuslineStatus:
             head, words, tail = split
             words += _route_args(path.parent, root)
             settings["statusLine"] = {**settings["statusLine"], "command": head + words + tail}
-            _write(path, settings, raw, backup_dir)
+            write_settings(path, settings, raw, backup_dir)
     elif _classify(command) != INSTALLED:
         line = settings.get("statusLine")
         if command:
@@ -412,7 +412,7 @@ def install(backup_dir: Path | None = None) -> StatuslineStatus:
                 "type": "command",
                 "command": default_command(feed_command(backup_dir)),
             }
-        _write(path, settings, raw, backup_dir)
+        write_settings(path, settings, raw, backup_dir)
     return status(backup_dir)
 
 
@@ -435,7 +435,7 @@ def uninstall(backup_dir: Path | None = None) -> StatuslineStatus:
     and one that still feeds another profile only loses this profile's route.
     Raises :class:`StatuslineSetupError` on failure."""
     path = settings_path()
-    settings, raw = _read(path)
+    settings, raw = read_settings(path)
     command = _command_of(settings)
     split = _split_feed(command) if command is not None else None
     if split is not None and _feeds_others(command, path.parent):
@@ -445,13 +445,13 @@ def uninstall(backup_dir: Path | None = None) -> StatuslineStatus:
             **settings["statusLine"],
             "command": head + _without_routes(words, path.parent) + tail,
         }
-        _write(path, settings, raw, backup_dir)
+        write_settings(path, settings, raw, backup_dir)
     elif command is not None:
         original = unwrap(command)
         if original is not None:
             settings["statusLine"] = {**settings["statusLine"], "command": original}
-            _write(path, settings, raw, backup_dir)
+            write_settings(path, settings, raw, backup_dir)
         elif _is_default(command):
             del settings["statusLine"]
-            _write(path, settings, raw, backup_dir)
+            write_settings(path, settings, raw, backup_dir)
     return status(backup_dir)

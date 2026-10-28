@@ -588,6 +588,11 @@ def main() -> None:
         from claude_rotater.feed import main as feed_main
 
         sys.exit(feed_main(argv[1:]))
+    if argv and argv[0] == "key":
+        # Hidden verb for Claude Code's apiKeyHelper (see api_key_mode).
+        from claude_rotater.api_key_mode import main as key_main
+
+        sys.exit(key_main(argv[1:]))
     if argv and argv[0] == "profile":
         _profile_command(argv[1:])
         return
