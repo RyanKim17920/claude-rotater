@@ -97,9 +97,8 @@ class TestState:
         ak.mark_exhausted(tmp_path, "3", ak.OUT_OF_CREDIT, NOW)
         state = ak.state_of(tmp_path, "3")
         assert state.exhausted and state.blocked(NOW) == ak.OUT_OF_CREDIT
-        ak.clear_exhausted(tmp_path, "3")
-        assert ak.state_of(tmp_path, "3") == ak.KeyState()
-        assert ak.load(tmp_path) == {}
+        ak.clear_exhausted(tmp_path, "3", at=NOW + 5)
+        assert ak.state_of(tmp_path, "3") == ak.KeyState(cleared_at=NOW + 5)
 
     def test_budget_and_spend(self, tmp_path):
         budget = ak.Budget("topup", 50.0, NOW - 86400)

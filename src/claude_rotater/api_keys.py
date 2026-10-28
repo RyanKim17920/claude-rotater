@@ -89,6 +89,8 @@ class KeyState:
     spent_usd: float | None = None  # in the budget period (or this month)
     spent_since: float | None = None
     spent_at: float | None = None
+    # A top-up or the owner picking the key: refusals before this are old.
+    cleared_at: float | None = None
 
     @property
     def exhausted(self) -> bool:
@@ -165,6 +167,7 @@ def load(data_dir: Path) -> dict[str, KeyState]:
             spent_usd=_num(item.get("spentUsd")),
             spent_since=_num(item.get("spentSince")),
             spent_at=_num(item.get("spentAt")),
+            cleared_at=_num(item.get("clearedAt")),
         )
     return out
 
@@ -193,9 +196,13 @@ def mark_exhausted(data_dir: Path, number: str, reason: str, at: float) -> None:
     _update(data_dir, number, exhaustedAt=at, exhaustedReason=reason)
 
 
-def clear_exhausted(data_dir: Path, number: str) -> None:
-    """A top-up, or the owner picking the key by hand: try it again."""
-    _update(data_dir, number, exhaustedAt=None, exhaustedReason=None)
+def clear_exhausted(data_dir: Path, number: str, at: float | None = None) -> None:
+    """A top-up, or the owner picking the key by hand: try it again, and
+    take no refusal from before ``at`` (now) as news."""
+    _update(
+        data_dir, number, exhaustedAt=None, exhaustedReason=None,
+        clearedAt=time.time() if at is None else at,
+    )
 
 
 def set_budget(data_dir: Path, number: str, budget: Budget | None) -> None:
@@ -208,7 +215,7 @@ def set_budget(data_dir: Path, number: str, budget: Budget | None) -> None:
             value["since"] = budget.since
     _update(data_dir, number, budget=value, spentUsd=None, spentSince=None, spentAt=None)
     if budget is not None:
-        clear_exhausted(data_dir, number)
+        clear_exhausted(data_dir, number, budget.since or None)
 
 
 def record_spend(data_dir: Path, number: str, usd: float, since: float, at: float) -> None:

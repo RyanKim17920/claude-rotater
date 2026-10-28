@@ -2063,6 +2063,15 @@ class TestKeyOnDuty:
         h.tick_with_usage({"1": "api key", "2": _usage(99)})
         assert len(self.sent) == 1
 
+    def test_a_refusal_from_before_a_top_up_is_old_news(self, temp_home):
+        from claude_rotater import api_keys
+
+        h = self._harness(temp_home, "api-first")
+        self._refuse(h)
+        api_keys.clear_exhausted(h.switcher.backup_dir, "1", at=h.clock.now)
+        assert h.tick_with_usage({"1": "api key", "2": _usage(10)}) is TickOutcome.NO_ACTION
+        assert h.active_number() == 1 and self.sent == []
+
     def test_a_rate_limit_is_no_refusal(self, temp_home):
         h = self._harness(temp_home, "api-first")
         project = h.temp_home / ".claude" / "projects" / "-tmp-x"

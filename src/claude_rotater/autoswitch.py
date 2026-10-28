@@ -2495,6 +2495,7 @@ class AutoSwitchEngine:
         since = api_key_mode.mode(data).since or state.get("lastSwitchAt")
         if not isinstance(since, (int, float)):
             since = self.clock() - 3600.0
+        since = max(since, key_state.cleared_at or 0.0)
         from claude_rotater.paths import get_claude_config_home
 
         found = api_keys.scan_refusals(get_claude_config_home(), float(since))
