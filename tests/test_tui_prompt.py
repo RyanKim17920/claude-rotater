@@ -259,7 +259,7 @@ class TestPromptLineOnThePage:
             await settle(pilot)
             await pilot.press("a")
             await pilot.pause()
-            assert bottom(app, size) == "add:  b browser login  c current login  t paste token  esc"
+            assert bottom(app, size) == "add:  b browser  c current  t token  k API key  esc"
             await pilot.press("t", *"sk-ant-oat-y")
             await pilot.pause()
             line = bottom(app, size)

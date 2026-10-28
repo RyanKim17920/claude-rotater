@@ -1405,6 +1405,7 @@ KEY_COLUMNS: tuple[tuple[KeyGroup, ...], ...] = (
             ("a", "add an account"),
             ("l", "log in (browser)"),
             ("t", "paste a token"),
+            ("b", "API key budget"),
             ("d", "turn off / on"),
             ("x", "remove"),
         )),
@@ -1484,6 +1485,7 @@ class MainScreen(Screen):
         Binding("l", "login_selected", show=False),
         Binding("a", "add", show=False),
         Binding("t", "add_token", show=False),
+        Binding("b", "budget_selected", show=False),
         Binding("d", "toggle_selected", show=False),
         Binding("x,delete", "remove_selected", show=False),
         Binding("c", "open_config", show=False),
@@ -1921,6 +1923,11 @@ class MainScreen(Screen):
         acc = self.account(self.selected_number)
         dead = acc is not None and acc.usage.sentinel == USAGE_RELOGIN_REQUIRED
         self.app.start_login(acc.email if dead else None)
+
+    def action_budget_selected(self) -> None:
+        number = self.selected_number
+        if number is not None:
+            self.app.ask_key_budget(number)
 
     def action_toggle_selected(self) -> None:
         number = self.selected_number

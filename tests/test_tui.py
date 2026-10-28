@@ -206,6 +206,7 @@ class FakeSwitcher:
     ) -> None:
         self.calls.append(("add_token", token, email, slot, assume_yes))
         print(f"Added Account {slot or 9}")
+        return str(slot or 9)
 
     def set_poll_policy_inputs(
         self, threshold: float, models: tuple[str, ...]
@@ -2163,13 +2164,13 @@ class TestMainPage:
             assert [r.number for r in app.screen.query(AccountRow)] == ["1", "3"]
             assert app.focused is app.screen.query_one("#accounts")  # the keys go back
 
-    async def test_a_offers_the_three_ways_and_adds_the_current_login(self, tmp_path):
+    async def test_a_offers_the_ways_and_adds_the_current_login(self, tmp_path):
         app = make_app(three_accounts(tmp_path))
         async with app.run_test(size=(120, 40)) as pilot:
             await settle(pilot)
             await pilot.press("a")
             await pilot.pause()
-            assert prompt_plain(app) == "add:  b browser login  c current login  t paste token  esc"
+            assert prompt_plain(app) == "add:  b browser  c current  t token  k API key  esc"
             await pilot.press("escape")
             await pilot.pause()
             assert fake_calls(app) == [] and not app.prompt.is_open
@@ -2209,6 +2210,136 @@ class TestMainPage:
             await pilot.press("7", "enter")
             await settle(pilot)
             assert ("add_token", "sk-ant-oat-x", None, 7, True) in fake_calls(app)
+
+    async def test_a_k_reads_an_api_key_masked_then_a_budget(self, tmp_path):
+        from claude_rotater import api_keys
+
+        key = "sk-ant-api03-" + "feedface00" * 4
+        app = make_app(three_accounts(tmp_path))
+        async with app.run_test(size=(120, 40)) as pilot:
+            await settle(pilot)
+            await pilot.press("a", "k")
+            await pilot.pause()
+            assert prompt_plain(app).startswith("API key: ▌")
+            await pilot.press(*key)
+            assert "sk-ant" not in prompt_plain(app) and key[-4:] not in prompt_plain(app)
+            await pilot.press("enter")
+            await pilot.pause()
+            assert prompt_plain(app).startswith("budget: ▌")
+            await pilot.press(*"lots", "enter")  # asked again, with why
+            await pilot.pause()
+            assert prompt_plain(app).startswith("budget: ▌") and "not an amount" in prompt_plain(app)
+            await pilot.press(*"100/m", "enter")
+            await settle(pilot)
+            assert ("add_token", key, None, None, True) in fake_calls(app)
+            assert api_keys.state_of(tmp_path, "9").budget == api_keys.Budget("monthly", 100.0)
+
+    async def test_a_k_refuses_what_is_not_an_api_key(self, tmp_path):
+        app = make_app(three_accounts(tmp_path))
+        async with app.run_test(size=(120, 40)) as pilot:
+            await settle(pilot)
+            await pilot.press("a", "k", *"sk-ant-oat01-xyz", "enter")
+            await settle(pilot)
+            assert "not an API key" in prompt_plain(app)
+            assert not any(c[0] == "add_token" for c in fake_calls(app))
+
+    async def test_b_sets_a_budget_on_a_key_row_only(self, tmp_path):
+        from claude_rotater import api_keys
+
+        fake = three_accounts(tmp_path)
+        key = dataclasses.replace(
+            make_account(4, kind="api_key", entry=make_usage_at(None, sentinel=USAGE_API_KEY)),
+            key_tail="AbCd", key_state=api_keys.KeyState(),
+        )
+        fake._accounts.append(key)
+        app = make_app(fake)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await settle(pilot)
+            await pilot.press("b")  # on #1, a subscription
+            await pilot.pause()
+            assert "API key's row" in prompt_plain(app)
+            await pilot.press("down", "down", "down", "b")
+            await pilot.pause()
+            assert prompt_plain(app).startswith("#4 budget: ▌") and "now none" in prompt_plain(app)
+            await pilot.press(*"$25", "enter")
+            await settle(pilot)
+            state = api_keys.state_of(tmp_path, "4")
+            assert state.budget is not None and state.budget.amount == 25.0
+
+    async def test_enter_on_an_exhausted_key_retries_it(self, tmp_path):
+        from claude_rotater import api_keys
+
+        fake = three_accounts(tmp_path)
+        api_keys.mark_exhausted(tmp_path, "4", api_keys.OUT_OF_CREDIT, 1.0)
+        key = dataclasses.replace(
+            make_account(4, kind="api_key", entry=make_usage_at(None, sentinel=USAGE_API_KEY)),
+            key_state=api_keys.state_of(tmp_path, "4"),
+        )
+        fake._accounts.append(key)
+        app = make_app(fake)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await settle(pilot)
+            await pilot.press("down", "down", "down", "enter")
+            await settle(pilot)
+            assert ("switch_to", "4") in fake_calls(app)
+            assert not api_keys.state_of(tmp_path, "4").exhausted
+
+    async def test_a_key_on_duty_has_its_spend_priced_now_and_then(self, tmp_path):
+        from claude_rotater import api_keys
+
+        fake = three_accounts(tmp_path)
+        fake._accounts = [dataclasses.replace(a, is_active=False) for a in fake._accounts]
+        fake._accounts.append(dataclasses.replace(
+            make_account(4, active=True, kind="api_key",
+                         entry=make_usage_at(None, sentinel=USAGE_API_KEY)),
+            key_state=api_keys.KeyState(),
+        ))
+        fake.active = "4"
+        priced: list = []
+
+        class Source:
+            def refresh(self, identities, force=False):
+                priced.append(sorted(identities))
+
+        app = make_app(fake)
+        app._cost_source = Source()
+        async with app.run_test(size=(120, 40)) as pilot:
+            await settle(pilot)
+            app._tick()
+            await settle(pilot)
+            app._tick()  # within KEY_SPEND_EVERY_S: not again
+            await settle(pilot)
+            assert priced == [["1", "2", "3", "4"]]
+            app._key_spend_at -= app.KEY_SPEND_EVERY_S
+            app._tick()
+            await settle(pilot)
+            assert len(priced) == 2
+
+    async def test_no_spend_pricing_without_a_key(self, tmp_path):
+        app = make_app(three_accounts(tmp_path))
+        app._cost_source = object()  # any use would raise
+        async with app.run_test(size=(120, 40)) as pilot:
+            await settle(pilot)
+            app._tick()
+            await settle(pilot)
+            assert not [w for w in app.workers if w.group == "key-spend"]
+
+    async def test_a_key_on_duty_says_what_keeps_it_from_the_chats(self, tmp_path, monkeypatch):
+        from claude_rotater import api_key_mode
+
+        key = make_account(4, active=True, kind="api_key")
+        snap = AccountsSnapshot(active_number="4", accounts=(key,), taken_at=0.0)
+        app = make_app(three_accounts(tmp_path))
+        monkeypatch.setattr(api_key_mode, "overrides", lambda cfg: ["ANTHROPIC_API_KEY is set"])
+        assert app._key_note_for(snap) == (
+            "Claude Code ignores rota's API key here: ANTHROPIC_API_KEY is set"
+        )
+        monkeypatch.setattr(api_key_mode, "overrides", lambda cfg: [])
+        monkeypatch.setattr(api_key_mode, "mode", lambda d: api_key_mode.KeyMode(
+            1.0, "AbCd", "managed", "settings.json is shared with another profile"))
+        assert app._key_note_for(snap).startswith("API key in new chats only: settings.json")
+        idle = AccountsSnapshot(active_number=None, accounts=(make_account(1),), taken_at=0.0)
+        assert app._key_note_for(idle) == ""
 
     async def test_token_paste_and_overwrite_question(self, tmp_path):
         from textual import events

@@ -31,7 +31,7 @@ from textual.binding import Binding
 from textual.reactive import reactive
 from textual.worker import WorkerState
 
-from claude_rotater import clipboard, legacy_import, printer
+from claude_rotater import api_key_mode, api_keys, clipboard, legacy_import, printer
 from claude_rotater.autoswitch import (
     ALERT_REASONS,
     STATE_FILENAME,
@@ -43,6 +43,7 @@ from claude_rotater.autoswitch import (
 from claude_rotater.estimator import AccountEstimate
 from claude_rotater.forecast import fleet_estimates
 from claude_rotater import statusline_setup
+from claude_rotater.credentials import looks_like_api_key
 from claude_rotater.exceptions import ClaudeSwitchError, LoginError
 from claude_rotater.instance import EngineLock, warn_if_not_owner
 from claude_rotater.login import StagedLogin
@@ -130,6 +131,20 @@ def default_cost_source_factory(switcher):
     )
 
 
+def _retry_key(data_dir, number: str, switch: Callable[[], dict | None]) -> dict | None:
+    """Worker thread: clear the key's out-of-credit mark, then switch."""
+    api_keys.clear_exhausted(data_dir, number)
+    return switch()
+
+
+def _add_key_blocking(switcher, key: str, budget: api_keys.Budget | None) -> None:
+    """Worker thread: store the key (in the next free slot, or the slot
+    already holding it), then its budget."""
+    number = switcher.add_account_from_token(token=key, assume_yes=True)
+    if budget is not None and number:
+        api_keys.set_budget(switcher.backup_dir, str(number), budget)
+
+
 class RotaApp(App):
     """rota interactive TUI: one screen; the settings show in its body."""
 
@@ -207,6 +222,9 @@ class RotaApp(App):
         self.main_screen = MainScreen()
         self._cost_source = None
         self._color_indices: dict[tuple[str, str], int] = {}
+        self._key_spend_at = 0.0
+        self._key_spend_running = False
+        self._key_note = ""
 
     @property
     def cost_source(self):
@@ -440,6 +458,7 @@ class RotaApp(App):
     def _tick(self) -> None:
         """The scheduled poller only reads the store: the engine fetches."""
         self._start_store_refresh()
+        self._refresh_key_spend()
         if (
             self.engine is None
             and self.auto_status.view_only
@@ -495,6 +514,71 @@ class RotaApp(App):
             self._apply_snapshot, generation, lane, snap, estimates, last_switch_at, feed,
             headline,
         )
+        self.call_from_thread(self._show_key_note, self._key_note_for(snap))
+
+    def _key_note_for(self, snap: AccountsSnapshot) -> str:
+        """Worker thread: why an API key on duty may not reach the chats
+        ("" when it does, or no key is on duty)."""
+        if not any(a.is_active and a.kind == "api_key" for a in snap.accounts):
+            return ""
+        from claude_rotater.paths import get_claude_config_home
+
+        found = api_key_mode.overrides(get_claude_config_home())
+        if found:
+            return f"Claude Code ignores rota's API key here: {', '.join(found)}"
+        mode = api_key_mode.mode(self.switcher.backup_dir)
+        if mode.on and mode.via == "managed":
+            return f"API key in new chats only: {mode.note or 'no apiKeyHelper here'}"
+        return ""
+
+    def _show_key_note(self, note: str) -> None:
+        """Say it once, and again only when it changes."""
+        if note and note != self._key_note:
+            self.say(note, "warn")
+        self._key_note = note
+
+    # Spend of a key on duty is repriced this often (ccusage is not cheap),
+    # and a budget with no spend estimate yet after this long.
+    KEY_SPEND_EVERY_S = 900.0
+    KEY_SPEND_RETRY_S = 120.0
+
+    def _refresh_key_spend(self) -> None:
+        """Price the transcripts now and then while an API key is on duty
+        (or a key's budget has no estimate yet), so its row and the engine's
+        budget check have a spend to go by."""
+        snap = self.snapshot
+        if snap is None or self._key_spend_running:
+            return
+        keys = [a for a in snap.accounts if a.kind == "api_key"]
+        unknown = any(
+            isinstance(a.key_state, api_keys.KeyState)
+            and a.key_state.budget is not None
+            and a.key_state.spent_at is None
+            for a in keys
+        )
+        if not unknown and not any(a.is_active for a in keys):
+            return
+        wait = self.KEY_SPEND_RETRY_S if unknown else self.KEY_SPEND_EVERY_S
+        if time.time() - self._key_spend_at < wait:
+            return
+        self._key_spend_at = time.time()
+        self._key_spend_running = True
+        identities = {a.number: (a.email, a.org_uuid) for a in snap.accounts}
+        self.run_worker(
+            partial(self._key_spend_blocking, self.cost_source, identities),
+            thread=True,
+            group="key-spend",
+            exit_on_error=False,
+            name="key-spend",
+        )
+
+    def _key_spend_blocking(self, source, identities) -> None:
+        try:
+            source.refresh(identities)
+        except Exception as e:  # best effort: the row says the spend is unknown
+            _logger.debug("API key spend: %r", e)
+        finally:
+            self._key_spend_running = False
 
     def _estimates_for(
         self, snap: AccountsSnapshot, last_switch_at: float | None = None
@@ -751,10 +835,17 @@ class RotaApp(App):
     # -- account operations ----------------------------------------------------
 
     def do_switch(self, number: str) -> None:
-        self._start_action(
-            f"Switch to account {number}",
-            partial(self.switcher.switch_to, number, json_output=True),
-        )
+        switch = partial(self.switcher.switch_to, number, json_output=True)
+        acc = self._account(number)
+        state = acc.key_state if acc is not None else None
+        if isinstance(state, api_keys.KeyState) and state.exhausted:
+            # Picking an exhausted key by hand says it has credit again.
+            switch = partial(_retry_key, self.switcher.backup_dir, number, switch)
+        self._start_action(f"Switch to account {number}", switch)
+
+    def _account(self, number: str):
+        snap = self.snapshot
+        return next((a for a in (snap.accounts if snap else ()) if a.number == number), None)
 
     def do_toggle_disabled(self, number: str) -> None:
         """Hold the account out of auto-rotation, or return it — reads its
@@ -787,13 +878,15 @@ class RotaApp(App):
             )
 
     ADD_CHOICES = (
-        Choice("b", "browser login", "login"),
-        Choice("c", "current login", "current"),
-        Choice("t", "paste token", "token"),
+        Choice("b", "browser", "login"),
+        Choice("c", "current", "current"),
+        Choice("t", "token", "token"),
+        Choice("k", "API key", "apikey"),
     )
 
     def action_add(self) -> None:
-        """``a``: choose how to add an account (log in, current login, token)."""
+        """``a``: choose how to add an account (log in, current login, token,
+        API key)."""
         self.prompt.ask("add:", self.ADD_CHOICES, self._on_add_choice)
 
     def _on_add_choice(self, choice: object | None) -> None:
@@ -803,6 +896,8 @@ class RotaApp(App):
             self._add_current()  # picked by name in the chooser: no second question
         elif choice == "token":
             self.action_add_token()
+        elif choice == "apikey":
+            self.action_add_key()
 
     def _add_current(self) -> None:
         """Back up the current Claude Code login as a managed account; an
@@ -932,6 +1027,63 @@ class RotaApp(App):
             lambda confirmed: run() if confirmed else None,
             yes="overwrite",
         )
+
+    BUDGET_NOTE = "50 = $50 from now, 100/m = monthly, ⏎ none"
+
+    def action_add_key(self) -> None:
+        """``a`` ``k``: an API key (masked), then an optional budget."""
+        self.prompt.read("API key:", self._on_api_key, secret=True, note="from console.anthropic.com")
+
+    def _on_api_key(self, key: str | None) -> None:
+        if key is None:
+            return
+        if not looks_like_api_key(key):
+            self.say("not an API key (they start sk-ant-): nothing added", "warn")
+            return
+        self._ask_budget(partial(self._add_key, key), self.BUDGET_NOTE)
+
+    def _ask_budget(self, done: Callable, note: str, label: str = "budget:") -> None:
+        """Read a budget; asked again, the reason in place of the note,
+        until it parses (esc drops it)."""
+
+        def parsed(raw: str | None) -> None:
+            if raw is None:
+                return
+            try:
+                budget = api_keys.parse_budget(raw)
+            except ValueError as e:
+                self._ask_budget(done, str(e), label)
+                return
+            done(budget)
+
+        self.prompt.read(label, parsed, note=note)
+
+    def _add_key(self, key: str, budget: api_keys.Budget | None) -> None:
+        self._start_action(
+            "Add API key", partial(_add_key_blocking, self.switcher, key, budget), show_output=True
+        )
+
+    def ask_key_budget(self, number: str) -> None:
+        """``b`` on an API key's row: set or clear its budget."""
+        acc = self._account(number)
+        if acc is None or acc.kind != "api_key":
+            self.say("b sets a budget on an API key's row", "warn")
+            return
+        state = acc.key_state if isinstance(acc.key_state, api_keys.KeyState) else None
+        now = state.budget.label() if state is not None and state.budget else "none"
+        self._ask_budget(
+            partial(self._set_key_budget, number),
+            f"now {now}; {self.BUDGET_NOTE.replace('none', 'clears')}",
+            f"#{number} budget:",
+        )
+
+    def _set_key_budget(self, number: str, budget: api_keys.Budget | None) -> None:
+        self._key_spend_at = 0.0  # price the new period's spend soon
+        self._start_action(
+            f"Set budget of account {number}",
+            partial(api_keys.set_budget, self.switcher.backup_dir, number, budget),
+        )
+        self.say(f"#{number}: {budget.label() if budget else 'no budget'}", "ok")
 
     def _slot_occupant(self, slot: int | None) -> str | None:
         if slot is None or self.snapshot is None:
