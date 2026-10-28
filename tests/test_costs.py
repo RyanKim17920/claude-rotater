@@ -755,6 +755,35 @@ class TestCostSource:
         assert {a.number: a.cost for a in report.accounts} == pytest.approx({"1": 1.0, "2": 1.0})
         assert report.unattributed == pytest.approx(1.0)  # before rota started: nobody
 
+    def test_an_api_keys_spend_is_recorded_for_the_engine(self, tmp_path, home, now):
+        from claude_rotater import api_keys
+
+        backup = tmp_path / ".rota"
+        backup.mkdir()
+        (backup / "sequence.json").write_text(json.dumps({"accounts": {
+            "1": {"email": "a@x"}, "2": {"email": "api-key-2@token.local", "kind": "api_key"}}}))
+        (backup / "rota.log").write_text(start_line(now - 3 * HOUR) + log_line(now - HOUR, "1", "2"))
+        write(home / "projects" / "p" / "a.jsonl", entry(now - 2 * HOUR, "a1"),
+              entry(now - 600, "b1"), entry(now - 300, "c1"))
+        budget = api_keys.Budget("topup", 10.0, now - 900)  # c1 and b1's slot only
+        api_keys.set_budget(backup, "2", budget)
+        src = self.make(tmp_path, home, now)
+        src.history = FakeHistory({})
+        src.refresh({"1": ("a@x", ""), "2": ("api-key-2@token.local", "")})
+        state = api_keys.state_of(backup, "2")
+        assert state.spent_usd == pytest.approx(2.0) and state.spent_since == budget.since
+        assert state.left(now) == pytest.approx(8.0)
+        assert api_keys.state_of(backup, "1").spent_usd is None  # a subscription: no spend kept
+
+    def test_no_dollars_per_pct_for_an_api_key(self, tmp_path, home, now):
+        backup = tmp_path / ".rota"
+        backup.mkdir()
+        (backup / "sequence.json").write_text(json.dumps({"accounts": {
+            "2": {"email": "k@token.local", "kind": "api_key"}}}))
+        src = self.make(tmp_path, home, now)
+        mine = cr.ProfileSpend({}, {}, (), now, now - 86400)
+        assert src._per_pct(mine, {"2": ("k@token.local", "")}, now) == {}
+
 
 class TestPerPctAcrossProfiles:
     """One account (a@x) held by two profiles: #1 here, #2 in "work"."""

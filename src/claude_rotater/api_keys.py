@@ -221,6 +221,25 @@ def forget(data_dir: Path, number: str) -> None:
         _write_raw(data_dir, raw)
 
 
+def key_numbers(data_dir: Path) -> list[str]:
+    """The profile's API-key account numbers, from its ``sequence.json``."""
+    try:
+        raw = json.loads((Path(data_dir) / "sequence.json").read_text(encoding="utf-8"))
+        accounts = raw.get("accounts") or {}
+        return sorted(
+            str(n) for n, rec in accounts.items()
+            if isinstance(rec, dict) and rec.get("kind") == "api_key"
+        )
+    except (OSError, ValueError, AttributeError):
+        return []
+
+
+def spend_period(state: KeyState, now: float) -> float:
+    """Where the key's recorded spend counts from: its budget's period,
+    else the start of this month."""
+    return (state.budget or Budget("monthly", 1.0)).period_start(now)
+
+
 def parse_budget(text: str, now: float | None = None) -> Budget | None:
     """``"50"`` / ``"$50"`` a top-up from now, ``"100/m"`` (or ``/mo``,
     ``/month``) a monthly cap; ``""`` clears. Raises ValueError otherwise."""

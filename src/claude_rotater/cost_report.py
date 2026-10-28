@@ -32,7 +32,7 @@ from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
-from claude_rotater import attribution, costs, profiles
+from claude_rotater import api_keys, attribution, costs, profiles
 from claude_rotater import dollar_per_pct as dpp
 from claude_rotater.paths import get_default_backup_root, get_shared_cache_dir
 
@@ -241,6 +241,17 @@ def account_per_pct(
         stored = [s for s in store.get(key, {}).get(label, ()) if s.resets_at not in read]
         shown[label] = dpp.summarize([*stored, *found], label, now)
     return fresh, shown
+
+
+def record_key_spend(backup_dir: Path, mine: ProfileSpend, now: float) -> None:
+    """Record each API key's spend in its budget period (else this month)
+    for the engine, which never loads this module, to hold against the
+    budget. A lower bound when the period starts before the priced range."""
+    states = api_keys.load(backup_dir)
+    for number in api_keys.key_numbers(backup_dir):
+        since = api_keys.spend_period(states.get(number, api_keys.KeyState()), now)
+        usd = sum(u for slot, u in mine.spend.get(number, ()) if slot + costs.SLOT_S > since)
+        api_keys.record_spend(backup_dir, number, usd, since, now)
 
 
 # -- rollups -------------------------------------------------------------------
@@ -485,7 +496,10 @@ class CostSource:
         store = dpp.load_store(self.store_path)
         changed = False
         out: dict[str, dict[str, dpp.PerPct | None]] = {}
+        keys = set(api_keys.key_numbers(self.backup_dir))
         for number, identity in identities.items():
+            if number in keys:  # metered: no window for a 1% to be of
+                continue
             held = [mine, *(p for p in others if p.holds(identity))]
             try:
                 fresh, out[number] = account_per_pct(identity, held, self.history, store, now)
@@ -502,6 +516,7 @@ class CostSource:
         spans = profile_spans(self.backup_dir, sources, costs.range_start(now), now)
         numbers = {identity: number for number, identity in identities.items()}
         mine = profile_spend(cache, sources, spans, numbers, now)
+        record_key_spend(self.backup_dir, mine, now)
         return build_report(cache, sources, spans, now, self._per_pct(mine, identities, now))
 
     def cached(self, identities: dict[str, Identity]) -> CostResult:
