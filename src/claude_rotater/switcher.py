@@ -28,7 +28,7 @@ from claude_rotater.exceptions import (
     SwitchError,
     ValidationError,
 )
-from claude_rotater import oauth, pace
+from claude_rotater import api_keys, oauth, pace
 from claude_rotater.claude_locks import (
     claude_config_lock,
     claude_credentials_lock,
@@ -1040,12 +1040,14 @@ class ClaudeAccountSwitcher:
         accounts_info = self._build_accounts_info()
         entries = self._collect_usage_entries(accounts_info, fetch=fetch)
         seq_data = self._get_sequence_data() or {}
+        key_states = api_keys.load(self.backup_dir)
         active_number: str | None = None
         accounts: list[AccountSnapshot] = []
         for num, email, org_name, org_uuid, is_active, creds, alias in accounts_info:
             n = str(num)
             if is_active:
                 active_number = n
+            is_key = self._account_kind(n) == "api_key"
             accounts.append(
                 AccountSnapshot(
                     number=n,
@@ -1053,12 +1055,14 @@ class ClaudeAccountSwitcher:
                     org_name=org_name,
                     org_uuid=org_uuid,
                     is_active=is_active,
-                    kind=self._account_kind(n),
+                    kind="api_key" if is_key else "oauth",
                     switchable=self._account_is_switchable(n),
                     usage=entries[n],
                     alias=alias,
                     disabled=self._disabled_from_data(seq_data, n),
                     login_expires_at=oauth.login_expires_at(creds) if creds else None,
+                    key_tail=creds.strip()[-4:] if is_key and looks_like_api_key(creds) else "",
+                    key_state=key_states.get(n, api_keys.KeyState()) if is_key else None,
                 )
             )
         return AccountsSnapshot(
@@ -3532,6 +3536,7 @@ class ClaudeAccountSwitcher:
 
         # Remove backup files
         self._delete_account_files(account_num, email)
+        api_keys.forget(self.backup_dir, account_num)
 
         # Update sequence.json
         del data["accounts"][account_num]

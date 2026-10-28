@@ -134,6 +134,26 @@ class TestAddTokenApiKey:
         out = capsys.readouterr().out
         assert "Added" in out and "API key" in out
 
+    def test_snapshot_carries_the_fingerprint_and_key_state(self, temp_home: Path):
+        from claude_rotater import api_keys
+
+        s = _linux_switcher()
+        s.add_account_from_token(API_KEY)
+        api_keys.mark_exhausted(s.backup_dir, "1", api_keys.OUT_OF_CREDIT, 5.0)
+        acc = s.accounts_snapshot(fetch=set()).accounts[0]
+        assert (acc.kind, acc.key_tail) == ("api_key", API_KEY[-4:])
+        assert acc.key_state.exhausted_reason == api_keys.OUT_OF_CREDIT
+        assert API_KEY not in repr(acc)
+
+    def test_removing_a_key_forgets_its_state(self, temp_home: Path):
+        from claude_rotater import api_keys
+
+        s = _linux_switcher()
+        s.add_account_from_token(API_KEY)
+        api_keys.mark_exhausted(s.backup_dir, "1", api_keys.OUT_OF_CREDIT, 5.0)
+        s.remove_account("1", assume_yes=True)
+        assert api_keys.load(s.backup_dir) == {}
+
     def test_adds_personal_key_account(self, temp_home: Path, capsys):
         # #465: a Console personal key (sk-ant-usr…) used to be wrapped as a
         # setup-token — kindless, labelled setup-token-N, and activated as a fake
