@@ -62,7 +62,7 @@ from textual.css.scalar import Scalar
 from textual.screen import Screen
 from textual.widgets import ListItem, ListView, RichLog, Static
 
-from claude_rotater import login_alerts, oauth, profiles
+from claude_rotater import api_keys, login_alerts, oauth, profiles
 from claude_rotater.autoswitch import (
     ALERT_REASONS,
     AutoSwitchEvent,
@@ -595,6 +595,8 @@ def status_tag(
     sentinel = acc.usage.sentinel
     if acc.disabled:
         return "off", False
+    if acc.kind == "api_key":
+        return key_tag(acc), False
     if sentinel is not None:
         return _SENTINEL_TAGS.get(sentinel, sentinel), sentinel != USAGE_API_KEY
     warning = login_warning(acc, now, warn_days)
@@ -604,6 +606,42 @@ def status_tag(
     if age is not None:
         return f"stale {countdown_text(age)}", False
     return None
+
+
+def key_tag(acc: AccountSnapshot) -> str:
+    """An API key by its fingerprint: ``key ••AbCd`` (never the key)."""
+    return f"key ••{acc.key_tail}" if acc.key_tail else "key"
+
+
+def key_cell(
+    acc: AccountSnapshot, width: int, *, now: float, palette: Palette, hint: bool = True
+) -> Text:
+    """What an API key has in place of quota bars: ``out of credit`` (red),
+    ``$12.30 left of $50 since Oct 1 ███▌░░`` against a budget, else its
+    spend this month."""
+    state = acc.key_state if isinstance(acc.key_state, api_keys.KeyState) else api_keys.KeyState()
+    cell = Text(no_wrap=True)
+    blocked = state.blocked(now)
+    left = state.left(now)
+    if blocked:
+        cell.append(blocked, style=palette.sev_crit)
+        if state.exhausted and hint:
+            cell.append("  ⏎ after a top-up", style=palette.muted)
+    elif left is not None and state.budget is not None:
+        used = 100.0 * (1.0 - left / state.budget.amount)
+        cell.append(f"${left:,.2f} left", style=palette.severity(used))
+        cell.append(f" of {state.budget.label()}", style=palette.muted)
+        bar_w = min(12, width - cell.cell_len - 1)
+        if bar_w >= 4:
+            cell.append(" ")
+            cell.append(projection_bar(used, None, bar_w, threshold=None, palette=palette))
+    elif state.spent_usd is not None:
+        cell.append(f"${state.spent_usd:,.2f}", style=palette.foreground)
+        cell.append(" this month" if state.budget is None else " spent", style=palette.muted)
+    else:
+        cell.append("metered · $ prices its spend", style=palette.muted)
+    cell.truncate(width)
+    return cell
 
 
 def row_tag(
@@ -864,6 +902,9 @@ def summary_line(
     if acc.disabled:
         name += " (off)"
     parts = [name]
+    if acc.kind == "api_key":
+        cell = key_cell(acc, 200, now=now, palette=Palette.DARK, hint=False)
+        return " · ".join([*parts, key_tag(acc), cell.plain])
     if acc.usage.sentinel is not None:
         parts.append(_SENTINEL_TAGS.get(acc.usage.sentinel, acc.usage.sentinel))
     else:
@@ -923,6 +964,12 @@ def account_row_text(
             tag, warn = status_tag(acc, now, login_warn_days, cadence) or ("", False)
         text.append(" " * _GAP + _fit(tag, layout.tag_w), style=palette.sev_warn if warn else palette.muted)
 
+    if acc.kind == "api_key":
+        width = sum(layout.window_w(label) + _GAP for label in layout.windows) + layout.forecast_w
+        text.append(" " * _GAP)
+        text.append(key_cell(acc, max(width, 24), now=now, palette=palette))
+        text.rstrip()
+        return text
     pcts = shown_windows(acc)
     if acc.usage.sentinel is not None:  # the tag says what is wrong
         text.rstrip()

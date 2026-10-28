@@ -781,6 +781,51 @@ class TestAccountRowText:
     def _row(self, *args, **kw):
         return self._text(*args, **kw).plain
 
+    def _key(self, state=None, tail="AbCd"):
+        acc = make_account(
+            2, kind="api_key", email="api-key-2@token.local",
+            entry=make_usage_at(None, sentinel=USAGE_API_KEY),
+        )
+        return dataclasses.replace(acc, key_tail=tail, key_state=state)
+
+    def test_an_api_key_shows_its_fingerprint_and_spend(self):
+        from claude_rotater import api_keys
+
+        now = time.time()
+        row = self._row(self._key(), now=now, tag_need=11)
+        assert "key ••AbCd" in row and "metered" in row and "api key" not in row
+        state = api_keys.KeyState(spent_usd=4.2, spent_since=now - 60)
+        assert "$4.20 this month" in self._row(self._key(state), now=now)
+
+    def test_an_api_key_against_its_budget(self):
+        from claude_rotater import api_keys
+
+        now = time.time()
+        budget = api_keys.Budget("topup", 50.0, now - 86400)
+        state = api_keys.KeyState(budget=budget, spent_usd=37.7, spent_since=budget.since)
+        row = self._row(self._key(state), now=now, width=140)
+        assert "$12.30 left of $50 since" in row and has_bar(row)
+        state = api_keys.KeyState(budget=budget, spent_usd=49.5, spent_since=budget.since)
+        assert "budget nearly spent ($0.50 left)" in self._row(self._key(state), now=now)
+
+    def test_an_exhausted_api_key_is_red_and_says_how_to_retry(self):
+        from claude_rotater import api_keys
+        from claude_rotater.tui.theme import Palette
+
+        state = api_keys.KeyState(exhausted_at=1.0, exhausted_reason=api_keys.OUT_OF_CREDIT)
+        text = self._text(self._key(state))
+        assert "out of credit  ⏎ after a top-up" in text.plain
+        span = next(s for s in text.spans if text.plain[s.start:s.end] == "out of credit")
+        assert str(span.style) == Palette.DARK.sev_crit
+
+    def test_an_api_keys_clipboard_line(self):
+        from claude_rotater import api_keys
+        from claude_rotater.tui.main import summary_line
+
+        state = api_keys.KeyState(exhausted_at=1.0, exhausted_reason=api_keys.OUT_OF_CREDIT)
+        line = summary_line(self._key(state), None, threshold=90, now=time.time())
+        assert line == "api-key-2@token.local · key ••AbCd · out of credit"
+
     def test_active_marker_and_pcts(self):
         row = self._row(make_account(1, active=True, entry=make_entry(62.0, 31.0), email="me@x.com"))
         assert row.startswith(" ● me@x.com")  # on duty, not under the cursor
