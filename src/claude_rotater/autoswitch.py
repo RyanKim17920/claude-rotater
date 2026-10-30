@@ -956,6 +956,8 @@ class AutoSwitchEngine:
         self.feed = feed
         self._feed_dirty = threading.Event()
         self._unhealthy_ticks = 0
+        # Why this profile's API keys can't take duty (logged on change).
+        self._keys_unavailable: str | None = None
         # Both set per tick: a known-reset sleep target, and whether a BLOCKED
         # outcome is static enough (truly exhausted / no candidates) to wait
         # longer than the normal interval.
@@ -2481,6 +2483,17 @@ class AutoSwitchEngine:
         ]
         if not keys:
             return []  # no clock read: the ranking owns this tick's "now"
+        from claude_rotater.paths import get_claude_config_home
+
+        why = api_key_mode.unavailable(get_claude_config_home())
+        if why != self._keys_unavailable:
+            if why:
+                _logger.warning("API keys stay off duty: %s", why)
+            self._keys_unavailable = why
+        if why:
+            # Nothing else is tried: rota never writes the CLI's own key
+            # login, which would sign this profile out of its subscription.
+            return []
         now = self.clock()
         states = api_keys.load(self.switcher.backup_dir)
         return [n for n in keys if not states.get(n, api_keys.KeyState()).blocked(now)]

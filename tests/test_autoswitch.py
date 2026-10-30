@@ -1991,6 +1991,47 @@ class TestApiKeyAccounts:
             "active-api-key"
         ]
 
+    @pytest.mark.parametrize("usage", [
+        {"1": 100, "2": 100}, {"1": 95, "2": 10}, {"1": 40, "2": 10},
+    ])
+    def test_the_keys_setting_changes_nothing_without_keys(self, tmp_path, usage):
+        seen = []
+        for include in (True, False):
+            home = tmp_path / str(include)
+            (home / ".claude").mkdir(parents=True)
+            with patch.dict(os.environ, {"HOME": str(home)}), \
+                    patch("pathlib.Path.home", return_value=home):
+                h = EngineHarness(home, include_api_key_accounts=include)
+                h.seed(1, "a@example.com")
+                h.seed(2, "b@example.com")
+                h.make_live("a@example.com", 1)
+                outcome = h.tick_with_usage({k: _usage(v) for k, v in usage.items()})
+                seen.append((outcome, h.active_number(), [type(e).__name__ for e in h.events]))
+        assert seen[0] == seen[1]
+
+    def test_a_shared_settings_file_keeps_keys_off_duty(self, temp_home):
+        from claude_rotater import profiles
+
+        h = EngineHarness(temp_home, include_api_key_accounts=True)
+        h.seed(1, "a@example.com")
+        h.seed(2, "key@token.local")
+        h.make_live("a@example.com", 1)
+        self._mark_api_key(h, 2)
+        # Another profile reads this profile's settings.json: a helper
+        # there would hand it the key too, and the CLI's own key login is
+        # never an option, so the key is no last resort here.
+        shared = temp_home / ".claude" / "settings.json"
+        shared.parent.mkdir(parents=True, exist_ok=True)
+        shared.write_text("{}\n", encoding="utf-8")
+        other = temp_home / ".claude-other"
+        other.mkdir()
+        (other / "settings.json").symlink_to(shared)
+        profiles.add("other", str(temp_home / "o" / ".rota"), str(other), [str(temp_home / "o")])
+        outcome = h.tick_with_usage({"1": _usage(100), "2": "api key"})
+        assert outcome is TickOutcome.BLOCKED
+        assert h.active_number() == 1
+        assert "apiKeyHelper" not in json.loads(shared.read_text(encoding="utf-8"))
+
     def test_exhausted_key_is_no_last_resort(self, temp_home):
         from claude_rotater import api_keys
 
