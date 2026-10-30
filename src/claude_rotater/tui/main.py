@@ -233,13 +233,49 @@ FEED_LABELS = {
 LATE_POLL_FACTOR = 2.0
 
 
+# Fetch failures that mean the server was out of reach, not that a login
+# or an account is at fault (oauth._classify_usage_error).
+UNREACHABLE_ERRORS = frozenset({"network", "timeout"})
+# A failure older than this says nothing about the network now.
+OFFLINE_RECENT_S = 30 * 60
+
+
+def offline_since(accounts: Sequence[AccountSnapshot], now: float) -> float | None:
+    """When rota last reached the server, while it cannot now; else None.
+
+    Offline means the newest usage fetch of any account failed for want of
+    a network (DNS, timeout) more recently than any reading arrived. During
+    such a spell the CLI cannot refresh its short-lived access token either,
+    which is not a dead login: both resume once the network is back.
+    Returns the newest good reading's time (0.0 when there is none)."""
+    failed = [
+        a.usage.last_attempt_at for a in accounts
+        if a.kind == "oauth" and not a.disabled
+        and a.usage.last_error in UNREACHABLE_ERRORS
+        and a.usage.last_attempt_at is not None
+        and (a.usage.fetched_at is None or a.usage.last_attempt_at > a.usage.fetched_at)
+    ]
+    if not failed or now - max(failed) > OFFLINE_RECENT_S:
+        return None
+    reached = max((a.usage.fetched_at for a in accounts if a.usage.fetched_at is not None), default=0.0)
+    return reached if reached < max(failed) else None
+
+
 def freshness_label(
     feed: str | None, polled_at: float | None, *, now: float, late_after: float,
+    offline: float | None = None,
 ) -> tuple[str, str, str] | None:
     """(glyph, palette role, words) for how fresh the usage on the page is:
     ``● live`` while the statusline feeds it, ``↻ 2m ago`` (the newest
     reading from any source) otherwise, amber once that is late. A
-    statusline that never fed, or is not set up, says so instead."""
+    statusline that never fed, or is not set up, says so instead.
+    ``offline`` (:func:`offline_since`) outranks them all: ``offline since
+    18:34`` says plainly why nothing is fresh, so it is not read as a
+    login dying."""
+    if offline is not None:
+        if offline <= 0:
+            return ("○", "sev_warn", "offline")
+        return ("○", "sev_warn", f"offline since {time.strftime('%H:%M', time.localtime(offline))}")
     if feed == "idle":
         if polled_at is None:
             return None
@@ -335,6 +371,7 @@ def status_text(
     login_failed: bool = False,
     polled_at: float | None = None,
     late_after: float = LATE_POLL_FACTOR * DEFAULT_CADENCE.spare_s,
+    offline: float | None = None,
 ) -> Text:
     """`` rota · work   auto on · stay: resets soonest (19h40m)   ● live``.
 
@@ -356,7 +393,7 @@ def status_text(
     head.append("  ")
     head.append_text(mode_label(status, palette))
     tail = Text(no_wrap=True)
-    label = freshness_label(feed, polled_at, now=now, late_after=late_after)
+    label = freshness_label(feed, polled_at, now=now, late_after=late_after, offline=offline)
     if label is not None:
         glyph, role, words = label
         style = getattr(palette, role)
@@ -1677,6 +1714,7 @@ class MainScreen(Screen):
                 default=None,
             ) if snap else None,
             late_after=LATE_POLL_FACTOR * self.app.cadence.spare_s,
+            offline=offline_since(snap.accounts, now) if snap else None,
         )
 
     def row_text(self, number: str, width: int) -> Text:

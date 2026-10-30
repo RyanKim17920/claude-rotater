@@ -4232,3 +4232,111 @@ def test_elsewhere_forecast_words():
     assert elsewhere_forecast(wide).text == "~Fable limit in 15h"  # would not fit
     assert elsewhere_forecast(Forecast("ok", "ok", "ok", False)).text == "used elsewhere"
     assert elsewhere_forecast(None).short == "elsewhere"
+
+
+class TestOfflineIsNotADeadLogin:
+    """A network outage reads as "offline", and a lapsed access token as
+    routine: on Oct 29 a two-hour DNS outage showed a red "token expired" on
+    the account on duty in both profiles, and the owner logged in again to
+    two logins that were fine (the CLI refreshed both the minute the network
+    came back)."""
+
+    def _failed(self, number, *, reached, tried, error="network", active=False):
+        entry = UsageEntry(
+            last_good={"five_hour": {"pct": 40.0, "resets_at": _iso_in(7200)}},
+            fetched_at=reached, age_s=None if reached is None else time.time() - reached,
+            last_attempt_at=tried, last_error=error,
+        )
+        return make_account(number, active=active, entry=entry)
+
+    def test_expired_access_token_is_a_calm_tag(self):
+        from claude_rotater.json_output import USAGE_TOKEN_EXPIRED
+        from claude_rotater.tui.main import status_tag
+
+        acc = make_account(1, active=True, entry=make_entry(sentinel=USAGE_TOKEN_EXPIRED))
+        assert status_tag(acc, time.time(), 3) == ("refreshes on use", False)
+
+    def test_dead_login_tag_is_still_a_warning(self):
+        from claude_rotater.json_output import USAGE_RELOGIN_REQUIRED
+        from claude_rotater.tui.main import status_tag
+
+        acc = make_account(1, entry=make_entry(sentinel=USAGE_RELOGIN_REQUIRED))
+        assert status_tag(acc, time.time(), 3) == ("re-login", True)
+
+    def test_every_fetch_failing_on_the_network_is_offline_since_the_last_reading(self):
+        from claude_rotater.tui.main import offline_since
+
+        now = time.time()
+        accs = [self._failed(1, reached=now - 3600, tried=now - 60, active=True),
+                self._failed(2, reached=now - 4000, tried=now - 300, error="timeout")]
+        assert offline_since(accs, now) == now - 3600
+
+    def test_a_reading_after_the_failure_means_online(self):
+        from claude_rotater.tui.main import offline_since
+
+        now = time.time()
+        accs = [self._failed(1, reached=now - 3600, tried=now - 600),
+                make_account(2, entry=make_usage_at(now - 30))]
+        assert offline_since(accs, now) is None
+
+    @pytest.mark.parametrize("error", ["http-401", "http-429", "bad-response", None])
+    def test_other_failures_are_not_offline(self, error):
+        from claude_rotater.tui.main import offline_since
+
+        now = time.time()
+        assert offline_since([self._failed(1, reached=now - 3600, tried=now - 60, error=error)], now) is None
+
+    def test_an_old_failure_says_nothing_about_now(self):
+        from claude_rotater.tui.main import OFFLINE_RECENT_S, offline_since
+
+        now = time.time()
+        accs = [self._failed(1, reached=now - 2 * OFFLINE_RECENT_S, tried=now - OFFLINE_RECENT_S - 60)]
+        assert offline_since(accs, now) is None
+
+    def test_disabled_and_key_accounts_do_not_count(self):
+        from claude_rotater.tui.main import offline_since
+
+        now = time.time()
+        off = dataclasses.replace(self._failed(1, reached=now - 3600, tried=now - 60), disabled=True)
+        key = dataclasses.replace(self._failed(2, reached=now - 3600, tried=now - 60), kind="api_key")
+        assert offline_since([off, key], now) is None
+
+    def test_never_reached_is_plain_offline(self):
+        from claude_rotater.tui.main import freshness_label, offline_since
+
+        now = time.time()
+        reached = offline_since([self._failed(1, reached=None, tried=now - 60)], now)
+        assert reached == 0.0
+        assert freshness_label("idle", None, now=now, late_after=1200, offline=reached) == (
+            "○", "sev_warn", "offline")
+
+    def test_header_says_offline_since_and_not_the_age(self):
+        from claude_rotater.tui.main import status_text
+
+        now = time.time()
+        reached = now - 3600
+        clock = time.strftime("%H:%M", time.localtime(reached))
+        from claude_rotater.tui.main import AutoStatus
+
+        head = status_text(AutoStatus(running=True), now=now, width=120, feed="live",
+                           polled_at=reached, offline=reached).plain
+        assert head.rstrip().endswith(f"○ offline since {clock}")
+        assert "live" not in head and "ago" not in head and "login" not in head
+
+    def test_replay_oct_29_outage(self):
+        """Both accounts' last good reading at 18:30, every poll since then
+        failing with "network", the CLI's access token lapsed at 19:30: the
+        row is calm, the header says offline, no login alert fires."""
+        from claude_rotater import login_alerts
+        from claude_rotater.json_output import USAGE_TOKEN_EXPIRED
+        from claude_rotater.tui.main import offline_since, status_tag
+
+        now = time.time()
+        active = make_account(4, active=True, entry=UsageEntry(
+            sentinel=USAGE_TOKEN_EXPIRED, fetched_at=now - 7800, last_attempt_at=now - 3700,
+            last_error="network"))
+        spare = self._failed(1, reached=now - 7500, tried=now - 120)
+        accs = [active, spare]
+        assert offline_since(accs, now) == now - 7500
+        assert status_tag(active, now, 3) == ("refreshes on use", False)
+        assert login_alerts.collect(login_alerts.states_from_snapshot(accs), now, 3) == []
