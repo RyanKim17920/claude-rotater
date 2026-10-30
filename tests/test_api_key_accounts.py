@@ -20,7 +20,6 @@ from claude_rotater import session as session_mod
 from claude_rotater.credentials import (
     CLAUDE_CODE_KEYCHAIN_SERVICE,
     CLAUDE_CODE_MANAGED_KEYCHAIN_SERVICE,
-    approved_form,
     looks_like_api_key,
 )
 from unittest.mock import patch
@@ -71,6 +70,11 @@ def _read_global_config() -> dict:
     return json.loads(get_global_config_path().read_text(encoding="utf-8"))
 
 
+def _global_config_or_empty() -> dict:
+    path = get_global_config_path()
+    return json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
+
+
 # ---------------------------------------------------------------------------
 # Kind detection helpers
 # ---------------------------------------------------------------------------
@@ -109,10 +113,6 @@ class TestKindDetection:
     )
     def test_non_api_key(self, value):
         assert looks_like_api_key(value) is False
-
-    def test_approved_form_is_last_20(self):
-        assert approved_form(API_KEY) == API_KEY[-20:]
-        assert len(approved_form(API_KEY)) == 20
 
 
 # ---------------------------------------------------------------------------
@@ -284,57 +284,48 @@ class TestWriteCredentialsHelper:
         s = _linux_switcher()
         path = temp_home / ".claude" / "settings.json"
         path.write_text(json.dumps({"apiKeyHelper": "~/bin/my-key"}), encoding="utf-8")
-        s._write_credentials(API_KEY)
+        with pytest.raises(CredentialWriteError, match="not rota's"):
+            s._write_credentials(API_KEY)
         assert _settings()["apiKeyHelper"] == "~/bin/my-key"
-        # fell back to the managed key instead
-        assert _read_global_config()["primaryApiKey"] == API_KEY
+        assert "primaryApiKey" not in _global_config_or_empty()
         s._write_credentials(OAUTH_JSON)
         assert _settings()["apiKeyHelper"] == "~/bin/my-key"
 
 
-class TestWriteCredentialsManagedFallback:
-    """Where the helper would reach another profile, the key goes in as
-    Claude Code's managed-key login instead (new sessions; clears OAuth)."""
+class TestWriteCredentialsNoManagedFallback:
+    """Where the helper would reach another profile, the switch is refused
+    and nothing is written: never Claude Code's own key login, which would
+    sign the profile out of its subscription."""
 
-    def test_shared_settings_fall_back_linux(self, temp_home: Path):
+    def test_shared_settings_refuse_linux(self, temp_home: Path):
         from claude_rotater import api_key_mode
 
         _share_settings_with_a_second_profile(temp_home)
         s = _linux_switcher()
         cred_file = get_credentials_path()
         cred_file.write_text(OAUTH_JSON, encoding="utf-8")
+        before = _settings()
 
-        s._write_credentials(API_KEY)
-        assert "apiKeyHelper" not in _settings()
-        cfg = _read_global_config()
-        assert cfg["primaryApiKey"] == API_KEY
-        assert API_KEY[-20:] in cfg["customApiKeyResponses"]["approved"]
-        assert not cred_file.exists()
-        state = api_key_mode.mode(s.backup_dir)
-        assert state.on and state.via == "managed" and "shared" in state.note
-
-        s._write_credentials(OAUTH_JSON)
+        with pytest.raises(CredentialWriteError, match="shared with"):
+            s._write_credentials(API_KEY)
+        assert _settings() == before
+        assert "primaryApiKey" not in _global_config_or_empty()
         assert cred_file.read_text(encoding="utf-8") == OAUTH_JSON
-        assert "primaryApiKey" not in _read_global_config()
         assert not api_key_mode.mode(s.backup_dir).on
+        assert api_key_mode.read_key(s.backup_dir) is None
 
-    def test_shared_settings_fall_back_macos(self, temp_home, block_real_keychain):
+    def test_shared_settings_refuse_macos(self, temp_home, block_real_keychain):
         _share_settings_with_a_second_profile(temp_home)
         store = block_real_keychain
         s = _macos_switcher()
         acct = macos_keychain.keychain_account_name()
         store.set_password(CLAUDE_CODE_KEYCHAIN_SERVICE, acct, OAUTH_JSON)
 
-        s._write_credentials(API_KEY)
-        assert store.get_password(CLAUDE_CODE_MANAGED_KEYCHAIN_SERVICE, acct) == API_KEY
-        assert store.get_password(CLAUDE_CODE_KEYCHAIN_SERVICE, acct) is None
-        cfg = _read_global_config()
-        assert API_KEY[-20:] in cfg["customApiKeyResponses"]["approved"]
-        assert "primaryApiKey" not in cfg
-
-        s._write_credentials(OAUTH_JSON)
+        with pytest.raises(CredentialWriteError, match="shared with"):
+            s._write_credentials(API_KEY)
         assert store.get_password(CLAUDE_CODE_MANAGED_KEYCHAIN_SERVICE, acct) is None
         assert store.get_password(CLAUDE_CODE_KEYCHAIN_SERVICE, acct) == OAUTH_JSON
+        assert "primaryApiKey" not in _global_config_or_empty()
 
     def test_read_credentials_returns_active_key(self, temp_home: Path):
         s = _linux_switcher()

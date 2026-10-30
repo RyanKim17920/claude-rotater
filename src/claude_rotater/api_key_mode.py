@@ -16,8 +16,10 @@ removing it: the OAuth login is never touched, so returning is instant.
 - A settings.json shared with another profile (one file, two config dirs,
   as a symlink makes it) would hand that profile the key too: Claude Code
   has no per-config-dir override and no fall-through from a failing
-  helper. :func:`activate` then refuses and says why, and the caller falls
-  back to the managed-key login (new sessions only).
+  helper (a helper that prints nothing is an error, not the OAuth login).
+  :func:`unavailable` says so, :func:`activate` refuses, and nothing else
+  is tried: rota never writes Claude Code's own key login, which would
+  sign the profile out of its subscription.
 
 Import-light: ``rota key`` runs on Claude Code's request path.
 """
@@ -45,14 +47,10 @@ OVERRIDE_ENV = ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN")
 @dataclass(frozen=True)
 class KeyMode:
     """This profile's key mode: on since ``since`` with the key ending in
-    ``tail``, or off (``since`` None). ``via`` is "helper" (running sessions
-    follow) or "managed" (the fallback login; new sessions only, ``note``
-    says why)."""
+    ``tail``, or off (``since`` None)."""
 
     since: float | None
     tail: str = ""
-    via: str = "helper"
-    note: str = ""
 
     @property
     def on(self) -> bool:
@@ -153,29 +151,20 @@ def mode(data_dir: Path) -> KeyMode:
     since = raw.get("since") if isinstance(raw, dict) else None
     if isinstance(since, bool) or not isinstance(since, (int, float)):
         return KeyMode(None)
-    text = {k: raw.get(k) if isinstance(raw.get(k), str) else "" for k in ("tail", "via", "note")}
-    return KeyMode(float(since), text["tail"], text["via"] or "helper", text["note"])
+    tail = raw.get("tail")
+    return KeyMode(float(since), tail if isinstance(tail, str) else "")
 
 
-def _write_mode(data_dir: Path, key: str, now: float, via: str = "helper", note: str = "") -> None:
+def _write_mode(data_dir: Path, key: str, now: float) -> None:
     previous = mode(data_dir)
     since = previous.since if previous.on and previous.tail == key[-4:] else now
     paths_dir = Path(data_dir)
     paths_dir.mkdir(parents=True, exist_ok=True)
     target = paths_dir / STATE_FILENAME
     tmp = target.with_name(f".{STATE_FILENAME}.{os.getpid()}.tmp")
-    state = {"since": since, "tail": key[-4:], "via": via, "note": note}
+    state = {"since": since, "tail": key[-4:]}
     tmp.write_text(json.dumps(state), encoding="utf-8")
     os.replace(tmp, target)
-
-
-def note_managed(data_dir: Path, key: str, why: str, *, now: float | None = None) -> None:
-    """Record that ``key`` went in as the managed-key login because the
-    helper could not be used (``why``)."""
-    try:
-        _write_mode(data_dir, key, time.time() if now is None else now, "managed", why)
-    except OSError:
-        pass
 
 
 def _clear_mode(data_dir: Path) -> None:
@@ -234,16 +223,47 @@ def _sharers(config_dir: Path) -> list[tuple[str, str]]:
     settings.json is this one's file."""
     from claude_rotater import profiles
 
-    mine = os.path.realpath(settings_file(config_dir))
+    mine = settings_file(config_dir)
     known = [(str(default_config_dir()), str(paths.get_default_backup_root()))]
     known += [(p.claude_config_dir, p.data_dir) for p in profiles.load()]
     out: list[tuple[str, str]] = []
     for cfg, data in known:
         if _norm(cfg) == _norm(config_dir):
             continue
-        if os.path.realpath(settings_file(Path(os.path.expanduser(cfg)))) == mine:
+        if os.path.realpath(settings_file(Path(os.path.expanduser(cfg)))) == os.path.realpath(mine):
             out.append((_norm(cfg), _norm(data)))
     return out
+
+
+def shared_with(config_dir: Path) -> list[str]:
+    """Config dirs of the other profiles reading ``config_dir``'s
+    settings.json that are not on rota's key helper themselves: a helper
+    written there would reach their sessions too."""
+    ss = _settings()
+    try:
+        settings, _ = ss.read_settings(settings_file(config_dir))
+    except ss.StatuslineSetupError:
+        settings = {}
+    keyed = {_norm(c) for c, _ in helper_routes(settings.get(SETTINGS_KEY))}
+    return [cfg for cfg, _data in _sharers(config_dir) if cfg not in keyed]
+
+
+def unavailable(config_dir: Path) -> str | None:
+    """Why ``config_dir``'s sessions cannot be handed an API key through
+    rota's helper, or None when they can. Changes nothing."""
+    ss = _settings()
+    path = settings_file(config_dir)
+    try:
+        settings, _ = ss.read_settings(path)
+    except ss.StatuslineSetupError as e:
+        return str(e)
+    current = settings.get(SETTINGS_KEY)
+    if current and not is_ours(current):
+        return f"{path} already has an apiKeyHelper that is not rota's"
+    others = shared_with(config_dir)
+    if others:
+        return f"settings.json is shared with {others[0]}, which would get the key too"
+    return None
 
 
 def activate(
@@ -256,6 +276,9 @@ def activate(
 ) -> str | None:
     """Switch ``config_dir``'s sessions to ``key``. Returns None when done,
     else why it could not be (nothing was changed then)."""
+    why = unavailable(config_dir)
+    if why is not None:
+        return why
     ss = _settings()
     path = settings_file(config_dir)
     try:
@@ -263,13 +286,7 @@ def activate(
     except ss.StatuslineSetupError as e:
         return str(e)
     current = settings.get(SETTINGS_KEY)
-    if current and not is_ours(current):
-        return f"{path} already has an apiKeyHelper that is not rota's"
     routes = _routes_without(helper_routes(current), config_dir)
-    keyed = {_norm(c) for c, _ in routes}
-    for cfg, _data in _sharers(config_dir):
-        if cfg not in keyed:
-            return f"settings.json is shared with {cfg}, which would get the key too"
     try:
         store_key(data_dir, key, keychain)
     except (OSError, *macos_keychain.KEYCHAIN_ERRORS) as e:

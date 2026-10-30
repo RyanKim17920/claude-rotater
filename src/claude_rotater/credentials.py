@@ -279,16 +279,6 @@ def merge_shared_credential_fields(
     return json.dumps(composed)
 
 
-def approved_form(api_key: str) -> str:
-    """The value Claude Code stores in ``customApiKeyResponses.approved``.
-
-    Mirrors Claude Code's ``normalizeApiKeyForConfig`` (``apiKey.slice(-20)``): the
-    last 20 chars. Storing anything else makes Claude Code's "is this key approved?"
-    check miss and re-prompt the user to approve the key.
-    """
-    return api_key.strip()[-20:]
-
-
 class _StoreHost(Protocol):
     """The live configuration view ``CredentialStore`` reads from its owner.
 
@@ -818,16 +808,14 @@ class CredentialStore:
     def _write_credentials(self, credentials: str) -> None:
         """Write Claude Code's active credential, enforcing a single auth axis.
 
-        Detects the kind from the payload (raw ``sk-ant-…`` key vs OAuth JSON) and
-        mirrors Claude Code's own ``saveApiKey``/``removeApiKey``: activating one axis
-        clears the other so a stale credential can't shadow the switch.
+        Detects the kind from the payload (raw ``sk-ant-…`` key vs OAuth JSON).
 
         - **OAuth** → write the OAuth credential (see ``_write_oauth_credentials``),
           then clear any managed key (Keychain "Claude Code" + ``primaryApiKey``;
-          ``approved`` left intact, as ``removeApiKey`` does).
-        - **API key** → record ``key[-20:]`` in ``approved`` and store the key (macOS
-          Keychain "Claude Code" when usable, else ``~/.claude.json`` ``primaryApiKey``),
-          then clear the OAuth credential (Keychain item + ``.credentials.json``).
+          ``approved`` left intact, as ``removeApiKey`` does) and rota's key
+          helper, so neither can shadow the switch.
+        - **API key** → rota's ``apiKeyHelper`` only (see ``_activate_api_key``);
+          the OAuth credential and Claude Code's own key login stay untouched.
 
         Runs under claude's secure-storage write lock (re-entrant: the switch
         paths already hold it across their read of the live store), so a
@@ -854,104 +842,19 @@ class CredentialStore:
         """Hand the key to this profile's sessions through rota's
         apiKeyHelper, leaving the OAuth login in place (the helper outranks
         it, and switching back is then instant). When the helper cannot be
-        used here, fall back to Claude Code's managed-key login, which new
-        sessions pick up and which clears the OAuth login."""
+        used here, nothing is written: rota never falls back to Claude
+        Code's own key login, which would sign the profile out of its
+        subscription.
+
+        Raises:
+            CredentialWriteError: The helper cannot be used here (why).
+        """
         why = api_key_mode.activate(
             api_key, self._data_dir(), get_claude_config_home(),
             keychain=self._use_keychain(),
         )
-        if why is None:
-            self._clear_managed_key()
-            return
-        self._host._logger.warning(
-            f"API key through apiKeyHelper not possible ({why}); "
-            "using the managed-key login, which new sessions pick up"
-        )
-        self._write_managed_credentials(api_key)
-        api_key_mode.note_managed(self._data_dir(), api_key, why)
-
-    def _write_managed_credentials(self, api_key: str) -> None:
-        """Activate a managed API key, then clear OAuth (mutual exclusion).
-
-        Always records ``key[-20:]`` in ``customApiKeyResponses.approved`` (Claude
-        Code does this on every platform, even on Keychain success — otherwise it
-        re-prompts to approve the key). Stores the key in the macOS Keychain when
-        usable, else ``~/.claude.json`` ``primaryApiKey`` (matching ``saveApiKey``'s
-        keychain-then-config fallback). Finally clears the OAuth credential.
-
-        Raises:
-            CredentialWriteError: If persisting the key fails.
-        """
-        wrote_to_keychain = False
-        # The unsuffixed "Claude Code" item belongs to the default profile
-        # (same gate as the managed-key read): a custom profile keeps its key
-        # in its own config's primaryApiKey rather than another profile's item.
-        if _active_profile_is_default() and self._use_keychain():
-            try:
-                self._kc_call(
-                    macos_keychain.set_password,
-                    CLAUDE_CODE_MANAGED_KEYCHAIN_SERVICE,
-                    macos_keychain.keychain_account_name(),
-                    api_key,
-                )
-            except macos_keychain.KEYCHAIN_ERRORS as e:
-                # _kc_call flipped routing to file mode; fall back to config below.
-                self._host._logger.warning(
-                    f"Managed-key Keychain write failed, falling back to config: {e}"
-                )
-            else:
-                wrote_to_keychain = True
-
-        approved = approved_form(api_key)
-
-        def _mutate(cfg: dict) -> None:
-            responses = cfg.get("customApiKeyResponses")
-            if not isinstance(responses, dict):
-                responses = {}
-            approved_list = responses.get("approved")
-            if not isinstance(approved_list, list):
-                approved_list = []
-            if approved not in approved_list:
-                approved_list.append(approved)
-            responses["approved"] = approved_list
-            responses.setdefault("rejected", [])
-            cfg["customApiKeyResponses"] = responses
-            if wrote_to_keychain:
-                # Keychain holds the key; keep it out of plaintext config.
-                cfg.pop("primaryApiKey", None)
-            else:
-                cfg["primaryApiKey"] = api_key
-
-        try:
-            self._update_global_config(_mutate)
-        except CredentialWriteError:
-            raise
-        except Exception as e:
-            raise CredentialWriteError(f"Failed to write managed API key: {e}")
-
-        # Mutual exclusion: drop the OAuth credential so it can't shadow the key.
-        self._clear_oauth_credential()
-        if (
-            self._host.platform == Platform.MACOS
-            and not wrote_to_keychain
-            and _active_profile_is_default()
-        ):
-            # (A custom profile never reads the managed item, so nothing can
-            # shadow its primaryApiKey and there is no residual to pin over.)
-            # Same stale-Keychain resurrection guard as the OAuth path: the key
-            # fell back to plaintext ``primaryApiKey`` while a stale "Claude Code"
-            # Keychain item may remain, and managed-key reads check the Keychain
-            # before ``primaryApiKey``. Pin file mode so a cooldown re-probe can't
-            # read that residual over the fresh fallback value.
-            #
-            # ``residual_cleared=False``: the item that would shadow here is the
-            # MANAGED one, and nothing deleted it — ``_clear_oauth_credential``
-            # above removes the OAuth item, a different service. Unverified, so
-            # the conservative verdict is the true one.
-            self._pin_file_mode(residual_cleared=False)
-        self._last_active_credentials_backend = (
-            "keychain" if wrote_to_keychain else "file"
-        )
+        if why is not None:
+            raise CredentialWriteError(f"API key not switched in: {why}")
 
     def _clear_managed_key(self) -> None:
         """Clear any active managed API key (Claude Code ``removeApiKey`` semantics).

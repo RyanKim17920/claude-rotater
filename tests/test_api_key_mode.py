@@ -66,7 +66,7 @@ class TestActivate:
         assert _run_helper(helper, None) == (0, KEY + "\n")  # unset = ~/.claude
         assert _run_helper(helper, pc) == (0, KEY + "\n")
         assert akm.active_key(pd, pc) == KEY
-        assert akm.mode(pd) == akm.KeyMode(100.0, KEY[-4:], "helper", "")
+        assert akm.mode(pd) == akm.KeyMode(100.0, KEY[-4:])
 
     def test_reactivating_the_same_key_keeps_its_start(self, homes):
         pc, pd, _, _ = homes
