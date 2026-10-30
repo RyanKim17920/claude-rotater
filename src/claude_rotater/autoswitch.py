@@ -968,6 +968,9 @@ class AutoSwitchEngine:
         # ``_idle_hold_since`` survives across ticks (elapsed-time cap);
         # ``_idle_hold_slow`` is per-tick like ``_blocked_wait_long``.
         self._idle_hold_since: float | None = None
+        # The hold the over-long warning was logged for, so it is logged once
+        # per hold rather than every tick (it filled rota.log 400x an outage).
+        self._idle_hold_warned: float | None = None
         self._idle_hold_slow = False
         # One-shot typo guard for ``autoswitch.model``: resolved (and possibly
         # warned) on the first tick where every relevant account has readable
@@ -1390,11 +1393,13 @@ class AutoSwitchEngine:
                     return TickOutcome.NO_ACTION
                 # Held far longer than any idle nap should need. Still not a
                 # failover by itself: only a confirmed dead login is (below).
-                _logger.warning(
-                    "Active token expired and owned for over %.0f minutes; "
-                    "failing over only if the login is confirmed dead",
-                    IDLE_HOLD_MAX_S / 60,
-                )
+                if self._idle_hold_warned != self._idle_hold_since:
+                    self._idle_hold_warned = self._idle_hold_since
+                    _logger.warning(
+                        "Active token expired and owned for over %.0f minutes; "
+                        "failing over only if the login is confirmed dead",
+                        IDLE_HOLD_MAX_S / 60,
+                    )
             else:
                 self._idle_hold_since = None
             dead = self._active_login_dead(active_value, active_entry)

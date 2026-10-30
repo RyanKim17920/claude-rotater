@@ -683,6 +683,20 @@ class TestIdleHold:
         assert harness.active_number() == 1
         assert not [e for e in harness.events if isinstance(e, SwitchEvent)]
 
+    def test_over_long_hold_is_logged_once_per_hold(self, harness, caplog):
+        healthy = {"1": _usage(50), "2": _usage(10), "3": _usage(20)}
+        harness.tick_with_usage(self._HELD)
+        harness.clock.advance(IDLE_HOLD_MAX_S + 1)
+        with caplog.at_level("WARNING", logger="claude_rotater.autoswitch"):
+            for _ in range(20):  # an outage's worth of ticks
+                harness.tick_with_usage(self._HELD)
+                harness.clock.advance(15)
+            assert sum("owned for over" in r.message for r in caplog.records) == 1
+            harness.tick_with_usage(healthy)  # the token refreshed: the hold ends
+            harness.tick_with_usage(self._HELD)
+            harness.clock.advance(IDLE_HOLD_MAX_S + 1)
+            harness.tick_with_usage(self._HELD)
+            assert sum("owned for over" in r.message for r in caplog.records) == 2
 
     def test_recovery_resets_the_hold_clock(self, harness):
         healthy = {"1": _usage(50), "2": _usage(10), "3": _usage(20)}
