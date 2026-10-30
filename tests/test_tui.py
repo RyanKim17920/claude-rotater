@@ -401,7 +401,7 @@ class TestFormatting:
         # active account, not that the user must re-login.
         assert (
             tui_data.sentinel_label(USAGE_TOKEN_EXPIRED)
-            == "token expired — refresh deferred this pass; retries automatically"
+            == "access token lapsed (normal) — the CLI refreshes it on next use"
         )
         from claude_rotater.switcher import SENTINEL_NOTES
 
@@ -422,7 +422,7 @@ class TestFormatting:
             age_s=720.0,
         )
         card = account_card_text(make_account(1, active=True, entry=entry), 80).plain
-        assert "token expired — refresh deferred this pass; retries automatically" in card
+        assert "access token lapsed (normal) — the CLI refreshes it on next use" in card
         assert "last seen 53% used" in card
 
         no_history = account_card_text(
@@ -890,8 +890,14 @@ class TestAccountRowText:
         assert any(SEV_WARN in s for s in styles_of(text, "re-login"))
 
     def test_other_sentinel_is_its_tag(self):
-        row = self._row(make_account(1, entry=make_entry(sentinel=USAGE_TOKEN_EXPIRED)), tag_need=13)
-        assert USAGE_TOKEN_EXPIRED in row and "%" not in row
+        from claude_rotater.json_output import USAGE_NO_CREDENTIALS
+
+        row = self._row(make_account(1, entry=make_entry(sentinel=USAGE_NO_CREDENTIALS)), tag_need=14)
+        assert USAGE_NO_CREDENTIALS in row and "%" not in row
+
+    def test_lapsed_access_token_says_it_refreshes(self):
+        row = self._row(make_account(1, entry=make_entry(sentinel=USAGE_TOKEN_EXPIRED)), tag_need=16)
+        assert "refreshes on use" in row and USAGE_TOKEN_EXPIRED not in row and "%" not in row
 
     def test_no_usage_says_unknown(self):
         assert "usage unknown" in self._row(make_account(1, entry=UsageEntry()))

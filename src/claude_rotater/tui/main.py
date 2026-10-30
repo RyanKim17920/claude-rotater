@@ -80,7 +80,11 @@ from claude_rotater.estimator import (
     first_crossing,
     is_relevant_window,
 )
-from claude_rotater.json_output import USAGE_API_KEY, USAGE_RELOGIN_REQUIRED
+from claude_rotater.json_output import (
+    USAGE_API_KEY,
+    USAGE_RELOGIN_REQUIRED,
+    USAGE_TOKEN_EXPIRED,
+)
 from claude_rotater.models import AccountSnapshot, AccountsSnapshot
 from claude_rotater.poll_policy import DEFAULT_CADENCE, PollCadence
 from claude_rotater.tui import data
@@ -559,7 +563,15 @@ def account_name(acc: AccountSnapshot) -> str:
     return f"{acc.alias} ({acc.email})" if acc.alias else acc.email
 
 
-_SENTINEL_TAGS = {USAGE_RELOGIN_REQUIRED: "re-login"}
+_SENTINEL_TAGS = {
+    USAGE_RELOGIN_REQUIRED: "re-login",
+    # The short-lived access token lapsed while the CLI was idle or offline;
+    # it refreshes it on the next request. Not a login problem, so it is not
+    # a warning: a red "token expired" sent owners to log in again for nothing.
+    USAGE_TOKEN_EXPIRED: "refreshes on use",
+}
+# Sentinels that mean all is well, just unmeasured for now.
+_CALM_SENTINELS = frozenset({USAGE_API_KEY, USAGE_TOKEN_EXPIRED})
 
 
 # A reading is only flagged stale once it is overdue for its own cadence:
@@ -598,7 +610,7 @@ def status_tag(
     if acc.kind == "api_key":
         return key_tag(acc), False
     if sentinel is not None:
-        return _SENTINEL_TAGS.get(sentinel, sentinel), sentinel != USAGE_API_KEY
+        return _SENTINEL_TAGS.get(sentinel, sentinel), sentinel not in _CALM_SENTINELS
     warning = login_warning(acc, now, warn_days)
     if warning is not None:
         return warning, True

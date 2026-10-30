@@ -3163,7 +3163,7 @@ class TestActiveAccountRefresh:
             lock.rmdir()
 
         output = capsys.readouterr().out
-        assert "token expired" in output
+        assert "access token lapsed" in output
 
     def test_expired_active_is_no_longer_statically_gated(
         self, temp_home: Path, mock_claude_config: Path, sample_sequence_data: dict
