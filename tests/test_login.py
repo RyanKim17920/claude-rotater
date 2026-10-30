@@ -209,10 +209,16 @@ class TestLoginSuccess:
         assert fake.config_dirs[0] == fake.config_dirs[1]
         assert Path(fake.config_dirs[0]).parent == login_mod.stage_root(switcher.backup_dir)
 
-    def test_console_and_email_pass_through(self, switcher, block_real_keychain):
+    def test_email_passes_through(self, switcher, block_real_keychain):
         fake = FakeClaude()
-        login_account(switcher, runner=fake, method="console", email="new@example.com")
-        assert fake.calls[0][0][1:] == ["auth", "login", "--console", "--email", "new@example.com"]
+        login_account(switcher, runner=fake, email="new@example.com")
+        assert fake.calls[0][0][1:] == ["auth", "login", "--claudeai", "--email", "new@example.com"]
+
+    def test_a_console_login_is_refused(self, switcher, block_real_keychain):
+        fake = FakeClaude()
+        with pytest.raises(LoginError, match="Unknown login method"):
+            login_account(switcher, runner=fake, method="console")
+        assert fake.calls == []
 
     def test_existing_account_gets_credentials_replaced_in_place(self, switcher, platform, block_real_keychain):
         # Slot 2 exists with a dead lineage and a strike; re-login replaces it.

@@ -6,7 +6,7 @@ in a throwaway profile instead:
 
 1. create a private temp dir under ``<backup>/logins/`` and export it,
    verbatim, as ``CLAUDE_CONFIG_DIR`` (auth-override env vars dropped);
-2. run ``claude auth login --claudeai`` (or ``--console``) attached to the
+2. run ``claude auth login --claudeai`` attached to the
    terminal, so the browser / paste-code flow works;
 3. confirm with ``claude auth status --json``;
 4. capture the staged profile with ``add_account(source_dir=...)``: the
@@ -44,7 +44,9 @@ from claude_rotater.session import AUTH_OVERRIDE_ENV_VARS, delete_macos_keychain
 if TYPE_CHECKING:
     from claude_rotater.switcher import ClaudeAccountSwitcher
 
-LOGIN_METHODS = ("claudeai", "console")
+# claude.ai only: a Console login creates the CLI's own API-key login and
+# signs every claude.ai login on the machine out, not just the stage's.
+LOGIN_METHODS = ("claudeai",)
 STAGE_DIRNAME = "logins"
 STALE_STAGE_S = 3600.0
 STATUS_TIMEOUT_S = 20.0
