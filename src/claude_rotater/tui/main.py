@@ -1426,6 +1426,7 @@ KEY_COLUMNS: tuple[tuple[KeyGroup, ...], ...] = (
             ("m", "auto / manual"),
             ("c", "config"),
             ("s", "statusline feed"),
+            ("S", "own settings.json"),
         )),
     ),
 )
@@ -1494,6 +1495,7 @@ class MainScreen(Screen):
         Binding("Y", "copy_table", show=False),
         Binding("h", "toggle_long", show=False),
         Binding("s", "statusline", show=False),
+        Binding("S", "split_settings", show=False),
         Binding("f", "refresh_full", show=False),
         Binding("question_mark", "help", show=False),
         Binding("dollar_sign", "open_costs", show=False),
@@ -1908,6 +1910,9 @@ class MainScreen(Screen):
 
     def action_statusline(self) -> None:
         self.app.action_statusline()
+
+    def action_split_settings(self) -> None:
+        self.app.confirm_split()
 
     def action_refresh_full(self) -> None:
         self.app.action_refresh_full()

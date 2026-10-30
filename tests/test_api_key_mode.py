@@ -200,3 +200,109 @@ class TestKeyCommand:
         pc, pd, _, _ = homes
         akm.activate(KEY, pd, pc, keychain=False)
         assert (os.stat(pd / akm.KEY_FILENAME).st_mode & 0o777) == 0o600
+
+
+def _share(pc: Path, wc: Path, wd: Path, text: str = '{"theme": "dark"}\n') -> None:
+    (pc / "settings.json").write_text(text, encoding="utf-8")
+    (wc / "settings.json").symlink_to(pc / "settings.json")
+    profiles.add("work", str(wd), str(wc), [str(wd.parent)])
+
+
+class TestAvailability:
+    def test_own_file_is_available(self, homes):
+        pc, _, _, _ = homes
+        assert akm.unavailable(pc) is None
+        assert akm.shared_with(pc) == []
+
+    def test_a_shared_file_is_not(self, homes):
+        pc, _, wc, wd = homes
+        _share(pc, wc, wd)
+        assert akm.shared_with(wc) == [str(pc)]
+        assert "shared with" in akm.unavailable(wc)
+        assert "shared with" in akm.unavailable(pc)
+
+    def test_a_sharer_already_on_the_helper_does_not_block(self, homes):
+        pc, pd, wc, wd = homes
+        _share(pc, wc, wd)
+        settings = {"apiKeyHelper": akm.helper_command([(pc, pd)])}
+        (pc / "settings.json").write_text(json.dumps(settings), encoding="utf-8")
+        assert akm.unavailable(wc) is None
+
+    def test_a_foreign_helper_blocks(self, homes):
+        pc, _, _, _ = homes
+        (pc / "settings.json").write_text('{"apiKeyHelper": "~/bin/k"}', encoding="utf-8")
+        assert "not rota's" in akm.unavailable(pc)
+
+
+class TestSplit:
+    def test_replaces_the_link_with_a_copy(self, homes):
+        pc, _, wc, wd = homes
+        _share(pc, wc, wd)
+        akm.split_settings(wc, wd)
+        mine = wc / "settings.json"
+        assert not mine.is_symlink()
+        assert mine.read_text(encoding="utf-8") == '{"theme": "dark"}\n'
+        assert (pc / "settings.json").read_text(encoding="utf-8") == '{"theme": "dark"}\n'
+        assert akm.shared_with(wc) == [] and akm.unavailable(wc) is None
+        backups = list((wd / "statusline-backups").glob("settings.*.json"))
+        assert [b.read_text(encoding="utf-8") for b in backups] == ['{"theme": "dark"}\n']
+
+    def test_a_hard_link_splits_too(self, homes):
+        pc, _, wc, wd = homes
+        (pc / "settings.json").write_text("{}\n", encoding="utf-8")
+        os.link(pc / "settings.json", wc / "settings.json")
+        profiles.add("work", str(wd), str(wc), [str(wd.parent)])
+        assert akm.shared_with(wc) == [str(pc)]
+        akm.split_settings(wc, wd)
+        assert os.stat(wc / "settings.json").st_ino != os.stat(pc / "settings.json").st_ino
+
+    def test_the_copy_feeds_this_profile(self, homes):
+        from claude_rotater import feed, statusline_setup as ss
+
+        pc, pd, wc, wd = homes
+        command = ss.wrap("~/bin/line.sh", ss.feed_command(pd))
+        _share(pc, wc, wd, json.dumps({"statusLine": {"type": "command", "command": command}}))
+        akm.split_settings(wc, wd)
+        copied = _settings(wc)["statusLine"]["command"]
+        assert ss.feed_target(copied, wc) == wd
+        assert feed.route_for(str(wc), ss._routes(copied)) == str(wd)
+        assert _settings(pc)["statusLine"]["command"] == command  # the original is untouched
+
+    def test_refuses_what_is_not_shared(self, homes):
+        from claude_rotater.statusline_setup import StatuslineSetupError
+
+        pc, pd, _, _ = homes
+        (pc / "settings.json").write_text("{}\n", encoding="utf-8")
+        with pytest.raises(StatuslineSetupError, match="not shared"):
+            akm.split_settings(pc, pd)
+
+    def test_refuses_one_folder_under_two_names(self, homes, temp_home):
+        from claude_rotater.statusline_setup import StatuslineSetupError
+
+        pc, _, _, _ = homes
+        (pc / "settings.json").write_text("{}\n", encoding="utf-8")
+        alias = temp_home / ".claude-alias"
+        alias.symlink_to(pc)
+        data = temp_home / "alias" / ".rota"
+        profiles.add("alias", str(data), str(alias), [str(data.parent)])
+        with pytest.raises(StatuslineSetupError, match="same folder"):
+            akm.split_settings(alias, data)
+        assert (pc / "settings.json").read_text(encoding="utf-8") == "{}\n"
+
+
+def test_a_shared_file_only_ever_routes_every_sharer(homes, temp_home):
+    """Whatever order three profiles sharing one settings.json try key mode
+    in, the file never carries a helper that leaves one of them out."""
+    pc, pd, wc, wd = homes
+    tc, td = temp_home / ".claude-third", temp_home / "third" / ".rota"
+    tc.mkdir()
+    _share(pc, wc, wd, "{}\n")
+    (tc / "settings.json").symlink_to(pc / "settings.json")
+    profiles.add("third", str(td), str(tc), [str(td.parent)])
+    trio = [(pc, pd), (wc, wd), (tc, td)]
+    for cfg, data in trio + trio[::-1]:
+        akm.activate(KEY, data, cfg, keychain=False)
+        helper = _settings(pc).get("apiKeyHelper")
+        if helper is not None:
+            routed = {c for c, _ in akm.helper_routes(helper)}
+            assert routed == {str(c) for c, _ in trio}, routed

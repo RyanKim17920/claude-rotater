@@ -45,6 +45,16 @@ def add_key(args) -> dict:
     return {"number": number}
 
 
+def split_settings(args) -> dict:
+    """The TUI's ``S`` answered yes: ``api_key_mode.split_settings``."""
+    from claude_rotater import api_key_mode
+    from claude_rotater.paths import get_claude_config_home
+
+    sw = _switcher()
+    api_key_mode.split_settings(get_claude_config_home(), sw.backup_dir)
+    return {}
+
+
 def login(args) -> dict:
     """The TUI's ``l``: StagedLogin.authenticate, then import_into, then
     cleanup, in the order ``RotaApp.start_login``/``_import_login`` run them."""
@@ -113,6 +123,7 @@ def main(argv: list[str]) -> int:
     p = sub.add_parser("add-current")
     p.add_argument("--slot", type=int)
     sub.add_parser("add-key")
+    sub.add_parser("split-settings")
     p = sub.add_parser("login")
     p.add_argument("--method", default="claudeai")
     p.add_argument("--email")
@@ -122,7 +133,7 @@ def main(argv: list[str]) -> int:
     args = parser.parse_args(argv)
     # A hung step dumps every thread's stack instead of timing out silently.
     faulthandler.dump_traceback_later(60, exit=True)
-    step = {"add-current": add_current, "add-key": add_key, "login": login, "tui": tui}[args.step]
+    step = {"add-current": add_current, "add-key": add_key, "split-settings": split_settings, "login": login, "tui": tui}[args.step]
     try:
         out = {"ok": True, **step(args)}
     except BaseException as e:  # noqa: BLE001 -- reported to the test

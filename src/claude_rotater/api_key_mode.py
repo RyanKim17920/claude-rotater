@@ -19,7 +19,8 @@ removing it: the OAuth login is never touched, so returning is instant.
   helper (a helper that prints nothing is an error, not the OAuth login).
   :func:`unavailable` says so, :func:`activate` refuses, and nothing else
   is tried: rota never writes Claude Code's own key login, which would
-  sign the profile out of its subscription.
+  sign the profile out of its subscription. :func:`split_settings` gives
+  the profile a file of its own when the user asks for it.
 
 Import-light: ``rota key`` runs on Claude Code's request path.
 """
@@ -230,9 +231,19 @@ def _sharers(config_dir: Path) -> list[tuple[str, str]]:
     for cfg, data in known:
         if _norm(cfg) == _norm(config_dir):
             continue
-        if os.path.realpath(settings_file(Path(os.path.expanduser(cfg)))) == os.path.realpath(mine):
+        if _same_file(settings_file(Path(os.path.expanduser(cfg))), mine):
             out.append((_norm(cfg), _norm(data)))
     return out
+
+
+def _same_file(a: Path, b: Path) -> bool:
+    """One file under two names: a symlink, a hard link, or one folder
+    under two names. Paths that don't exist yet compare by where they
+    would resolve."""
+    try:
+        return os.path.samefile(a, b)
+    except OSError:
+        return os.path.realpath(a) == os.path.realpath(b)
 
 
 def shared_with(config_dir: Path) -> list[str]:
@@ -331,6 +342,47 @@ def deactivate(data_dir: Path, config_dir: Path) -> None:
                 return
     forget_key(data_dir)
     _clear_mode(data_dir)
+
+
+def split_settings(config_dir: Path, data_dir: Path) -> None:
+    """Give ``config_dir`` a settings.json of its own, on the user's word:
+    the shared file (a symlink, or a hard link) is backed up into
+    ``data_dir`` and replaced by a copy of its content, so a key helper
+    written there later reaches this profile only. The other profiles keep
+    the original file. A rota statusline in the copy gets this profile's
+    feed route if it lacks one. Raises ``StatuslineSetupError`` (nothing
+    changed) when the file is not shared or cannot be split."""
+    ss = _settings()
+    path = settings_file(config_dir)
+    sharers = _sharers(config_dir)
+    if not sharers:
+        raise ss.StatuslineSetupError(f"{path} is not shared with another profile")
+    mine = os.path.realpath(config_dir)
+    for cfg, _data in sharers:
+        if os.path.realpath(cfg) == mine:
+            raise ss.StatuslineSetupError(
+                f"{config_dir} and {cfg} are the same folder; a copy would be shared too"
+            )
+    settings, raw = ss.read_settings(path)
+    if raw is None:
+        raise ss.StatuslineSetupError(f"{path} does not exist")
+    try:
+        ss._backup(path, raw, Path(data_dir))
+        mode_bits = os.stat(path).st_mode & 0o777
+        tmp = Path(config_dir) / f".settings.json.{os.getpid()}.split.tmp"
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, mode_bits or 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(raw)
+        os.replace(tmp, path)  # replaces the link itself, not its target
+    except OSError as e:
+        raise ss.StatuslineSetupError(f"cannot split {path}: {e}") from e
+    command = ss._command_of(settings)
+    split = ss._split_feed(command) if command else None
+    if split is not None and ss._norm(ss.feed_target(command, Path(config_dir))) != ss._norm(data_dir):
+        head, words, tail = split
+        words += ss._route_args(Path(config_dir), Path(data_dir))
+        settings["statusLine"] = {**settings["statusLine"], "command": head + words + tail}
+        ss.write_settings(path, settings, raw, Path(data_dir))
 
 
 def routed_here(data_dir: Path, config_dir: Path) -> bool:

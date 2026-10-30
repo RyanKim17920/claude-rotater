@@ -136,6 +136,7 @@ revoke the stored refresh token.
 | `$` / `esc` | costs: today / 7d / 30d, one chart cycled with `←`/`→` (all, 30 days, week, day, then the $ per 1% trend: 5h over 7d per account with its trendline) filtered with `↑`/`↓` by account (all, stacked by account, each `#N` alone; on the trend one account) and with `tab`/`shift+tab` by model (all, each model alone), the two combined, `t` dollars or tokens, per-account cost and ~$ per 1%, per-model cost, token counts (input, cache write, cache read, output) and trend with a total (`r` reprices today, `y`/`Y` copy); needs `ccusage`, or Node/Bun to fetch it |
 | `?` / `esc` | every key, grouped, in place of the charts, and back |
 | `s` | set up or remove the statusline feed |
+| `S` | give this profile its own settings.json (API keys need one when it is shared) |
 | `c` | settings (`↑`/`↓` select, `←`/`→` change, digits or `enter` exact value, `esc` back) |
 | `ctrl+t` | theme |
 | `q` / `ctrl+c` | quit |
@@ -161,9 +162,14 @@ with a bar, or *out of credit* in red.
 - **Switching.** rota points Claude Code's `apiKeyHelper` (in
   `settings.json`) at `rota key`, which prints the key, so running chats
   pick it up within seconds and going back to a subscription just removes
-  it. When `settings.json` is shared with another profile not yet on a key,
-  rota falls back to Claude Code's own API-key login, which only new chats
-  use; the bottom line says so, and also when `ANTHROPIC_API_KEY` or another
+  it. The OAuth login is never touched, and rota never uses Claude Code's
+  own API-key login (it would sign the profile out of its subscription).
+  When `settings.json` is shared with another profile (one file behind a
+  symlink), a helper there would reach that profile too, so this profile's
+  keys stay off duty and the bottom line says
+  `keys need their own settings for … — press S to split`; `S` replaces the
+  link with a copy of the file, after a backup, and only when you confirm.
+  The bottom line also warns when `ANTHROPIC_API_KEY` or another
   `apiKeyHelper` would win over rota's.
 - **Out of credit.** Anthropic has no API for a key's balance; when it runs
   out the API refuses, and Claude Code writes that into the chat transcript

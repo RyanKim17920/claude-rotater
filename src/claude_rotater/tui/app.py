@@ -50,6 +50,7 @@ from claude_rotater.login import StagedLogin
 from claude_rotater.logging_config import redact
 from claude_rotater.token_refresh import RefreshEvent, TokenRefresher
 from claude_rotater.models import AccountsSnapshot
+from claude_rotater.printer import abbreviate_path
 from claude_rotater.settings import (
     AutoSwitchSettings,
     UiSettings,
@@ -517,18 +518,20 @@ class RotaApp(App):
         self.call_from_thread(self._show_key_note, self._key_note_for(snap))
 
     def _key_note_for(self, snap: AccountsSnapshot) -> str:
-        """Worker thread: why an API key on duty may not reach the chats
-        ("" when it does, or no key is on duty)."""
-        if not any(a.is_active and a.kind == "api_key" for a in snap.accounts):
+        """Worker thread: why this profile's API keys can't reach the chats
+        ("" when they can, or there are none)."""
+        keys = [a for a in snap.accounts if a.kind == "api_key"]
+        if not keys or load_accounts_settings(self.switcher.backup_dir).oauth_only:
             return ""
         from claude_rotater.paths import get_claude_config_home
 
-        found = api_key_mode.overrides(get_claude_config_home())
-        if found:
-            return f"Claude Code ignores rota's API key here: {', '.join(found)}"
-        mode = api_key_mode.mode(self.switcher.backup_dir)
-        if mode.on and mode.via == "managed":
-            return f"API key in new chats only: {mode.note or 'no apiKeyHelper here'}"
+        config = get_claude_config_home()
+        if any(a.is_active for a in keys):
+            found = api_key_mode.overrides(config)
+            if found:
+                return f"Claude Code ignores rota's API key here: {', '.join(found)}"
+        if api_key_mode.shared_with(config):
+            return f"keys need their own settings for {abbreviate_path(str(config))} — press S to split"
         return ""
 
     def _show_key_note(self, note: str) -> None:
@@ -876,6 +879,35 @@ class RotaApp(App):
                 f"Remove account {number}",
                 partial(self.switcher.remove_account, number, assume_yes=True),
             )
+
+    def confirm_split(self) -> None:
+        """``S``: give this profile a settings.json of its own, so an API key
+        can reach its chats without reaching the profile it shares with."""
+        from claude_rotater.paths import get_claude_config_home
+
+        config = get_claude_config_home()
+        others = api_key_mode.shared_with(config)
+        if not others:
+            self.say("this profile's settings.json is its own already")
+            return
+        self.prompt.confirm(
+            f"copy settings.json into {abbreviate_path(str(config))}? "
+            f"later edits in {abbreviate_path(others[0])} stop reaching it",
+            partial(self._on_split_confirm, config),
+            yes="split",
+        )
+
+    def _on_split_confirm(self, config, confirmed: bool) -> None:
+        if not confirmed:
+            return
+        try:
+            api_key_mode.split_settings(config, self.switcher.backup_dir)
+        except statusline_setup.StatuslineSetupError as e:
+            self.say(str(e), "warn")
+            return
+        self.say(f"{abbreviate_path(str(config))} has its own settings.json now")
+        self._key_note = ""
+        self.request_refresh()
 
     ADD_CHOICES = (
         Choice("b", "browser", "login"),

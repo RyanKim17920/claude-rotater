@@ -10,7 +10,7 @@ import sys
 from tests.e2e.sandbox import ACCOUNTS, DRIVE, Sandbox, explain
 from tests.e2e.test_e2e import seed
 
-ALICE = ACCOUNTS[0]
+ALICE, BOB = ACCOUNTS[0], ACCOUNTS[1]
 FAKE_KEY = "sk-ant-api03-" + "e2efakekey" * 9 + "ZZ"
 
 
@@ -56,3 +56,50 @@ def test_switching_to_a_key_and_back(sandbox: Sandbox):
     assert status.get("apiKeySource") in (None, "none"), status
     assert status.get("email") == ALICE.email, status
     assert _key_items(sandbox) == []
+
+
+def test_a_shared_settings_file_keeps_keys_off_until_split(sandbox: Sandbox):
+    """Two profiles reading one settings.json (a symlink): a key in one
+    would reach the other, so the switch is refused and both stay on their
+    subscription logins; after the user's split it goes through, and the
+    other profile still runs on its own login."""
+    work_root = sandbox.home / "work"
+    work_root.mkdir()
+    work_config = sandbox.config_dir(".claude-work")
+    added = sandbox.rota("profile", "add", "work", "--root", str(work_root),
+                         "--data-dir", str(work_root / ".rota"), "--config-dir", work_config)
+    assert added.returncode == 0, explain(added)
+    seed(sandbox, None, (ALICE,))
+    seed(sandbox, work_config, (BOB,), cwd=str(work_root))
+    shared = sandbox.home / ".claude" / "settings.json"
+    shared.write_text(json.dumps({"theme": "dark"}))
+    (sandbox.home / ".claude-work" / "settings.json").symlink_to(shared)
+
+    key = sandbox.run([sys.executable, str(DRIVE), "add-key"], env=sandbox.env(),
+                      input=FAKE_KEY + "\n", cwd=str(work_root))
+    assert key.returncode == 0, explain(key)
+    number = json.loads(key.stdout.splitlines()[-1])["number"]
+
+    refused = sandbox.rota("switch", number, cwd=str(work_root))
+    assert refused.returncode != 0, explain(refused)
+    assert "shared with" in refused.stdout + refused.stderr, explain(refused)
+    assert json.loads(shared.read_text()) == {"theme": "dark"}
+    for config, account in ((None, ALICE), (work_config, BOB)):
+        status = sandbox.claude_status(config)
+        assert status.get("email") == account.email, status
+        assert status.get("apiKeySource") in (None, "none"), status
+        assert "primaryApiKey" not in sandbox.read_global_config(config)
+    assert sandbox.live_token(work_config) == BOB.access_token
+
+    split = sandbox.drive("split-settings", cwd=str(work_root))
+    assert split.returncode == 0, explain(split)
+    mine = sandbox.home / ".claude-work" / "settings.json"
+    assert not mine.is_symlink() and json.loads(mine.read_text()) == {"theme": "dark"}
+
+    switched = sandbox.rota("switch", number, cwd=str(work_root))
+    assert switched.returncode == 0, explain(switched)
+    assert sandbox.claude_status(work_config).get("apiKeySource") == "apiKeyHelper"
+    personal = sandbox.claude_status(None)
+    assert personal.get("email") == ALICE.email, personal
+    assert personal.get("apiKeySource") in (None, "none"), personal
+    assert json.loads(shared.read_text()) == {"theme": "dark"}

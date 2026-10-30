@@ -2335,11 +2335,48 @@ class TestMainPage:
             "Claude Code ignores rota's API key here: ANTHROPIC_API_KEY is set"
         )
         monkeypatch.setattr(api_key_mode, "overrides", lambda cfg: [])
-        monkeypatch.setattr(api_key_mode, "mode", lambda d: api_key_mode.KeyMode(
-            1.0, "AbCd", "managed", "settings.json is shared with another profile"))
-        assert app._key_note_for(snap).startswith("API key in new chats only: settings.json")
+        monkeypatch.setattr(api_key_mode, "shared_with", lambda cfg: [])
+        assert app._key_note_for(snap) == ""
         idle = AccountsSnapshot(active_number=None, accounts=(make_account(1),), taken_at=0.0)
         assert app._key_note_for(idle) == ""
+
+    async def test_keys_behind_a_shared_settings_file_point_at_the_split(
+        self, tmp_path, monkeypatch
+    ):
+        from claude_rotater import api_key_mode
+
+        key = make_account(4, kind="api_key")
+        snap = AccountsSnapshot(active_number="1", accounts=(make_account(1, active=True), key),
+                                taken_at=0.0)
+        app = make_app(three_accounts(tmp_path))
+        monkeypatch.setattr(api_key_mode, "shared_with", lambda cfg: ["/x/.claude"])
+        note = app._key_note_for(snap)
+        assert note.startswith("keys need their own settings for ")
+        assert note.endswith("— press S to split")
+        no_keys = AccountsSnapshot(active_number="1", accounts=(make_account(1, active=True),),
+                                   taken_at=0.0)
+        assert app._key_note_for(no_keys) == ""
+
+    async def test_split_asks_first_and_only_on_yes(self, tmp_path, monkeypatch):
+        from claude_rotater import api_key_mode
+
+        calls: list = []
+        monkeypatch.setattr(api_key_mode, "shared_with", lambda cfg: ["/x/.claude"])
+        monkeypatch.setattr(api_key_mode, "split_settings", lambda cfg, data: calls.append(cfg))
+        app = make_app(three_accounts(tmp_path))
+        async with app.run_test(size=(120, 40)) as pilot:
+            await settle(pilot)
+            await pilot.press("S")
+            await pilot.pause()
+            assert prompt_plain(app).startswith("copy settings.json into ")
+            await pilot.press("n")
+            await settle(pilot)
+            assert calls == []
+            await pilot.press("S")
+            await pilot.pause()
+            await pilot.press("y")
+            await settle(pilot)
+            assert len(calls) == 1
 
     async def test_token_paste_and_overwrite_question(self, tmp_path):
         from textual import events
