@@ -14,6 +14,9 @@ Windows.
   limit in 15h`); the highlighted account's 5h/7d charts below, and long-term history
   behind `h`. Estimates are marked by `~`, a lighter tint or a dotted line
   and coloured by outcome: green under the threshold, yellow close, red over.
+  A plan without a 5h limit (its readings carry 7d alone) shows a dim `no 5h`
+  and its 7d chart alone; forecasts, pre-empt and pace treat it as unlimited,
+  and it comes back by itself if the plan reports 5h again.
 - Costs behind `$`, priced by [ccusage](https://github.com/ryoppippi/ccusage)
   from your local transcripts and run only when you open the page. Spend is
   credited to the account that was logged in at the time, from the switch

@@ -762,14 +762,18 @@ def window_cell(
     threshold: float | None,
     palette: Palette,
     projected: float | None = None,
+    unlimited: bool = False,
 ) -> Text:
     """One window column, exactly ``layout.window_w(label)`` cells:
     ``5h  58% ███▌░░░▕ ↻ 1h20m``. The pct, the solid fill and the countdown
     are measured; the hatch is the projection to the reset, coloured by its
-    outcome. An unused window drops its countdown; an absent one is blank. A stale reading keeps its
-    colours: the row's tag says how old it is."""
+    outcome. An unused window drops its countdown; an absent one is blank,
+    or a dim ``no 5h`` when the plan has no such limit (``unlimited``). A
+    stale reading keeps its colours: the row's tag says how old it is."""
     width = layout.window_w(label)
     cell = Text(no_wrap=True)
+    if measured is None and unlimited:
+        cell.append(f"no {label}", style=f"dim {palette.muted}")
     if measured is not None:  # an absent window is blank, label and all
         cell.append(label, style=palette.muted)
         pct, resets_at = measured
@@ -960,6 +964,8 @@ def summary_line(
         windows = shown_windows(acc)
         if not windows:
             parts.append("no reading yet")
+        elif oauth.no_five_hour(acc.usage.last_good):
+            parts.append("no 5h limit")
         for label, (pct, resets_at) in windows.items():
             if label not in PRIMARY_WINDOWS and pct <= 0:
                 continue
@@ -1023,6 +1029,7 @@ def account_row_text(
     if acc.usage.sentinel is not None:  # the tag says what is wrong
         text.rstrip()
         return text
+    no_5h = oauth.no_five_hour(acc.usage.last_good)
     if not pcts:
         text.append(" " * _GAP + "usage unknown", style=palette.muted)
         return text
@@ -1036,7 +1043,7 @@ def account_row_text(
         text.append(
             window_cell(
                 label, measured, layout, now=now, threshold=threshold, palette=palette,
-                projected=projected,
+                projected=projected, unlimited=no_5h and label == "5h",
             )
         )
     fc = forecast(acc, est, threshold=threshold, now=now, models=models) if layout.forecast_w else None
