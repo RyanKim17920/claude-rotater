@@ -716,6 +716,15 @@ def test_the_trend_shows_the_5h_panel_over_the_7d_one():
 # -- the $ per 1% views ------------------------------------------------------------------
 
 
+def report_with_trend(no_limit: dict[str, float]) -> CostReport:
+    """One account with a 5h and 7d trend whose plan dropped the windows in
+    ``no_limit`` (window -> when)."""
+    base = report()
+    acc = AccountLine("1", 10.0, trend_fig(5.0, change=0.2, steady=False), trend_fig(21.0),
+                      dict(no_limit))
+    return CostReport(**{**base.__dict__, "accounts": (acc,)})
+
+
 def trend_report(**figs) -> CostReport:
     base = report()
     accounts = tuple(AccountLine(n, 10.0, f, None) for n, f in figs.items())

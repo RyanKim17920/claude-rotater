@@ -29,7 +29,7 @@ import os
 import re
 import time
 from collections.abc import Callable, Iterable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from claude_rotater import api_keys, attribution, costs, profiles
@@ -291,6 +291,9 @@ class AccountLine:
     cost: float  # attributed spend over the range
     per_5h: dpp.PerPct | None
     per_7d: dpp.PerPct | None
+    # window -> when the plan stopped having it ("5h" on plans without a 5h
+    # limit): its $ per 1% is history up to then
+    no_limit: dict[str, float] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -329,10 +332,13 @@ def build_report(
     spans: Sequence[Span],
     now: float,
     per_pct: dict[str, dict[str, dpp.PerPct | None]] | None = None,
+    ended: dict[str, dict[str, float]] | None = None,
 ) -> CostReport:
     """The view's numbers; ``per_pct`` maps account numbers to their
-    ``{"5h": ..., "7d": ...}`` figures."""
+    ``{"5h": ..., "7d": ...}`` figures, ``ended`` to the windows their plan
+    no longer has (``UsageHistory.ended``)."""
     per_pct = per_pct or {}
+    ended = ended or {}
     lo = costs.range_start(now)
     rows = [r for r in cache.rows if lo <= r.slot <= now]
     midnights = [costs.day_start(now, back) for back in range(costs.RANGE_DAYS - 1, -1, -1)]
@@ -387,7 +393,8 @@ def build_report(
     for key in {*per_account, *per_pct} - {UNATTRIBUTED}:
         figures = per_pct.get(key, {})
         accounts.append(AccountLine(key, per_account.get(key, 0.0),
-                                    figures.get("5h"), figures.get("7d")))
+                                    figures.get("5h"), figures.get("7d"),
+                                    dict(ended.get(key, {}))))
     accounts.sort(key=lambda a: (-a.cost, a.number))
     hour_starts = [first_hour + i * HOUR_S for i in range(RECENT_HOURS)]
     archived: dict[float, dict[Cell, float]] = {}
@@ -517,7 +524,17 @@ class CostSource:
         numbers = {identity: number for number, identity in identities.items()}
         mine = profile_spend(cache, sources, spans, numbers, now)
         record_key_spend(self.backup_dir, mine, now)
-        return build_report(cache, sources, spans, now, self._per_pct(mine, identities, now))
+        return build_report(cache, sources, spans, now, self._per_pct(mine, identities, now),
+                            self._ended(identities))
+
+    def _ended(self, identities: dict[str, Identity]) -> dict[str, dict[str, float]]:
+        if self.history is None:
+            return {}
+        try:
+            return self.history.ended(identities)
+        except Exception as e:  # history is best effort
+            _logger.warning(f"costs: windows ended unknown: {e!r}")
+            return {}
 
     def cached(self, identities: dict[str, Identity]) -> CostResult:
         """The last priced report, without running ccusage (None if never)."""

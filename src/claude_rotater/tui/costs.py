@@ -722,7 +722,9 @@ def trend_chart(report: CostReport, label: str, width: int, height: int,
         color = colors[acc.number]
         style = f"dim {color}" if p.fit.provisional else color
         start = min(columns[acc.number])
-        for c in range(start, plot_w):
+        # A window the plan dropped has no trend past the drop.
+        stop = col_of(acc.no_limit[label]) + 1 if label in acc.no_limit else plot_w
+        for c in range(start, stop):
             t = t_lo + c / (plot_w - 1) * (t_hi - t_lo)
             cells[row_of(p.fit.at(t))][c] = (_FLAT if p.fit.steady else _SLOPE, style)
     for acc, _ in shown:
@@ -747,7 +749,11 @@ def trend_chart(report: CostReport, label: str, width: int, height: int,
         line.append("  ")
         value = per_pct_value(p)
         line.append(f"{value:<8} ", style=palette.foreground if p.sure else palette.sev_warn)
-        words, style = verdict(p, palette)
+        if label in acc.no_limit:
+            since = time.strftime("%m-%d", time.localtime(acc.no_limit[label]))
+            words, style = f"no {label} limit since {since}", f"dim {palette.muted}"
+        else:
+            words, style = verdict(p, palette)
         line.append(words, style=style)
         line.truncate(width, overflow="ellipsis")
         lines.append(line)
@@ -1029,7 +1035,10 @@ def account_lines(
         line.append(" " * (name_w - line.cell_len + 2))
         cost = acc.cost if acc is not None else report.unattributed
         cells = [(money(cost), 7, f"bold {palette.foreground}" if acc else palette.muted)]
-        for p in ((acc.per_5h, acc.per_7d) if acc is not None else ()):
+        for label, p in ((("5h", acc.per_5h), ("7d", acc.per_7d)) if acc is not None else ()):
+            if label in acc.no_limit:  # no such limit now: no figure to read
+                cells.append((f"no {label}", -9, f"dim {palette.muted}"))
+                continue
             style = palette.foreground if p is None or p.sure else palette.sev_warn
             cells.append((per_pct_value(p), -9, style))
         line.append_text(_row(cells))
