@@ -27,6 +27,7 @@ class FakeHistory:
         self.reads = 0
         self._slot_of: dict[tuple[str, str], str] = {}
         self.fail = False
+        self.gone: dict[str, dict[str, float]] = {}  # slot -> window -> ended at
 
     def series(self, identities: dict[str, tuple[str, str]]) -> dict[str, dict[str, list[Point]]]:
         self.reads += 1
@@ -40,6 +41,16 @@ class FakeHistory:
                 continue
             if num in self._series:
                 out[num] = self._series[num]
+        return out
+
+    def ended(self, identities: dict[str, tuple[str, str]]) -> dict[str, dict[str, float]]:
+        """Canned :meth:`UsageHistory.ended`: ``self.gone`` by slot."""
+        return {num: dict(w) for num, w in self.gone.items() if num in identities}
+
+    def live_series(self, identities: dict[str, tuple[str, str]]) -> dict[str, dict[str, list[Point]]]:
+        out = self.series(identities)
+        for num, gone in self.ended(identities).items():
+            out[num] = {k: v for k, v in out.get(num, {}).items() if k not in gone}
         return out
 
     def duty(self) -> dict[str, dict]:

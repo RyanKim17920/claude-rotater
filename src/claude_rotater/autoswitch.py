@@ -2699,7 +2699,7 @@ class AutoSwitchEngine:
         its reading."""
         out: dict[str, float] = {}
         try:
-            series = self.switcher.usage_history.series(self.switcher.usage_identities())
+            series = self.switcher.usage_history.live_series(self.switcher.usage_identities())
         except Exception as e:
             _logger.debug("landing positions unavailable: %r", e)
             return out
@@ -2747,7 +2747,7 @@ class AutoSwitchEngine:
         switch read off every other account's (``carried_burn``): what the
         estimator needs to read the account on duty the way the TUI does."""
         identities = self.switcher.usage_identities()
-        series = self.switcher.usage_history.series(identities)
+        series = self.switcher.usage_history.live_series(identities)
         carried = carried_burn(
             (s for num, s in series.items() if num != current), since=since
         )
@@ -2836,7 +2836,7 @@ class AutoSwitchEngine:
         typical = None
         try:
             identities = self.switcher.usage_identities()
-            series = self.switcher.usage_history.series(identities)
+            series = self.switcher.usage_history.live_series(identities)
             typical = typical_burn(series.values(), now=now)
             if activity is None:
                 activity = last_rise(series.get(current, {}))

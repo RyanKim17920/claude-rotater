@@ -582,6 +582,9 @@ class FakeHistory:
         return {num: {label: pts for (email, label), pts in self._p.items() if email == ident[0]}
                 for num, ident in identities.items()}
 
+    def ended(self, identities):
+        return {}
+
 
 def climb(reset: float, duration: float, pcts: list[float]) -> list[Point]:
     """Readings spread evenly through the window ending at ``reset``."""

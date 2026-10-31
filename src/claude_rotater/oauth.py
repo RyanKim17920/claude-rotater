@@ -531,6 +531,17 @@ def build_usage_result(data: dict) -> dict | None:
     return result if result else None
 
 
+def no_five_hour(usage: dict | None) -> bool:
+    """A reading of a plan with no 5-hour limit: it carries the 7d window
+    and no 5h one (the endpoint sends ``five_hour: null``). Such an account
+    is never held back by 5h, and has no 5h number to show."""
+    return (
+        isinstance(usage, dict)
+        and isinstance(usage.get("seven_day"), dict)
+        and not isinstance(usage.get("five_hour"), dict)
+    )
+
+
 def relevant_windows(
     usage: dict | None, models: Sequence[str] = ()
 ) -> list[tuple[str, float, str | None]]:

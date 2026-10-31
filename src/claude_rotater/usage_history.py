@@ -95,6 +95,10 @@ _NO_ROW_HOUR = 1 << 62
 # matter is a read-time question (estimator ``models``), and a config change
 # must not start from an empty history.
 _ALL_WINDOWS = ("all",)
+# Windows a plan can do without: some plans have no 5-hour limit, and their
+# readings carry the 7d window alone (the endpoint's ``five_hour`` is null,
+# the statusline's ``rate_limits`` has no ``five_hour``).
+OPTIONAL_WINDOWS = ("5h",)
 
 
 @dataclass(frozen=True)
@@ -512,6 +516,37 @@ class UsageHistory:
             out[num] = per_window
         return out
 
+    def live_series(
+        self, identities: dict[str, Identity]
+    ) -> dict[str, dict[str, list[Point]]]:
+        """:meth:`series` without the windows an account no longer has
+        (:meth:`ended`): what forecasts read, so the 5h history of an account
+        whose plan dropped its 5h limit projects nothing. The full series
+        stays for what looks back (costs, the long-term view)."""
+        full = self.series(identities)
+        for num, gone in self.ended(identities).items():
+            for label in gone:
+                full.get(num, {}).pop(label, None)
+        return full
+
+    def ended(self, identities: dict[str, Identity]) -> dict[str, dict[str, float]]:
+        """Per slot, ``{window: when it stopped being reported}`` for each
+        :data:`OPTIONAL_WINDOWS` window the account's newest reading leaves
+        out while it carries the 7d one: the plan has no such limit (now).
+        A later reading that carries it again brings it back. Slots with
+        nothing ended are left out."""
+        rows = self._read_rows()
+        out: dict[str, dict[str, float]] = {}
+        for num, identity in identities.items():
+            row = rows.get(_identity_key(identity))
+            if not self._matches(row, identity) or not isinstance(row.get("samples"), list):
+                continue
+            samples = sorted((s for s in row["samples"] if _valid_sample(s)), key=lambda s: s[0])
+            gone = _ended(samples)
+            if gone:
+                out[num] = gone
+        return out
+
     def attempts(self, num: str, identity: Identity, since: float) -> list[float]:
         """Attempt epochs for the account at or after ``since``, oldest
         first, whichever rota on this machine made them."""
@@ -773,6 +808,26 @@ def _merge_window(windows: list[list[float]], resets_at: float, pct: float) -> N
             window[1] = max(window[1], pct)
             return
     windows.append([resets_at, pct])
+
+
+def _ended(samples: list) -> dict[str, float]:
+    """``{window: when it stopped}`` for each optional window the newest of
+    the time-sorted ``samples`` leaves out while carrying 7d: the first
+    reading after the last that had it (the first reading at all when none
+    ever did)."""
+    if not samples or "7d" not in samples[-1][1]:
+        return {}
+    out: dict[str, float] = {}
+    for label in OPTIONAL_WINDOWS:
+        if label in samples[-1][1]:
+            continue
+        after = 0
+        for i in range(len(samples) - 1, -1, -1):
+            if label in samples[i][1]:
+                after = i + 1
+                break
+        out[label] = float(samples[after][0])
+    return out
 
 
 def _point(t: float, value: object) -> Point | None:

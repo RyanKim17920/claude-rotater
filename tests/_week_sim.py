@@ -27,6 +27,7 @@ waste less is to block less. Blocked hours are reported beside it.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from collections.abc import Iterable
 
 from claude_rotater import expiring_first as ef
 from claude_rotater import pace_strategy
@@ -50,6 +51,7 @@ class Acct:
     seven: float = 0.0
     five: float = 0.0
     five_reset: float | None = None
+    no_five: bool = False  # a plan without a 5h limit
 
     def roll(self, now: float) -> float:
         """Roll windows past ``now``; return the 7d points that expired."""
@@ -63,7 +65,7 @@ class Acct:
         return wasted
 
     def binding(self) -> float:
-        return max(self.seven, self.five)
+        return self.seven if self.no_five else max(self.seven, self.five)
 
     def view(self, now: float) -> ef.AccountView:
         return ef.AccountView(
@@ -71,8 +73,8 @@ class Acct:
             headroom=100.0 - self.binding(),
             seven_day_pct=self.seven,
             seven_day_reset=self.reset_at,
-            five_hour_pct=self.five if self.five_reset is not None else None,
-            five_hour_reset=self.five_reset,
+            five_hour_pct=self.five if self.five_reset is not None and not self.no_five else None,
+            five_hour_reset=None if self.no_five else self.five_reset,
         )
 
 
@@ -118,16 +120,20 @@ def simulate(
     switch_cost: float = 0.0,
     idle_aware: bool = False,
     min_dwell_s: float = 0.0,
+    no_five_hour: Iterable[int] = (),
 ) -> Result:
     """Replay ``weeks`` of work. ``start_seven`` gives each account's 7d use
     at the start (default all fresh) and ``start_active`` the account on duty.
     ``switch_cost``: 7d points a switch on warm caches costs the target.
     ``idle_aware``: tell pace whether the caches are cold. ``min_dwell_s``:
-    no proactive move sooner than this after the last switch."""
+    no proactive move sooner than this after the last switch.
+    ``no_five_hour``: indexes of accounts whose plan has no 5h limit."""
     accts = [
         Acct(str(i + 1), reset_at=off * H, seven=start_seven[i] if start_seven else 0.0)
         for i, off in enumerate(reset_offsets_h)
     ]
+    for i in no_five_hour:
+        accts[i].no_five = True
     active = accts[start_active]
     res = Result()
     switch_times: list[float] = []
@@ -141,7 +147,9 @@ def simulate(
             res.wasted += a.roll(t)
         want = demand(t, rate) * STEP_S / H
         if want > 0:
-            room = min(100.0 - active.seven, (100.0 - active.five) / FIVE_PER_SEVEN)
+            room = 100.0 - active.seven
+            if not active.no_five:
+                room = min(room, (100.0 - active.five) / FIVE_PER_SEVEN)
             got = max(0.0, min(want, room))
             if got > 0 and active.five_reset is None:
                 active.five_reset = t + FIVE_S

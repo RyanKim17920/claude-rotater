@@ -33,7 +33,7 @@ def fleet_estimates(
     (callers degrade to no estimates)."""
     from claude_rotater.feed_ingest import read_last_switch_at
 
-    series = history.series(identities)
+    series = history.live_series(identities)
     estimates = estimate_fleet(
         {num: series.get(num, {}) for num in identities},
         active=active, models=models, threshold=threshold,
