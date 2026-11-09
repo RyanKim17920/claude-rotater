@@ -3572,6 +3572,25 @@ class TestChartLines:
         assert lines[1].plain.startswith("5h") and "7d" in lines[1].plain
         assert all(len(line.plain) <= 120 for line in lines)
 
+    def test_title_names_the_estimated_next_bill(self):
+        import dataclasses
+
+        from claude_rotater.billing import bill_note
+        from claude_rotater.estimator import estimate_account
+        from claude_rotater.tui.main import chart_lines
+
+        now = time.time()
+        series = burn_history(now)["1"]
+        est = estimate_account(series, models=(), threshold=90.0, now=now)
+        acc = make_account(1, active=True, entry=make_entry(62.0, 31.0), email="me@x.com")
+        plain = chart_lines(acc, est, series, now=now, threshold=90.0, width=120, height=20)
+        assert "bills" not in plain[0].plain  # unknown start: nothing guessed
+        started = dataclasses.replace(acc, subscription_started_at=now - 40 * 86400)
+        title = chart_lines(started, est, series, now=now, threshold=90.0, width=120, height=20)[0]
+        note = bill_note(now - 40 * 86400, now)
+        assert note.startswith("bills ~") and title.plain.endswith(note)
+        assert has_color(title, note, Palette.DARK.muted)
+
     def test_off_account_title_says_off_like_its_row(self):
         from claude_rotater.tui.main import account_title
 

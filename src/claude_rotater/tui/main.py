@@ -62,7 +62,7 @@ from textual.css.scalar import Scalar
 from textual.screen import Screen
 from textual.widgets import ListItem, ListView, RichLog, Static
 
-from claude_rotater import api_keys, login_alerts, oauth, profiles
+from claude_rotater import api_keys, billing, login_alerts, oauth, profiles
 from claude_rotater.autoswitch import (
     ALERT_REASONS,
     AutoSwitchEvent,
@@ -1200,7 +1200,7 @@ def chart_lines(
 ) -> list[Text]:
     """The charts in at most ``height`` lines, or none when fewer than
     :func:`chart_min_rows` are spare: a line naming the account they belong
-    to, then the 5h and 7d charts."""
+    to (and when its plan likely bills next), then the 5h and 7d charts."""
     if acc is None or height < CHART_MIN_ROWS:
         return []
     blocks = chart_blocks(acc, est, series, now=now, threshold=threshold, palette=palette)
@@ -1209,6 +1209,9 @@ def chart_lines(
     title = Text(f"{CURSOR_MARK} ", style=f"bold {palette.accent}", no_wrap=True)
     title.append(account_title(acc, palette, ELSEWHERE if used_elsewhere(acc, est) else "",
                                color))
+    bills = billing.bill_note(acc.subscription_started_at, now)
+    if bills:
+        title.append(f"  {bills}", style=palette.muted)
     return [title, *_arrange(blocks, width=width, height=height - 1)]
 
 
