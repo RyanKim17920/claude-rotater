@@ -154,6 +154,8 @@ class AccountSnapshot:
     disabled: bool = False  # held out of auto-rotation (still a valid explicit target)
     # Epoch seconds when the stored login (refresh token) lapses; None = unknown.
     login_expires_at: float | None = None
+    # Epoch seconds the plan's subscription started (``billing``); None = unknown.
+    subscription_started_at: float | None = None
     # API-key accounts: the key's last four characters (its fingerprint on
     # screen, as the Console shows it) and rota's state for it
     # (``api_keys.KeyState``: out of credit, budget, spend).

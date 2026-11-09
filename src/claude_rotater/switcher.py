@@ -28,7 +28,7 @@ from claude_rotater.exceptions import (
     SwitchError,
     ValidationError,
 )
-from claude_rotater import api_keys, oauth, pace
+from claude_rotater import api_keys, billing, oauth, pace
 from claude_rotater.claude_locks import (
     claude_config_lock,
     claude_credentials_lock,
@@ -1061,6 +1061,9 @@ class ClaudeAccountSwitcher:
                     alias=alias,
                     disabled=self._disabled_from_data(seq_data, n),
                     login_expires_at=oauth.login_expires_at(creds) if creds else None,
+                    subscription_started_at=None if is_key else billing.started_at_from_file(
+                        self.configs_dir / f".claude-config-{n}-{email}.json"
+                    ),
                     key_tail=creds.strip()[-4:] if is_key and looks_like_api_key(creds) else "",
                     key_state=key_states.get(n, api_keys.KeyState()) if is_key else None,
                 )

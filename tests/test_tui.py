@@ -3352,6 +3352,31 @@ class TestAccountsSnapshot:
         assert all(acc.usage.sentinel is not None for acc in snap.accounts)
         assert isinstance(snap.taken_at, float)
 
+    def test_snapshot_carries_stored_subscription_start(self, temp_home, mock_claude_config):
+        import json
+
+        from claude_rotater.billing import parse_started_at
+
+        switcher = ClaudeAccountSwitcher()
+        switcher._setup_directories()
+        switcher._init_sequence_file()
+        data = switcher._get_sequence_data()
+        data["sequence"] = [1, 2]
+        data["accounts"] = {
+            "1": {"email": "test@example.com", "uuid": "test-uuid-1234"},
+            "2": {"email": "other@example.com", "uuid": "uuid-2"},
+        }
+        switcher._write_json(switcher.sequence_file, data)
+        started = "2026-10-26T03:38:18.336162Z"
+        (switcher.configs_dir / ".claude-config-1-test@example.com.json").write_text(
+            json.dumps({"oauthAccount": {"subscriptionCreatedAt": started}}), encoding="utf-8"
+        )
+
+        snap = switcher.accounts_snapshot(fetch=set())
+        by_num = {acc.number: acc for acc in snap.accounts}
+        assert by_num["1"].subscription_started_at == parse_started_at(started)
+        assert by_num["2"].subscription_started_at is None  # no stored config
+
 
 # ---------------------------------------------------------------------------
 # CLI wiring
