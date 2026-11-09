@@ -369,6 +369,9 @@ def transcript_logins(projects_dirs: Iterable[str], lo: float,
                     changed = True
                 out.extend((a, o) for a, o in events if a >= lo)
     if changed:
+        # Transcripts Claude Code deleted would otherwise stay in the cache
+        # for good, so it (and every load of it) only ever grew.
+        files = {p: e for p, e in files.items() if os.path.exists(p)}
         try:
             cache_path.parent.mkdir(parents=True, exist_ok=True)
             tmp = cache_path.with_suffix(".tmp")

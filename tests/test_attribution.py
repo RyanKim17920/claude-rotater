@@ -169,6 +169,19 @@ class TestTranscriptLogins:
         nested.write_text(login(NOW - HOUR, "oc"))  # shorter: replaced
         assert [o for _, o in at.transcript_logins([str(tmp_path / "projects")], 0, cache)] == ["oc"]
 
+    def test_deleted_transcripts_leave_the_cache_on_the_next_save(self, tmp_path):
+        projects = tmp_path / "projects"
+        gone, kept, new = (projects / "p" / f"{n}.jsonl" for n in ("gone", "kept", "new"))
+        gone.parent.mkdir(parents=True)
+        gone.write_text(login(NOW - 3 * HOUR, "oa"))
+        kept.write_text(login(NOW - 2 * HOUR, "ob"))
+        cache = tmp_path / "scan.json"
+        at.transcript_logins([str(projects)], 0, cache)
+        gone.unlink()
+        new.write_text(login(NOW - HOUR, "oc"))  # a change, so the cache is saved
+        assert [o for _, o in at.transcript_logins([str(projects)], 0, cache)] == ["ob", "oc"]
+        assert sorted(json.loads(cache.read_text())["files"]) == [str(kept), str(new)]
+
     def test_a_line_across_read_chunks_is_still_read(self, tmp_path, monkeypatch):
         monkeypatch.setattr(at, "_CHUNK", 7)
         f = tmp_path / "projects" / "s.jsonl"
