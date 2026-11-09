@@ -62,7 +62,7 @@ from textual.css.scalar import Scalar
 from textual.screen import Screen
 from textual.widgets import ListItem, ListView, RichLog, Static
 
-from claude_rotater import api_keys, billing, login_alerts, oauth, profiles
+from claude_rotater import api_keys, billing, login_alerts, oauth, profiles, self_memory
 from claude_rotater.autoswitch import (
     ALERT_REASONS,
     AutoSwitchEvent,
@@ -372,6 +372,7 @@ def status_text(
     polled_at: float | None = None,
     late_after: float = LATE_POLL_FACTOR * DEFAULT_CADENCE.spare_s,
     offline: float | None = None,
+    memory_note: str = "",
 ) -> Text:
     """`` rota · work   auto on · stay: resets soonest (19h40m)   ● live``.
 
@@ -384,7 +385,10 @@ def status_text(
     ``login_note`` (a login that died or is ending, see ``login_alerts``)
     outranks all of them: it takes the verdict's place, in red when the
     login already failed, and is cut to fit rather than dropped — a login
-    that lapses unseen is the one failure rota exists to prevent."""
+    that lapses unseen is the one failure rota exists to prevent.
+
+    ``memory_note`` (:func:`self_memory.warning_text`) trails the freshness
+    label, dim, while rota's own memory is unusually high."""
     head = Text(no_wrap=True, overflow="ellipsis")
     head.append(brand_chip(palette))
     if profile:  # a named profile, so it is obvious which one is open
@@ -399,6 +403,8 @@ def status_text(
         style = getattr(palette, role)
         tail.append(f"   {glyph} ", style=style)
         tail.append(words, style=style if role == "sev_warn" else palette.muted)
+    if memory_note:
+        tail.append(f"   {memory_note}", style=palette.muted)
     note = (
         status.view_only if status.view_older
         else switch_note(status, now=now, over_threshold=over_threshold)
@@ -1725,6 +1731,7 @@ class MainScreen(Screen):
             ) if snap else None,
             late_after=LATE_POLL_FACTOR * self.app.cadence.spare_s,
             offline=offline_since(snap.accounts, now) if snap else None,
+            memory_note=self_memory.warning_text(self.app.memory_mb),
         )
 
     def row_text(self, number: str, width: int) -> Text:

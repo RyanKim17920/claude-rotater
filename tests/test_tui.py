@@ -1671,6 +1671,21 @@ class TestMainPage:
                 assert not app.screen.query(stock)
             assert app.focused is app.screen.query_one("#accounts")  # the list keeps the keys
 
+    async def test_status_line_hints_when_rota_itself_is_using_a_lot_of_memory(
+        self, tmp_path, monkeypatch
+    ):
+        from claude_rotater import self_memory
+
+        app = make_app(three_accounts(tmp_path))
+        async with app.run_test(size=(140, 40)) as pilot:
+            await settle(pilot)
+            assert "mem" not in painted(app, "#status")
+            monkeypatch.setattr(self_memory, "peak_rss_mb", lambda: 412.0)
+            app._tick()
+            app.screen.query_one("#status").refresh()
+            await settle(pilot)
+            assert "mem 412 MB, restart rota" in painted(app, "#status")
+
     async def test_empty_account_list(self, tmp_path):
         app = make_app(FakeSwitcher([], tmp_path))
         async with app.run_test(size=(120, 40)) as pilot:

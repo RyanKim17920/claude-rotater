@@ -31,7 +31,7 @@ from textual.binding import Binding
 from textual.reactive import reactive
 from textual.worker import WorkerState
 
-from claude_rotater import api_key_mode, api_keys, clipboard, legacy_import, printer
+from claude_rotater import api_key_mode, api_keys, clipboard, legacy_import, printer, self_memory
 from claude_rotater.autoswitch import (
     ALERT_REASONS,
     STATE_FILENAME,
@@ -198,6 +198,9 @@ class RotaApp(App):
         self.refresher: TokenRefresher | None = None
         self.engine_lock = EngineLock(switcher.backup_dir)
         self._engine_claimed_at = 0.0
+        # rota's own peak RSS: logged hourly, hinted in the header when high.
+        self.memory_mb: float | None = None
+        self._memory_log = self_memory.HourlyLog()
         self.engine: EngineLike | None = None
         self.source = SnapshotSource(switcher)
         self._normal_refreshing = False
@@ -458,6 +461,8 @@ class RotaApp(App):
 
     def _tick(self) -> None:
         """The scheduled poller only reads the store: the engine fetches."""
+        self.memory_mb = self_memory.peak_rss_mb()
+        self._memory_log.maybe_log(time.time(), self.memory_mb)
         self._start_store_refresh()
         self._refresh_key_spend()
         if (
