@@ -11,8 +11,9 @@ Windows.
 - Live TUI: one line per account with its 5h, 7d and per-model (e.g. Fable)
   usage, a bar whose lighter tint runs out to where the window is projected
   to be at its reset, a countdown to each reset and one forecast (`ok`, `~7d
-  limit in 15h`); the highlighted account's 5h/7d charts below, and long-term history
-  behind `h`. Estimates are marked by `~`, a lighter tint or a dotted line
+  limit in 15h`); the highlighted account's 5h/7d and per-model charts below, and long-term history
+  behind `h`. A model's weekly limit binds switching while your sessions run
+  that model (or when `autoswitch.model` names it; `none` turns it off). Estimates are marked by `~`, a lighter tint or a dotted line
   and coloured by outcome: green under the threshold, yellow close, red over.
   A plan without a 5h limit (its readings carry 7d alone) shows a dim `no 5h`
   and its 7d chart alone; forecasts, pre-empt and pace treat it as unlimited,
