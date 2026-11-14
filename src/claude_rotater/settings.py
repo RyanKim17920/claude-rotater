@@ -308,7 +308,9 @@ SETTING_SPECS: dict[str, SettingSpec] = {
         ),
         SettingSpec(
             "autoswitch", "model", "model", "string",
-            help="Also switch on these models' weekly limits (e.g. Fable, Fable,Opus, or all)",
+            help="Also switch on these models' weekly limits (e.g. Fable, "
+            "Fable,Opus, or all); the model your sessions run always counts, "
+            "none turns model limits off",
             group="autoswitch", label="Model limits",
         ),
         SettingSpec(

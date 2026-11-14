@@ -503,7 +503,7 @@ def _switch(switcher: ClaudeAccountSwitcher, args: argparse.Namespace) -> dict |
     if args.target is not None:
         return switcher.switch_to(args.target, json_output=args.json, force=args.force)
 
-    from claude_rotater.settings import load_settings, parse_model_names
+    from claude_rotater.settings import effective_models, load_settings, parse_model_names
 
     # Only the usage-aware strategies read model limits: --model wins;
     # otherwise the persistent autoswitch.model setting applies (announced
@@ -511,9 +511,9 @@ def _switch(switcher: ClaudeAccountSwitcher, args: argparse.Namespace) -> dict |
     if args.strategy is None:
         models, model_source = (), None
     elif args.model is not None:
-        models, model_source = parse_model_names(args.model), "cli"
+        models, model_source = effective_models(parse_model_names(args.model), ()), "cli"
     else:
-        models = parse_model_names(load_settings(switcher.backup_dir).model)
+        models = effective_models(parse_model_names(load_settings(switcher.backup_dir).model), ())
         model_source = "autoswitch.model" if models else None
     payload = switcher.switch(
         strategy=args.strategy,

@@ -91,10 +91,11 @@ from claude_rotater.paths import (
 )
 from claude_rotater.legacy_import import import_legacy_data
 from claude_rotater.process_detection import get_running_instances
-from claude_rotater import poll_policy, process_detection
+from claude_rotater import feed, poll_policy, process_detection
 from claude_rotater.usage_history import UsageHistory
 from claude_rotater.settings import (
     load_accounts_settings,
+    effective_models,
     load_settings,
     parse_model_names,
     settings_path,
@@ -1111,9 +1112,10 @@ class ClaudeAccountSwitcher:
         self._poll_inputs_override = None
 
     def _poll_policy_inputs(self) -> tuple[float, tuple[str, ...]]:
-        """Threshold + configured model names for poll planning: the hosting
+        """Threshold + binding model names for poll planning: the hosting
         engine's pinned values when present, else the settings file (reloaded
-        only when it changes — one stat per pass)."""
+        only when it changes — one stat per pass) plus the models local
+        sessions run (``settings.effective_models``)."""
         if self._poll_inputs_override is not None:
             return self._poll_inputs_override
         path = settings_path(self.backup_dir)
@@ -1121,12 +1123,18 @@ class ClaudeAccountSwitcher:
             mtime: float | None = path.stat().st_mtime
         except OSError:
             mtime = None
-        if self._poll_inputs_cache is not None and self._poll_inputs_cache[0] == mtime:
-            return self._poll_inputs_cache[1]
-        loaded = load_settings(self.backup_dir)
-        inputs = (loaded.threshold, parse_model_names(loaded.model))
-        self._poll_inputs_cache = (mtime, inputs)
-        return inputs
+        if self._poll_inputs_cache is None or self._poll_inputs_cache[0] != mtime:
+            loaded = load_settings(self.backup_dir)
+            self._poll_inputs_cache = (mtime, (loaded.threshold, parse_model_names(loaded.model)))
+        threshold, configured = self._poll_inputs_cache[1]
+        return threshold, effective_models(configured, self.models_in_use())
+
+    def models_in_use(self, now: float | None = None) -> tuple[str, ...]:
+        """The models this profile's local sessions ran recently (newest
+        first), from the statusline feed; empty without one."""
+        return feed.models_in_use(
+            feed.feed_path(self.backup_dir), time.time() if now is None else now
+        )
 
     def _poll_cadence(self) -> poll_policy.PollCadence:
         """The user's cadence knobs (baseline, urgent, hourly budget) from the

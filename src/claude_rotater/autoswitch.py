@@ -85,7 +85,13 @@ from claude_rotater.poll_policy import (
     RESET_SLACK_S,
     binding_pct,
 )
-from claude_rotater.settings import AutoSwitchSettings, atomic_write_json, parse_model_names
+from claude_rotater.settings import (
+    MODELS_OFF,
+    AutoSwitchSettings,
+    atomic_write_json,
+    effective_models,
+    parse_model_names,
+)
 from claude_rotater.switcher import ClaudeAccountSwitcher
 from claude_rotater.usage_store import due_candidate, plan_oversleeps_interval
 
@@ -930,11 +936,13 @@ class AutoSwitchEngine:
         self.switcher = switcher
         self.settings = settings
         # Model(s) whose per-model weekly limit also binds the switch decision
-        # (empty = account-wide 5h/7d only). ``settings.model`` is a comma-
-        # separated list ("Fable", "Opus,Sonnet", "all"); parse once here and
-        # pass everywhere usage windows are read — decisions, cadence, and
-        # reset scheduling must all see the same axes.
-        self._models = parse_model_names(settings.model)
+        # (empty = account-wide 5h/7d only): the configured ``settings.model``
+        # list ("Fable", "Opus,Sonnet", "all", "none") plus every model a
+        # local session is running (settings.effective_models), refreshed
+        # each tick. Passed everywhere usage windows are read — decisions,
+        # cadence, and reset scheduling must all see the same axes.
+        self._configured_models = parse_model_names(settings.model)
+        self._models = effective_models(self._configured_models, ())
         # Poll plans written by the collector must key on the same threshold/
         # models the engine decides with (CLI overrides included), not on
         # whatever the settings file happens to say.
@@ -975,7 +983,9 @@ class AutoSwitchEngine:
         # One-shot typo guard for ``autoswitch.model``: resolved (and possibly
         # warned) on the first tick where every relevant account has readable
         # usage — adaptive polling legitimately leaves gaps before that.
-        self._model_check_done = not self._models
+        self._model_check_done = not [
+            m for m in self._configured_models if m.lower() not in ("all", MODELS_OFF)
+        ]
         # The latest switch/no-switch verdict (see Decision); None until the
         # first tick decides something.
         self.last_decision: Decision | None = None
@@ -1190,6 +1200,7 @@ class AutoSwitchEngine:
         """Evaluate once: ingest the statusline feed, poll usage, maybe
         switch. Never raises."""
         self._ingest_feed()
+        self._refresh_models()
         self._login_entries = None
         try:
             return self._tick_inner()
@@ -3375,7 +3386,11 @@ class AutoSwitchEngine:
         polling legitimately leaves gaps before that — and never worth a
         forced refresh of its own.
         """
-        wanted = {m.lower(): m for m in self._models if m.lower() != "all"}
+        wanted = {
+            m.lower(): m
+            for m in self._configured_models
+            if m.lower() not in ("all", MODELS_OFF)
+        }
         if not wanted:
             self._model_check_done = True  # bare "all" needs no name match
             return
@@ -3481,6 +3496,24 @@ class AutoSwitchEngine:
             self.feed.ingest()
         except Exception as e:  # ingest() already guards; belt and braces
             _logger.warning(f"Statusline feed ingest failed: {e!r}")
+
+    def _refresh_models(self) -> None:
+        """Re-derive the binding model limits from the models local sessions
+        run now; re-pin poll planning and log when the set changes."""
+        try:
+            in_use = self.switcher.models_in_use(self.clock())
+        except Exception as e:  # never raises; belt and braces
+            _logger.debug("models in use unreadable: %r", e)
+            in_use = ()
+        models = effective_models(self._configured_models, in_use)
+        if models == self._models:
+            return
+        self._models = models
+        self.switcher.set_poll_policy_inputs(self.settings.threshold, models)
+        _logger.info(
+            "Model limits that bind switching: %s",
+            ", ".join(models) if models else "none (5h/7d only)",
+        )
 
     def _on_feed_change(self) -> None:
         """Watcher thread: the feed was written; tick soon."""

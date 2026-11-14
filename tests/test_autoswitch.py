@@ -3187,6 +3187,60 @@ class TestModelAwareSwitch:
         reasons = [e.reason for e in h.events if isinstance(e, NoSwitchEvent)]
         assert reasons == ["below-threshold"]
 
+    def _run_model(self, h: EngineHarness, model: str, *, ago_s: float = 60.0) -> None:
+        """A local session ran ``model`` ``ago_s`` ago (statusline feed)."""
+        from claude_rotater import feed
+
+        feed.append_record(
+            feed.feed_path(h.switcher.backup_dir),
+            {"t": h.clock.now - ago_s, "seven_day": {"pct": 0.0}, "model": model},
+        )
+
+    def test_model_in_use_binds_without_the_setting(self, temp_home):
+        # Fable is what the sessions run: its maxed limit forces the switch.
+        h = self._seed(temp_home)
+        self._run_model(h, "Fable 5.2")
+        outcome = h.tick_with_usage({
+            "1": _model_usage(5, 100),
+            "2": _model_usage(10, 90),
+            "3": _model_usage(20, 30),
+        })
+        assert outcome is TickOutcome.SWITCHED
+        assert h.active_number() == 3  # least Fable used, not least 5h
+
+    def test_model_not_in_use_does_not_bind(self, temp_home):
+        # Sessions run Opus: a spent Fable limit stops nothing they do.
+        h = self._seed(temp_home)
+        self._run_model(h, "Opus 5.5")
+        outcome = h.tick_with_usage({
+            "1": _model_usage(5, 100),
+            "2": _model_usage(10, 40),
+            "3": _model_usage(20, 40),
+        })
+        assert outcome is not TickOutcome.SWITCHED
+        assert h.active_number() == 1
+
+    def test_model_used_long_ago_no_longer_binds(self, temp_home):
+        from claude_rotater import feed
+
+        h = self._seed(temp_home)
+        self._run_model(h, "Fable 5.2", ago_s=feed.MODEL_IN_USE_S + 60)
+        h.tick_with_usage({"1": _model_usage(5, 100), "2": _model_usage(10, 40)})
+        assert h.active_number() == 1
+
+    def test_none_setting_ignores_the_model_in_use(self, temp_home):
+        h = self._seed(temp_home, model="none")
+        self._run_model(h, "Fable 5.2")
+        h.tick_with_usage({"1": _model_usage(5, 100), "2": _model_usage(10, 40)})
+        assert h.active_number() == 1
+        assert not any(isinstance(e, ConfigWarningEvent) for e in h.events)
+
+    def test_in_use_model_does_not_trip_the_typo_guard(self, temp_home):
+        h = self._seed(temp_home)
+        self._run_model(h, "Fable 5.2")
+        h.tick_with_usage({"1": _usage(5), "2": _usage(10), "3": _usage(10)})
+        assert not any(isinstance(e, ConfigWarningEvent) for e in h.events)
+
     def test_model_headroom_still_gated_by_session_window(self, temp_home):
         # Fable has room on every account, but #1's 5h is maxed → still leaves.
         h = self._seed(temp_home, model="Fable")
@@ -6540,12 +6594,12 @@ class TestHorizonAxisDoesNotFlap:
         reset_at = self._iso_at(ranking_now + 100.0)   # future at ranking_now
         stale_reread = ranking_now + 200.0             # past reset_at
 
-        # Enough values for the OLD code's clock() call order (pre-tick
-        # check, ranking now, left_snapshot re-read, freshen expiry check,
-        # _perform's lastSwitchAt) with a couple of spares so neither code
-        # path can exhaust the sequence.
+        # Enough values for the OLD code's clock() call order (models in
+        # use, pre-tick check, ranking now, left_snapshot re-read, freshen
+        # expiry check, _perform's lastSwitchAt) with a couple of spares so
+        # neither code path can exhaust the sequence.
         clock_values = iter([
-            ranking_now, ranking_now, stale_reread,
+            ranking_now, ranking_now, ranking_now, stale_reread,
             stale_reread, stale_reread, stale_reread,
         ])
         with patch.object(h.engine, "clock", side_effect=lambda: next(clock_values)):
