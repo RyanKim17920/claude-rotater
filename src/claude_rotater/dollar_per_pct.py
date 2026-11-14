@@ -41,7 +41,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
 
+from claude_rotater.estimator import window_segments
 from claude_rotater.settings import atomic_write_json
+from claude_rotater.usage_history import Point as Reading
 
 _logger = logging.getLogger(__name__)
 
@@ -146,24 +148,25 @@ class _Spending:
 def _window_points(
     full: Sequence[_Point], hourly: Sequence[_Point], start: float, resets_at: float,
     end: float,
-) -> list[tuple[float, float]]:
-    """``[(t, pct)]`` of one window, read before ``end``, oldest first,
-    never falling.
+) -> list[tuple[float, float, bool]]:
+    """``[(t, pct, restart)]`` of one window, read before ``end``, oldest
+    first.
 
     Exact readings when there are any; else the hourly peaks of the
     long-term history, each dated at its hour's end (the peak was reached
-    by then) and only for hours wholly inside the window. A reading lower
-    than one before it is a lagging copy and is skipped.
+    by then) and only for hours wholly inside the window. A reading well
+    below the window's peak is a lagging copy and is left out, unless the
+    window started over early (``estimator.window_segments``): that reading
+    then starts a new climb (``restart``).
     """
-    exact = [(p.t, p.pct) for p in full
+    exact = [Reading(p.t, p.pct, resets_at) for p in full
              if start <= p.t < end
              and (p.resets_at is None or abs(p.resets_at - resets_at) <= MATCH_S)]
-    points = sorted(exact) if exact else sorted(
-        (p.t + HOUR_S, p.pct) for p in hourly if p.t >= start and p.t + HOUR_S <= end)
-    out: list[tuple[float, float]] = []
-    for t, pct in points:
-        if not out or pct >= out[-1][1]:
-            out.append((t, pct))
+    points = exact or [Reading(p.t + HOUR_S, p.pct, resets_at)
+                       for p in hourly if p.t >= start and p.t + HOUR_S <= end]
+    out: list[tuple[float, float, bool]] = []
+    for n, seg in enumerate(window_segments(points)):
+        out.extend((p.t, p.pct, n > 0 and i == 0) for i, p in enumerate(seg))
     return out
 
 
@@ -198,7 +201,11 @@ def samples(
         seg_t, seg_pct = start, 0.0  # where the current climb began
         rise_t, rise_pct = start, 0.0  # the last reading that rose
         elsewhere = 0.0
-        for t, pct in points:
+        for t, pct, restart in points:
+            if restart:  # started over early: a new climb from here
+                seg_t, seg_pct = rise_t, rise_pct = t, pct
+                elsewhere = 0.0
+                continue
             rise = pct - rise_pct
             if rise <= 0:
                 continue

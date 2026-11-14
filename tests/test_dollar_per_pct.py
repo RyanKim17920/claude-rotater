@@ -100,6 +100,18 @@ class TestSamples:
         _, got = cut(spend, points, [reset])
         assert [(s.t, s.pct) for s in got] == [(start + HOUR / 2, 4), (start + 2.5 * HOUR, 4)]
 
+    def test_an_early_reset_with_the_same_reset_time_starts_a_new_climb(self):
+        reset = NOW - HOUR
+        start = reset - FIVE_H
+        spend = steady_spend(start, reset, 10.0)
+        # 4, 8 by 1h, the window starts over early (same reset) to 0 and
+        # stays down (2, then 4): a new climb from the reset reading
+        points = readings(start, HOUR / 2, [4, 8, 0, 2, 4], reset)
+        _, got = cut(spend, points, [reset])
+        assert [(s.t, s.pct) for s in got] == [
+            (start + HOUR / 4, 4), (start + 0.75 * HOUR, 4), (start + 2 * HOUR, 4)]
+        assert got[-1].usd == pytest.approx(10.0)
+
     def test_readings_of_another_window_are_not_this_ones(self):
         reset = NOW - HOUR
         start = reset - FIVE_H
