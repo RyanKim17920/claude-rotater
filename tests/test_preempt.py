@@ -241,3 +241,23 @@ class TestPosition:
 
     def test_unknown_step_is_mid_percent(self):
         assert preempt.position({"7d": week((0, 99.0))}, {}, models=(), now=NOW) == 99.5
+
+
+class TestBurnAfterEarlyReset:
+    def test_an_early_reset_with_the_same_reset_time_starts_the_burn_over(self):
+        # 70 -> 72 over two slow hours, an early reset to 1 (same reset
+        # time), then 1 -> 11 in under an hour: the burn is the new climb's.
+        pts = [Point(NOW - 10800 + i * 3600, 70.0 + i, WEEK_RESET) for i in range(3)]
+        pts += [Point(NOW - 3000 + i * 300, 1.0 + i, WEEK_RESET) for i in range(11)]
+        rate = preempt.burn_in_use({"7d": pts}, "7d", now=NOW, since=None)
+        assert rate is not None and rate > 8.0
+
+    def test_lookback_cut_after_a_peak_does_not_turn_its_lagging_copy_into_a_start(self):
+        # 47 just before the lookback, a lagging 42 just inside it, then 48:
+        # the window rose 1 point in the lookback, not 6.
+        start = NOW - preempt.USE_LOOKBACK_S
+        series = {"5h": [Point(start - 600, 40.0, RESET), Point(start - 60, 47.0, RESET),
+                         Point(start + 60, 42.0, RESET), Point(start + 1200, 47.0, RESET),
+                         Point(NOW, 48.0, RESET)]}
+        rate = preempt.burn_in_use(series, "5h", now=NOW, since=None)
+        assert rate is None or rate < 3.0

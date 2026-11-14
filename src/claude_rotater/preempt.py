@@ -187,8 +187,10 @@ def burn_in_use(
     if since is not None:
         start = max(start, since)
     # Only the current window, read as the estimator reads it: a reset
-    # starts it over, a lagging reading is no reset.
-    pts = current_window(p for p in series.get(label, ()) if p.t >= start)
+    # (early or on time) starts it over, a lagging reading is no reset.
+    # Segmented over the whole history before the lookback cut, so a cut
+    # between a peak and its lagging copy can't read the copy as a start.
+    pts = [p for p in current_window(series.get(label, ())) if p.t >= start]
     if len(pts) < 2 or pts[-1].pct <= pts[0].pct:
         return None
     rises = sorted(r for points in series.values() for r in _rise_times(points)
