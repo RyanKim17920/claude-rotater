@@ -610,3 +610,92 @@ class TestLastRise:
         series = {"5h": [Point(NOW - 300, 10.0, RESET), Point(NOW - 100, 4.0, RESET)]}
         assert est.last_rise(series) is None
         assert est.last_rise({}) is None
+
+
+class TestEarlyReset:
+    """The provider can start a window over before its reset time, sometimes
+    naming the same reset. A lag is a small, passing drop; a reset is a large
+    drop, or one the readings after it confirm by staying down."""
+
+    WEEK = NOW + 4 * 86400  # the 7d window's (unchanged) reset
+
+    def screenshot(self, *, drop_ago: float = 20 * 3600) -> list[Point]:
+        """Climb 0 -> 75 over three days, an early reset to 10 with the same
+        reset time, then a climb to 53 by now (account #1, Nov 2026)."""
+        pre = [Point(NOW - drop_ago - 72 * 3600 + i * 1800, 75.0 * i / 144, self.WEEK)
+               for i in range(145)]
+        steps = int(drop_ago // 1800)
+        post = [Point(NOW - drop_ago + 600 + i * (drop_ago - 600) / steps,
+                      round(10.0 + 43.0 * i / steps), self.WEEK) for i in range(steps + 1)]
+        return pre + post
+
+    def test_forecast_reads_only_the_window_after_the_reset(self):
+        pts = self.screenshot()
+        w = estimate_window(pts, window="7d", now=NOW)
+        reset_t = NOW - 20 * 3600 + 600
+        assert all(p.t >= reset_t for p in w.points)
+        assert (w.last_pct, w.last_t) == (53.0, NOW)
+        assert 1.8 <= w.rate_pct_per_h <= 2.5  # 43 points over 20 hours
+        assert w.eta_s(100.0, NOW) is None or w.eta_s(100.0, NOW) > 18 * 3600
+
+    def test_screenshot_account_is_not_at_limit(self):
+        a = estimate_account({"7d": self.screenshot()}, models=(), threshold=90.0, now=NOW)
+        assert a.binding.last_pct == 53.0
+        assert a.eta_limit_s is None or a.eta_limit_s > 18 * 3600
+
+    def test_early_reset_also_cuts_the_shared_current_window(self):
+        pts = est.current_window(self.screenshot())
+        assert pts[0].pct == 10.0 and pts[-1].pct == 53.0
+
+    def test_reset_before_the_lookback_reads_the_same(self):
+        w = estimate_window(self.screenshot(drop_ago=40 * 3600), window="7d", now=NOW)
+        assert w.last_pct == 53.0 and min(p.pct for p in w.points) >= 10.0
+
+    def test_newest_reading_right_after_a_large_drop_is_a_reset(self):
+        pts = [Point(NOW - 7200 + i * 600, 70.0 + i, self.WEEK) for i in range(12)]
+        pts.append(Point(NOW, 4.0, self.WEEK))
+        w = estimate_window(pts, window="7d", now=NOW)
+        assert w.points == (Point(NOW, 4.0, self.WEEK),)
+        assert w.last_pct == 4.0
+
+    def test_small_drop_confirmed_by_the_readings_after_it_is_a_reset(self):
+        pts = [Point(NOW - 3600, 6.0, RESET), Point(NOW - 3000, 8.0, RESET),
+               Point(NOW - 2400, 1.0, RESET), Point(NOW - 1800, 1.0, RESET),
+               Point(NOW - 1200, 2.0, RESET), Point(NOW, 3.0, RESET)]
+        w = estimate_window(pts, window="5h", now=NOW)
+        assert [p.pct for p in w.points] == [1.0, 1.0, 2.0, 3.0]
+
+    def test_one_reading_after_a_small_drop_does_not_confirm_it(self):
+        pts = [Point(NOW - 1800, 8.0, RESET), Point(NOW - 600, 3.0, RESET),
+               Point(NOW, 3.0, RESET)]
+        w = estimate_window(pts, window="5h", now=NOW)
+        assert w.last_pct == 8.0
+
+    def test_mid_turn_one_point_lower_reading_is_still_jitter(self):
+        pts = [Point(NOW - 900, 30.0, RESET), Point(NOW - 600, 31.0, RESET),
+               Point(NOW - 300, 30.0, RESET), Point(NOW, 32.0, RESET)]
+        w = estimate_window(pts, window="5h", now=NOW)
+        assert len(w.points) == 4 and w.last_pct == 32.0
+
+    def test_early_reset_with_a_new_reset_time_starts_over_too(self):
+        later = self.WEEK + 3 * 86400
+        pts = [Point(NOW - 7200 + i * 600, 70.0 + i, self.WEEK) for i in range(10)]
+        pts += [Point(NOW - 1200, 1.0, later), Point(NOW - 600, 2.0, later),
+                Point(NOW, 3.0, later)]
+        w = estimate_window(pts, window="7d", now=NOW)
+        assert [p.pct for p in w.points] == [1.0, 2.0, 3.0]
+        assert w.resets_at == later
+
+    def test_window_average_after_an_early_reset_counts_from_the_reset(self):
+        # Two readings too close to fit: the fallback averages since the
+        # window opened, which is the early reset, not seven days back.
+        pts = [Point(NOW - 7200, 70.0, self.WEEK), Point(NOW - 3600, 72.0, self.WEEK),
+               Point(NOW - 3000, 2.0, self.WEEK), Point(NOW - 2900, 2.0, self.WEEK)]
+        w = estimate_window(pts, window="7d", now=NOW)
+        assert w.last_pct == 2.0
+        assert w.rate_pct_per_h == pytest.approx(2.0 / ((NOW - 2900 - (NOW - 3600)) / 3600))
+
+    def test_segmentation_is_the_same_whatever_the_lookback(self):
+        pts = self.screenshot()
+        assert est.window_segments(pts)[-1] == est.current_window(pts)
+        assert len(est.window_segments(pts)) == 2

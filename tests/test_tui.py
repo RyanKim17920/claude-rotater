@@ -4399,3 +4399,26 @@ class TestOfflineIsNotADeadLogin:
         assert offline_since(accs, now) == now - 7500
         assert status_tag(active, now, 3) == ("refreshes on use", False)
         assert login_alerts.collect(login_alerts.states_from_snapshot(accs), now, 3) == []
+
+
+class TestEarlyResetChart:
+    def test_chart_forecasts_from_the_climb_after_an_early_reset(self):
+        """Account #1's 7d chart: 0 -> 75, an early reset to 10 naming the
+        same reset time, back up to 53 by now. The title said "~at limit"
+        and the dotted line ran on from 75; both must follow the new climb."""
+        from claude_rotater.estimator import estimate_account
+        from claude_rotater.tui.main import chart_blocks
+
+        now = time.time()
+        week = now + 3 * 86400
+        drop = now - 20 * 3600
+        pts = [Point(drop - 72 * 3600 + i * 1800, 75.0 * i / 144, week) for i in range(145)]
+        pts += [Point(drop + 600 + i * (now - drop - 600) / 40, round(10 + 43 * i / 40), week)
+                for i in range(41)]
+        est = estimate_account({"7d": pts}, models=(), threshold=90.0, now=now)
+        assert est.windows["7d"].last_pct == 53.0
+        acc = make_account(1, entry=make_entry(5.0, 53.0))
+        titles = {t.plain.split(" ", 1)[0]: t.plain for t, _ in chart_blocks(
+            acc, est, {"7d": pts}, now=now, threshold=90.0, palette=Palette.DARK)}
+        assert "at limit" not in titles["7d"]
+        assert titles["7d"].endswith("limit in 17h")  # (90 - 53) at ~2.15%/h

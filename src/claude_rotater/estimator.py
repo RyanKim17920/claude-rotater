@@ -64,6 +64,12 @@ IDLE_PARAMS = WindowParams(lookback_s=60 * 60, half_life_s=20 * 60, high_span_s=
 MIN_SPAN_S = 240.0  # below this two points are noise (integer pct quantization)
 RESET_DROP_PCT = 2.0  # a pct drop larger than this between points means the window reset
 RESET_MATCH_S = 120.0  # resets_at jitter tolerated within one window
+# Inside one window (same reset time) a drop below the window's peak is a
+# lagging reading unless it is an early reset: one this large outright, or a
+# smaller one the next RESET_CONFIRM_N readings confirm by staying down too.
+# A lag is passing (the next reading is back up); a long turn lags ~5-6.
+RESET_BIG_DROP_PCT = 15.0
+RESET_CONFIRM_N = 2
 MAX_RATE_PCT_PER_H = 200.0
 MIN_FALLBACK_ELAPSED_S = 600.0  # window-average burn needs this much window behind it
 MIN_ETA_RATE_PCT_PER_H = 0.05  # slower than this never crosses anything useful
@@ -124,41 +130,69 @@ class WindowEstimate:
         return max(0.0, t_star - now)
 
 
-def _segment(points: Sequence[Point], newest: Point, lookback_start: float) -> list[Point]:
-    """The newest point plus every older point in the same window instance,
-    within the lookback, oldest first, without lagging readings.
+def _early_reset(pts: Sequence[Point], i: int, peak: float) -> bool:
+    """Whether ``pts[i]``, below ``peak`` by more than the jitter inside one
+    window, is the window starting over early rather than a lagging reading:
+    a drop of ``RESET_BIG_DROP_PCT`` or more, or one the next
+    ``RESET_CONFIRM_N`` readings of the same window confirm by staying down.
+    Read off the history alone, so every profile decides it alike."""
+    p = pts[i]
+    if peak - p.pct >= RESET_BIG_DROP_PCT:
+        return True
+    later = [q for q in pts[i + 1:i + 1 + RESET_CONFIRM_N] if _same_window(p, q)]
+    return len(later) == RESET_CONFIRM_N and all(q.pct < peak - RESET_DROP_PCT for q in later)
 
-    A drop marks a reset only where the reset times can't say: two points
-    that name the same reset are one window, and usage inside one window
-    never falls, so a later one well below an earlier one lags (a chat
-    showing an older response, a reading dated too early). It is left out,
-    so the fit follows what the window actually reached."""
-    seg = [newest]
-    for p in reversed(points[:-1]):
-        nxt = seg[0]
-        if p.t < lookback_start:
-            break
-        known = p.resets_at is not None and newest.resets_at is not None
-        if known and abs(p.resets_at - newest.resets_at) > RESET_MATCH_S:
-            break
-        if p.pct > nxt.pct + RESET_DROP_PCT and not known:
-            break
-        seg.insert(0, p)
-    kept: list[Point] = []
+
+def window_segments(points: Iterable[Point]) -> list[list[Point]]:
+    """The readings cut into window instances, oldest first, each without
+    its lagging readings.
+
+    A new instance starts where the reset time changes; where it is unknown,
+    at any drop beyond jitter. Readings naming the same reset are one window,
+    whose usage never falls, so one well below the window's peak lags (a
+    chat showing an older response, a reading dated too early) and is left
+    out, unless it is an early reset (:func:`_early_reset`): the provider
+    can start a window over before its reset time, naming the same one."""
+    pts = sorted(points, key=lambda p: p.t)
+    segments: list[list[Point]] = []
     peak = -math.inf
-    for p in seg:
-        if p.resets_at is not None and p.pct < peak - RESET_DROP_PCT:
-            continue  # integer jitter stays: the fit absorbs it as noise
-        kept.append(p)
-        peak = max(peak, p.pct)
-    return kept
+    for i, p in enumerate(pts):
+        cur = segments[-1] if segments else None
+        prev = cur[-1] if cur else None
+        known = prev is not None and p.resets_at is not None and prev.resets_at is not None
+        if prev is None or (known and not _same_window(prev, p)) or (
+            not known and p.pct < prev.pct - RESET_DROP_PCT
+        ):
+            segments.append([p])
+            peak = p.pct
+        elif known and p.pct < peak - RESET_DROP_PCT:
+            if _early_reset(pts, i, peak):
+                segments.append([p])
+                peak = p.pct
+            # else a lagging reading: left out (integer jitter stays, the
+            # fit absorbs it as noise)
+        else:
+            cur.append(p)
+            peak = max(peak, p.pct)
+    return segments
+
+
+def _opened_early(segments: list[list[Point]]) -> float | None:
+    """When the newest window started over before its reset time: the last
+    reading before the early reset (the reset came after it), else None."""
+    if len(segments) < 2:
+        return None
+    before, now_seg = segments[-2][-1], segments[-1][0]
+    if before.resets_at is None or now_seg.resets_at is None:
+        return None
+    return before.t if _same_window(before, now_seg) else None
 
 
 def current_window(points: Iterable[Point]) -> list[Point]:
     """The readings of the newest window instance, oldest first, without
     lagging ones: the one reading of a window every caller shares."""
-    pts = sorted(points, key=lambda p: p.t)
-    return _segment(pts, pts[-1], -math.inf) if pts else []
+    segments = window_segments(points)
+    return segments[-1] if segments else []
 
 
 def _ewls(seg: list[Point], now: float, half_life_s: float) -> tuple[float, float] | None:
@@ -222,7 +256,11 @@ def estimate_window(
             rate_pct_per_h=None, confidence="none", points=(),
         )
     params = IDLE_PARAMS if on_duty is False else window_params(window)
-    seg = _segment(pts, newest, now - params.lookback_s)
+    segments = window_segments(pts)
+    # The lookback is cut after segmenting, so a reset or lag reads the same
+    # whatever the lookback (and in every caller of current_window).
+    window_pts = segments[-1]
+    seg = [p for p in window_pts if p.t >= now - params.lookback_s] or window_pts[-1:]
     fit = _fit_of(seg, now, params)
     switched = since is not None and since > seg[0].t
     if switched:
@@ -256,7 +294,7 @@ def estimate_window(
     elif newest.resets_at is not None and on_duty is not False:
         # Average burn since the window opened (meaningless across a switch
         # inside the window: part of it was another account's duty).
-        opened = newest.resets_at - window_len_s(window)
+        opened = _opened_early(segments) or newest.resets_at - window_len_s(window)
         elapsed = newest.t - opened
         if elapsed >= MIN_FALLBACK_ELAPSED_S and (since is None or since <= opened):
             rate = _clamp_rate(newest.pct / elapsed * 3600.0)
