@@ -306,6 +306,49 @@ class FeedCursor(NamedTuple):
     offset: int = 0
 
 
+# A model counts as in use while a local session ran it this recently: its
+# per-model weekly limit then binds like the 7d one (settings.effective_models).
+# Long enough to span a lunch break; a model left behind for longer only costs
+# a needless switch off an account where that model is spent.
+MODEL_IN_USE_S = 6 * 3600.0
+
+# path -> (stat key of both generations, ((model, last turn at), ...)).
+_models_seen: dict[str, tuple[tuple, tuple[tuple[str, float], ...]]] = {}
+
+
+def _stat_key(path: str) -> tuple | None:
+    try:
+        st = os.stat(path)
+    except OSError:
+        return None
+    return (st.st_ino, st.st_size, st.st_mtime_ns)
+
+
+def models_in_use(path: str, now: float, within_s: float = MODEL_IN_USE_S) -> tuple[str, ...]:
+    """The models (``Fable 5.2``) local sessions ran within ``within_s`` of
+    ``now``, most recent first, from the feed at ``path`` and its rotated
+    generation. A record is dated by its session's last turn (``at``), so an
+    idle chat re-rendering keeps its model only as long as that turn is
+    recent. Re-read only when either file changes. Never raises."""
+    rotated = path + ROTATED_SUFFIX
+    key = (_stat_key(path), _stat_key(rotated))
+    cached = _models_seen.get(path)
+    if cached is not None and cached[0] == key:
+        seen = cached[1]
+    else:
+        latest: dict[str, float] = {}
+        for source in (rotated, path):
+            records, _ = read_new(source, None)
+            for record in records:
+                model = record.get("model")
+                at = _number(record.get("at")) or _number(record.get("t"))
+                if isinstance(model, str) and model and at is not None:
+                    latest[model] = max(at, latest.get(model, at))
+        seen = tuple(sorted(latest.items(), key=lambda kv: -kv[1]))
+        _models_seen[path] = (key, seen)
+    return tuple(model for model, at in seen if now - at <= within_s)
+
+
 def read_new(path: str, cursor: FeedCursor | None) -> tuple[list[dict], FeedCursor]:
     """Complete, valid records appended since ``cursor``, oldest first.
 

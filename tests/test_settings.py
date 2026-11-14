@@ -585,3 +585,29 @@ class TestKeyOrder:
         settings_path(tmp_path).write_text(json.dumps({"accounts": {"order": 3, "oauthOnly": True}}))
         loaded = load_accounts_settings(tmp_path)
         assert loaded.order == "account-first" and loaded.oauth_only is True
+
+
+class TestEffectiveModels:
+    """Model limits that bind: the configured ones plus every model a local
+    session ran recently, by family."""
+
+    def test_in_use_models_join_by_family(self):
+        from claude_rotater.settings import effective_models
+
+        assert effective_models((), ("Fable 5.2", "Opus 5.5")) == ("fable", "opus")
+
+    def test_configured_first_and_deduped(self):
+        from claude_rotater.settings import effective_models
+
+        assert effective_models(("Fable",), ("Fable 5.2", "Opus 5.5")) == ("Fable", "opus")
+
+    def test_none_turns_model_limits_off(self):
+        from claude_rotater.settings import effective_models
+
+        assert effective_models(("none",), ("Fable 5.2",)) == ()
+        assert effective_models(("None", "Fable"), ()) == ()
+
+    def test_unknown_names_are_skipped(self):
+        from claude_rotater.settings import effective_models
+
+        assert effective_models((), ("", "5.2")) == ()

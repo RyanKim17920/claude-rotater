@@ -242,6 +242,58 @@ class TestAppendAndRead:
         assert records == [] and cursor == feed.FeedCursor()
 
 
+class TestModelsInUse:
+    NOW = 1_800_000_000.0
+
+    def _write(self, path, *records):
+        for rec in records:
+            feed.append_record(path, {"seven_day": {"pct": 1.0}, **rec})
+
+    def test_recent_models_newest_first(self, tmp_path):
+        path = feed.feed_path(tmp_path)
+        self._write(
+            path,
+            {"t": self.NOW - 600, "model": "Opus 5.5"},
+            {"t": self.NOW - 60, "model": "Fable 5.2"},
+            {"t": self.NOW - 30, "model": "Fable 5.2"},
+        )
+        assert feed.models_in_use(path, self.NOW) == ("Fable 5.2", "Opus 5.5")
+
+    def test_dated_by_the_last_turn_not_the_rerender(self, tmp_path):
+        path = feed.feed_path(tmp_path)
+        old = self.NOW - feed.MODEL_IN_USE_S - 60
+        # An idle chat re-renders with a fresh t; its last turn is old.
+        self._write(path, {"t": self.NOW - 5, "at": old, "model": "Opus 5.5"})
+        assert feed.models_in_use(path, self.NOW) == ()
+
+    def test_old_and_modelless_records_are_ignored(self, tmp_path):
+        path = feed.feed_path(tmp_path)
+        self._write(
+            path,
+            {"t": self.NOW - feed.MODEL_IN_USE_S - 1, "model": "Opus 5.5"},
+            {"t": self.NOW - 5},
+            {"t": self.NOW - 5, "model": 7},
+        )
+        assert feed.models_in_use(path, self.NOW) == ()
+
+    def test_reads_the_rotated_generation_too(self, tmp_path):
+        path = feed.feed_path(tmp_path)
+        self._write(path, {"t": self.NOW - 900, "model": "Fable 5.2"})
+        os.replace(path, path + feed.ROTATED_SUFFIX)
+        self._write(path, {"t": self.NOW - 10, "model": "Opus 5.5"})
+        assert feed.models_in_use(path, self.NOW) == ("Opus 5.5", "Fable 5.2")
+
+    def test_follows_new_records(self, tmp_path):
+        path = feed.feed_path(tmp_path)
+        self._write(path, {"t": self.NOW - 10, "model": "Opus 5.5"})
+        assert feed.models_in_use(path, self.NOW) == ("Opus 5.5",)
+        self._write(path, {"t": self.NOW - 5, "model": "Fable 5.2"})
+        assert feed.models_in_use(path, self.NOW) == ("Fable 5.2", "Opus 5.5")
+
+    def test_missing_feed_is_nothing_in_use(self, tmp_path):
+        assert feed.models_in_use(feed.feed_path(tmp_path), self.NOW) == ()
+
+
 class TestMain:
     @pytest.fixture
     def backup(self, tmp_path, monkeypatch):

@@ -18,9 +18,11 @@ import logging
 import os
 import sys
 import tempfile
+from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
 
+from claude_rotater import oauth
 from claude_rotater.exceptions import ConfigError
 from claude_rotater.fsutil import replace_with_retry
 from claude_rotater.poll_policy import CADENCE_SETTING_KEYS, PollCadence, load_cadence
@@ -399,6 +401,31 @@ def parse_model_names(value: str | None) -> tuple[str, ...]:
         if name and name.lower() not in seen:
             seen[name.lower()] = name
     return tuple(seen.values())
+
+
+# ``autoswitch.model = none``: no per-model limit binds, not even a model
+# that is in use.
+MODELS_OFF = "none"
+
+
+def effective_models(
+    configured: tuple[str, ...], in_use: Iterable[str]
+) -> tuple[str, ...]:
+    """The per-model weekly limits that bind switching: the configured names,
+    then the family (``fable``) of each model a local session is running
+    (``feed.models_in_use``). A model's limit only stops that model, so it
+    binds when it is the model in use, or when the user named it. ``none``
+    turns them all off."""
+    if any(m.lower() == MODELS_OFF for m in configured):
+        return ()
+    out = list(configured)
+    seen = {m.lower() for m in configured}
+    for name in in_use:
+        family = oauth.model_family(name)
+        if family is not None and family not in seen:
+            seen.add(family)
+            out.append(family)
+    return tuple(out)
 
 
 def _clamped(settings: AutoSwitchSettings) -> AutoSwitchSettings:

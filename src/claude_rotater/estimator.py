@@ -43,6 +43,7 @@ from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from typing import Literal
 
+from claude_rotater import oauth
 from claude_rotater.usage_history import Point
 
 WINDOW_LEN_S = {"5h": 5 * 3600.0, "7d": 7 * 86400.0}
@@ -329,10 +330,7 @@ EMPTY_ACCOUNT_ESTIMATE = AccountEstimate(
 def is_relevant_window(label: str, models: tuple[str, ...]) -> bool:
     """Same window view as ``oauth.relevant_windows``: 5h and 7d always,
     scoped windows only when named in ``models`` (or ``all``)."""
-    if label in WINDOW_LEN_S:
-        return True
-    wanted = {m.lower() for m in models}
-    return "all" in wanted or label.lower() in wanted
+    return label in WINDOW_LEN_S or oauth.model_wanted(label, models)
 
 
 def first_crossing(

@@ -152,6 +152,37 @@ class TestRelevantWindows:
         assert oauth.relevant_windows(None) == []
         assert oauth.relevant_windows("no credentials") == []
 
+    def test_a_model_family_selects_a_versioned_window(self):
+        usage = {"seven_day": {"pct": 1.0}, "scoped": [{"name": "Fable 5", "pct": 9.0}]}
+        assert [w[0] for w in oauth.relevant_windows(usage, ["fable"])] == ["7d", "Fable 5"]
+
+
+class TestModelFamily:
+    @pytest.mark.parametrize("name, family", [
+        ("Fable", "fable"),
+        ("Fable 5.2", "fable"),
+        ("Opus 5.5", "opus"),
+        ("claude-fable-5-2", "fable"),
+        ("claude-opus-4-8[1m]", "opus"),
+        ("fable", "fable"),
+        ("", None),
+        ("5.2", None),
+        ("claude", None),
+    ])
+    def test_family(self, name, family):
+        assert oauth.model_family(name) == family
+
+    @pytest.mark.parametrize("name, models, wanted", [
+        ("Fable", ("fable",), True),
+        ("Fable", ("Fable",), True),
+        ("Fable 5", ("fable",), True),
+        ("Fable", ("opus",), False),
+        ("Fable", ("all",), True),
+        ("Fable", (), False),
+    ])
+    def test_model_wanted(self, name, models, wanted):
+        assert oauth.model_wanted(name, models) is wanted
+
 
 class TestFormatReset:
     """Test format_reset."""

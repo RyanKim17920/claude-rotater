@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import re
 import sys
 import urllib.error
 import urllib.request
@@ -599,8 +600,6 @@ def relevant_windows(
         if isinstance(window, dict) and isinstance(window.get("pct"), (int, float)):
             windows.append((label, float(window["pct"]), window.get("resets_at")))
     if models:
-        wanted = {m.lower() for m in models}
-        match_all = "all" in wanted
         scoped = usage.get("scoped")
         if isinstance(scoped, list):
             for s in scoped:
@@ -608,10 +607,29 @@ def relevant_windows(
                     isinstance(s, dict)
                     and isinstance(s.get("pct"), (int, float))
                     and isinstance(s.get("name"), str)
-                    and (match_all or s["name"].lower() in wanted)
+                    and model_wanted(s["name"], models)
                 ):
                     windows.append((s["name"], float(s["pct"]), s.get("resets_at")))
     return windows
+
+
+_MODEL_WORD = re.compile(r"[a-z]{3,}")
+
+
+def model_family(name: str) -> str | None:
+    """A model's family, lower case: ``Fable 5.2``, ``claude-fable-5-2`` and
+    ``Fable`` are all ``fable``. None when ``name`` holds no family word."""
+    for word in _MODEL_WORD.findall(name.lower()):
+        if word != "claude":
+            return word
+    return None
+
+
+def model_wanted(name: str, models: Sequence[str]) -> bool:
+    """Whether the per-model window ``name`` is one of ``models``: by name or
+    by family (case-insensitive), or every one under ``all``."""
+    wanted = {m.lower() for m in models}
+    return "all" in wanted or name.lower() in wanted or model_family(name) in wanted
 
 
 def account_headroom(
