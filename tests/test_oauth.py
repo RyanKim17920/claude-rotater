@@ -408,6 +408,81 @@ class TestFetchUsage:
         assert fable["countdown"] == "3h 0m"
         assert "clock" in fable
 
+    # The response as of 2026-11 (names only; values made up): every legacy
+    # seven_day_<x> key null, the Fable limit only in limits[].
+    LIVE_SHAPE = {
+        "five_hour": None,
+        "seven_day": {"utilization": 95, "resets_at": "2026-11-14T23:59:59+00:00"},
+        "seven_day_oauth_apps": None,
+        "seven_day_opus": None,
+        "seven_day_sonnet": None,
+        "seven_day_cowork": None,
+        "seven_day_omelette": None,
+        "seven_day_breakdown": {"as_of": "2026-11-08T21:56:43+00:00", "rows": []},
+        "weekly_scoped_shares": [{"limit_index": 1, "used_percent_of_weekly": 0,
+                                  "allowance_percent_of_weekly": 50}],
+        "pace": None,
+        "limits": [
+            {"kind": "weekly_all", "group": "weekly", "percent": 95,
+             "resets_at": "2026-11-14T23:59:59+00:00", "scope": None},
+            {"kind": "weekly_scoped", "group": "weekly", "percent": 0,
+             "resets_at": "2026-11-15T00:00:00+00:00",
+             "scope": {"model": {"id": None, "display_name": "Fable"}, "surface": None}},
+        ],
+    }
+
+    def test_live_shape_zero_pct_model_window_is_kept(self):
+        """A model window at 0% is a real window (shown), unlike a null one."""
+        result = oauth.build_usage_result(self.LIVE_SHAPE)
+        assert "five_hour" not in result
+        assert [(s["name"], s["pct"]) for s in result["scoped"]] == [("Fable", 0.0)]
+
+    def test_legacy_per_model_keys_become_scoped(self):
+        """Any seven_day_<model> key with a utilization is a model window."""
+        result = oauth.build_usage_result({
+            "seven_day": {"utilization": 40.0, "resets_at": None},
+            "seven_day_opus": {"utilization": 12.0, "resets_at": "2026-11-15T00:00:00+00:00"},
+            "seven_day_newmodel": {"utilization": 3.0, "resets_at": None},
+            "seven_day_sonnet": None,
+        })
+        scoped = {s["name"]: s for s in result["scoped"]}
+        assert set(scoped) == {"Opus", "Newmodel"}
+        assert scoped["Opus"]["pct"] == 12.0
+        assert scoped["Opus"]["resets_at"] == "2026-11-15T00:00:00+00:00"
+        assert "resets_at" not in scoped["Newmodel"]
+
+    @pytest.mark.parametrize("key", [
+        "seven_day_oauth_apps", "seven_day_cowork", "seven_day_omelette", "seven_day_breakdown",
+    ])
+    def test_surface_and_bookkeeping_keys_are_not_models(self, key):
+        result = oauth.build_usage_result({
+            "seven_day": {"utilization": 40.0},
+            key: {"utilization": 99.0, "resets_at": None},
+        })
+        assert "scoped" not in result
+
+    @pytest.mark.parametrize("bad", [None, {}, {"utilization": None}, {"utilization": "7"}, 5])
+    def test_legacy_key_without_a_number_is_skipped(self, bad):
+        result = oauth.build_usage_result({"seven_day": {"utilization": 1.0}, "seven_day_opus": bad})
+        assert "scoped" not in result
+
+    def test_limits_entry_wins_over_its_legacy_key(self):
+        result = oauth.build_usage_result({
+            "seven_day": {"utilization": 40.0},
+            "seven_day_opus": {"utilization": 10.0},
+            "limits": [{"kind": "weekly_scoped", "percent": 11,
+                        "scope": {"model": {"display_name": "Opus"}}}],
+        })
+        assert [(s["name"], s["pct"]) for s in result["scoped"]] == [("Opus", 11.0)]
+
+    def test_null_limit_percent_is_skipped(self):
+        result = oauth.build_usage_result({
+            "seven_day": {"utilization": 40.0},
+            "limits": [{"kind": "weekly_scoped", "percent": None,
+                        "scope": {"model": {"display_name": "Fable"}}}],
+        })
+        assert "scoped" not in result
+
     def test_no_limits_no_scoped_key(self):
         """A response without a limits array yields no 'scoped' key (backward compat)."""
         result = self._fetch_with_response({

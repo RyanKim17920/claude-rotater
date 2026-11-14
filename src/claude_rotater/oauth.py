@@ -520,15 +520,49 @@ def build_usage_result(data: dict) -> dict | None:
             pct = lim.get("percent")
             if not name or not isinstance(pct, (int, float)):
                 continue
-            scoped_entry: dict = {"name": name, "pct": float(pct)}
-            if lim.get("resets_at"):
-                scoped_entry["resets_at"] = lim["resets_at"]
-                scoped_entry["countdown"], scoped_entry["clock"] = format_reset(lim["resets_at"])
-            scoped.append(scoped_entry)
+            scoped.append(_scoped_entry(name, pct, lim.get("resets_at")))
         if scoped:
             result["scoped"] = scoped
 
+    # Older responses (and possibly future ones) carry a model's weekly limit
+    # as a top-level ``seven_day_<model>`` key instead. Any such key with a
+    # number is taken, so a new model shows up without a code change; a model
+    # ``limits`` already named wins. Null keys (all of them, as of 2026-11)
+    # add nothing.
+    taken = {s["name"].lower() for s in result.get("scoped", ())}
+    for key, window in data.items():
+        if not key.startswith(_LEGACY_MODEL_PREFIX) or not isinstance(window, dict):
+            continue
+        model = key[len(_LEGACY_MODEL_PREFIX):]
+        pct = window.get("utilization")
+        if (
+            model in _NOT_MODEL_WINDOWS
+            or isinstance(pct, bool)
+            or not isinstance(pct, (int, float))
+            or model.lower() in taken
+        ):
+            continue
+        name = model.replace("_", " ").title()
+        result.setdefault("scoped", []).append(_scoped_entry(name, pct, window.get("resets_at")))
+        taken.add(model.lower())
+
     return result if result else None
+
+
+_LEGACY_MODEL_PREFIX = "seven_day_"
+# ``seven_day_<x>`` keys that are not a model: per-surface limits (apps signed
+# in with the subscription, Cowork, the ``omelette`` product), which never stop
+# a coding session, and the per-surface breakdown of the week.
+_NOT_MODEL_WINDOWS = frozenset({"oauth_apps", "cowork", "omelette", "breakdown"})
+
+
+def _scoped_entry(name: str, pct: float, resets_at: str | None) -> dict:
+    """One per-model weekly window in the normalized shape."""
+    entry: dict = {"name": name, "pct": float(pct)}
+    if resets_at:
+        entry["resets_at"] = resets_at
+        entry["countdown"], entry["clock"] = format_reset(resets_at)
+    return entry
 
 
 def no_five_hour(usage: dict | None) -> bool:
