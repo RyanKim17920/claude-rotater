@@ -51,7 +51,7 @@ from __future__ import annotations
 import dataclasses
 import time
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Sequence
+from typing import TYPE_CHECKING, Callable, Sequence
 
 from rich.style import Style
 from rich.text import Text
@@ -78,7 +78,6 @@ from claude_rotater.estimator import (
     WindowEstimate,
     estimate_window,
     first_crossing,
-    is_relevant_window,
 )
 from claude_rotater.json_output import (
     USAGE_API_KEY,
@@ -440,6 +439,10 @@ def status_text(
 ON_DUTY_MARK = "●"
 CURSOR_MARK = "›"
 PRIMARY_WINDOWS = ("5h", "7d")
+# The row's one per-model column: each row shows its most binding per-model
+# weekly window there (Fable, ...); the charts show all of them.
+MODEL_SLOT = "model"
+_MAX_MODEL_LABEL_W = 6  # "Sonnet"; a longer name is cut
 _PREFIX_W = 3  # "›● ": cursor, on duty, space
 _GAP = 2  # between table columns
 _REL_W = 6  # "23h59m" (countdown_text)
@@ -493,6 +496,7 @@ class RowLayout:
     tag_w: int
     level: Level
     num_w: int = 0  # "#12": the account number before the name, the one logs use
+    model_w: int = 5  # the model column's label ("Fable")
 
     @property
     def bar_w(self) -> int:
@@ -509,9 +513,12 @@ class RowLayout:
             return True
         return self.level.reset if label in PRIMARY_WINDOWS else self.level.model_reset
 
+    def label_w(self, label: str) -> int:
+        return self.model_w if label == MODEL_SLOT else len(label)
+
     def window_w(self, label: str) -> int:
         """``5h  58% ▆▆▆▆ ↻ 1h20m``: label, pct, optional meter, countdown."""
-        w = len(label) + 5
+        w = self.label_w(label) + 5
         if self.bar_w:
             w += 1 + self.bar_w
         if self.has_reset(label):
@@ -529,6 +536,7 @@ class RowLayout:
         short_name_need: int | None = None,
         warn_tag_need: int | None = None,
         num_need: int = 0,
+        model_need: int = 5,
     ) -> "RowLayout":
         """The richest level that fits ``width``.
 
@@ -545,7 +553,8 @@ class RowLayout:
         def build(level: Level, name_w: int) -> "RowLayout":
             shown = windows if level.models else tuple(w for w in windows if w in PRIMARY_WINDOWS)
             tag_w = min(tag_need if level.org else warn_need, _MAX_TAG_W)
-            return cls(width, shown, name_w, tag_w, level, num_need)
+            return cls(width, shown, name_w, tag_w, level, num_need,
+                       max(1, min(model_need, _MAX_MODEL_LABEL_W)))
 
         def room(level: Level) -> int:
             layout = build(level, 0)
@@ -744,19 +753,58 @@ def shown_windows(acc: AccountSnapshot) -> dict[str, tuple[float, float | None]]
     return window_pcts(acc, ("all",))
 
 
-def table_windows(accounts: Sequence[AccountSnapshot], models: Sequence[str]) -> tuple[str, ...]:
-    """5h, 7d, then each per-model window that any account has used or that
-    gates switching; an unused, non-gating one is only noise."""
-    labels = list(PRIMARY_WINDOWS)
-    for acc in accounts:
-        if acc.usage.sentinel is not None:
-            continue
-        for label, (pct, _r) in shown_windows(acc).items():
-            if label in labels:
-                continue
-            if pct > 0 or is_relevant_window(label, tuple(models)):
-                labels.append(label)
-    return tuple(labels)
+def model_windows(acc: AccountSnapshot) -> dict[str, tuple[float, float | None]]:
+    """The account's per-model weekly windows (Fable, ...), 0% ones included:
+    a window the endpoint reports is a real limit, used or not."""
+    if acc.usage.sentinel is not None:
+        return {}
+    return {
+        label: measured
+        for label, measured in shown_windows(acc).items()
+        if label not in PRIMARY_WINDOWS
+    }
+
+
+def table_windows(accounts: Sequence[AccountSnapshot]) -> tuple[str, ...]:
+    """5h, 7d, then the one model column when any account reports a
+    per-model window (each row fills it with :func:`row_model_window`)."""
+    if any(model_windows(acc) for acc in accounts):
+        return (*PRIMARY_WINDOWS, MODEL_SLOT)
+    return PRIMARY_WINDOWS
+
+
+def model_label_need(accounts: Sequence[AccountSnapshot]) -> int:
+    """Cells the model column's label needs: the longest model name, capped."""
+    names = [label for acc in accounts for label in model_windows(acc)]
+    return min(max(map(len, names), default=5), _MAX_MODEL_LABEL_W)
+
+
+def _model_order(
+    models: Sequence[str],
+) -> Callable[[tuple[str, tuple[float, float | None]]], tuple]:
+    """Most binding first: a window that binds switching (the model in use,
+    or a configured one) before one that does not, then the fullest, then
+    the soonest reset."""
+    def key(item: tuple[str, tuple[float, float | None]]) -> tuple:
+        label, (pct, resets_at) = item
+        return (
+            not oauth.model_wanted(label, models),
+            -pct,
+            resets_at if resets_at is not None else float("inf"),
+        )
+
+    return key
+
+
+def row_model_window(
+    acc: AccountSnapshot, models: Sequence[str]
+) -> tuple[str, tuple[float, float | None]] | None:
+    """``(name, (pct, resets_at))`` of the per-model window the row shows,
+    the most binding one (:func:`_model_order`); None when it has none."""
+    windows = model_windows(acc)
+    if not windows:
+        return None
+    return min(windows.items(), key=_model_order(models))
 
 
 def window_cell(
@@ -769,19 +817,25 @@ def window_cell(
     palette: Palette,
     projected: float | None = None,
     unlimited: bool = False,
+    slot: str | None = None,
 ) -> Text:
-    """One window column, exactly ``layout.window_w(label)`` cells:
+    """One window column, exactly ``layout.window_w(slot or label)`` cells:
     ``5h  58% ███▌░░░▕ ↻ 1h20m``. The pct, the solid fill and the countdown
     are measured; the hatch is the projection to the reset, coloured by its
     outcome. An unused window drops its countdown; an absent one is blank,
     or a dim ``no 5h`` when the plan has no such limit (``unlimited``). A
-    stale reading keeps its colours: the row's tag says how old it is."""
-    width = layout.window_w(label)
+    stale reading keeps its colours: the row's tag says how old it is.
+    ``slot`` is the column a window named ``label`` fills (the model one),
+    whose label is then in the model's family hue."""
+    column = slot or label
+    width = layout.window_w(column)
     cell = Text(no_wrap=True)
     if measured is None and unlimited:
         cell.append(f"no {label}", style=f"dim {palette.muted}")
     if measured is not None:  # an absent window is blank, label and all
-        cell.append(label, style=palette.muted)
+        label_w = layout.label_w(column)
+        hue = palette.model_hue(label) if column == MODEL_SLOT else palette.muted
+        cell.append(label[:label_w].ljust(label_w), style=hue)
         pct, resets_at = measured
         cell.append(f" {pct:3.0f}%", style=palette.severity(pct))
         if layout.bar_w:
@@ -1040,8 +1094,10 @@ def account_row_text(
         text.append(" " * _GAP + "usage unknown", style=palette.muted)
         return text
 
-    for label in layout.windows:
-        measured = pcts.get(label)
+    for column in layout.windows:
+        label, measured = column, pcts.get(column)
+        if column == MODEL_SLOT:
+            label, measured = row_model_window(acc, models) or (MODEL_SLOT, None)
         projected = None
         if measured is not None and est is not None and label in est.windows:
             projected = projected_at_reset(est.windows[label], measured[1], now)
@@ -1049,7 +1105,7 @@ def account_row_text(
         text.append(
             window_cell(
                 label, measured, layout, now=now, threshold=threshold, palette=palette,
-                projected=projected, unlimited=no_5h and label == "5h",
+                projected=projected, unlimited=no_5h and label == "5h", slot=column,
             )
         )
     fc = forecast(acc, est, threshold=threshold, now=now, models=models) if layout.forecast_w else None
@@ -1073,14 +1129,20 @@ SIDE_BY_SIDE_MIN_WIDTH = 100
 CHART_MIN_PLOT = 8
 
 
+def side_by_side(width: int, n_blocks: int) -> bool:
+    """Whether ``n_blocks`` graphs sit in one row: two from
+    :data:`SIDE_BY_SIDE_MIN_WIDTH`, each more from another half of it."""
+    return n_blocks >= 2 and width >= n_blocks * SIDE_BY_SIDE_MIN_WIDTH // 2
+
+
 def chart_min_rows(width: int, n_blocks: int = 2) -> int:
     """Spare rows the charts need at ``width``: the account line, then each
     chart's title and a :data:`CHART_MIN_PLOT` plot, side by side on a wide
-    pane (10 rows) or stacked on a narrow one (19)."""
+    pane (10 rows) or stacked on a narrow one (19 for two)."""
     if n_blocks <= 0:
         return 0
     per_block = 1 + CHART_MIN_PLOT
-    if n_blocks == 2 and width >= SIDE_BY_SIDE_MIN_WIDTH:
+    if side_by_side(width, n_blocks):
         return 1 + per_block
     return 1 + n_blocks * per_block
 
@@ -1129,7 +1191,8 @@ def chart_title(
     Only the forecast, said to be an estimate in words: the pct is in the
     table and the reset clock is the chart's right edge."""
     text = Text(no_wrap=True, overflow="ellipsis")
-    text.append(west.window, style=f"bold {palette.accent}")
+    hue = palette.accent if west.window in PRIMARY_WINDOWS else palette.model_hue(west.window)
+    text.append(west.window, style=f"bold {hue}")
     sep = " · "
     est = f"{ESTIMATE_WORD} {ESTIMATE_MARK}"
     rate = west.rate_pct_per_h
@@ -1161,21 +1224,24 @@ def chart_blocks(
     now: float,
     threshold: float | None,
     palette: Palette,
+    models: Sequence[str] = (),
 ) -> list[tuple[Text, object]]:
-    """(title, renderer) for the 5h and 7d charts of the current windows.
+    """(title, renderer) for the 5h and 7d charts of the current windows,
+    then one per per-model window, most binding first (:func:`_model_order`).
 
     Measured history is solid; the projection is dotted and coloured by its
     outcome (:func:`outcome_color`), and left out when the estimate is too
-    thin to trust."""
+    thin to trust. A model window the account estimate skipped (it does not
+    bind) is estimated from its own history."""
     if acc.usage.sentinel is not None:
         return []
     pcts = window_pcts(acc, ())
+    by_model = sorted(model_windows(acc).items(), key=_model_order(models))
     blocks = []
-    for label in PRIMARY_WINDOWS:
-        if label not in pcts:
-            continue
-        pct, resets_at = pcts[label]
-        west = _measured_window(label, est, pcts[label], acc.usage.fetched_at, now)
+    for label, measured in [*((lab, pcts[lab]) for lab in PRIMARY_WINDOWS if lab in pcts), *by_model]:
+        pct, resets_at = measured
+        points = series.get(label, ()) if label not in PRIMARY_WINDOWS else ()
+        west = _measured_window(label, est, measured, acc.usage.fetched_at, now, points)
         west = _at_measured_reset(west, resets_at)
         drawn = west if west.confidence in _TRUSTED else dataclasses.replace(west, rate_pct_per_h=None)
         history = [p for p in series.get(label, ()) if p.t <= now]
@@ -1203,13 +1269,19 @@ def chart_lines(
     height: int,
     palette: Palette = Palette.DARK,
     color: str | None = None,
+    models: Sequence[str] = (),
 ) -> list[Text]:
     """The charts in at most ``height`` lines, or none when fewer than
     :func:`chart_min_rows` are spare: a line naming the account they belong
-    to (and when its plan likely bills next), then the 5h and 7d charts."""
+    to (and when its plan likely bills next), then the 5h and 7d charts and
+    the per-model ones, which give way first when the pane is short."""
     if acc is None or height < CHART_MIN_ROWS:
         return []
-    blocks = chart_blocks(acc, est, series, now=now, threshold=threshold, palette=palette)
+    blocks = chart_blocks(acc, est, series, now=now, threshold=threshold, palette=palette,
+                          models=models)
+    primary = sum(1 for lab in PRIMARY_WINDOWS if lab in window_pcts(acc, ()))
+    while len(blocks) > max(primary, 1) and height < chart_min_rows(width, len(blocks)):
+        blocks.pop()
     if not blocks or height < chart_min_rows(width, len(blocks)):
         return []
     title = Text(f"{CURSOR_MARK} ", style=f"bold {palette.accent}", no_wrap=True)
@@ -1265,24 +1337,25 @@ def history_title(acc: AccountSnapshot, palette: Palette, color: str | None = No
     return text
 
 
-def _side_by_side(left: list[Text], right: list[Text], col_w: int) -> list[Text]:
+def _side_by_side(columns: list[list[Text]], col_w: int) -> list[Text]:
     out = []
-    for i in range(max(len(left), len(right))):
+    for i in range(max(map(len, columns), default=0)):
         line = Text(no_wrap=True)
-        if i < len(left):
-            line.append(left[i])
-        line.pad_right(col_w - line.cell_len + _SIDE_GAP)
-        line.truncate(col_w + _SIDE_GAP)
-        if i < len(right):
-            line.append(right[i])
+        for c, column in enumerate(columns):
+            if i < len(column):
+                line.append(column[i])
+            if c < len(columns) - 1:  # every column but the last is padded to its slot
+                end = (c + 1) * (col_w + _SIDE_GAP)
+                line.pad_right(end - line.cell_len)
+                line.truncate(end)
         out.append(line)
     return out
 
 
 def _block_width(width: int, n_blocks: int) -> int:
     """The width each of ``n_blocks`` graphs gets in a pane ``width`` wide."""
-    if n_blocks == 2 and width >= SIDE_BY_SIDE_MIN_WIDTH:
-        return (width - _SIDE_GAP) // 2
+    if side_by_side(width, n_blocks):
+        return (width - _SIDE_GAP * (n_blocks - 1)) // n_blocks
     return width
 
 
@@ -1293,16 +1366,16 @@ def _arrange(
     ``height`` lines: the plots grow to fill it, so a tall terminal has no
     dead space under them.
 
-    Two blocks go side by side on a wide pane, else they stack and share the
-    height. Each block is its title line plus its plot.
+    Blocks go side by side on a pane wide enough (:func:`side_by_side`), else
+    they stack and share the height. Each block is its title line plus its plot.
     """
     if not blocks or height <= 0:
         return []
-    if len(blocks) == 2 and width >= SIDE_BY_SIDE_MIN_WIDTH:
-        col_w = _block_width(width, 2)
+    if side_by_side(width, len(blocks)):
+        col_w = _block_width(width, len(blocks))
         plot_h = height - 1
         columns = [[title, *render(col_w, plot_h)] if plot_h > 0 else [title] for title, render in blocks]
-        return _side_by_side(columns[0], columns[1], col_w)[:height]
+        return _side_by_side(columns, col_w)[:height]
     each = height // len(blocks)
     lines: list[Text] = []
     for i, (title, render) in enumerate(blocks):
@@ -1661,12 +1734,13 @@ class MainScreen(Screen):
         warn_tags = [len((status_tag(acc, now, warn_days, cadence) or ("",))[0]) for acc in accounts]
         return RowLayout.for_width(
             width,
-            table_windows(accounts, self.app.models),
+            table_windows(accounts),
             name_need=max(map(len, names), default=_MIN_NAME_W),
             short_name_need=max(map(short_name_len, names), default=_MIN_NAME_W),
             tag_need=max(tags, default=0),
             warn_tag_need=max(warn_tags, default=0),
             num_need=max((len(f"#{acc.number}") for acc in accounts), default=0),
+            model_need=model_label_need(accounts),
         )
 
     def _chrome_rows(self) -> int:
@@ -1785,6 +1859,7 @@ class MainScreen(Screen):
                 height=budget,
                 palette=self.palette,
                 color=self.app.account_color(number, self.palette) if number else None,
+                models=self.app.models,
             )
         return Text("\n").join(lines)
 

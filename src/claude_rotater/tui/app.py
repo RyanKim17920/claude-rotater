@@ -57,6 +57,7 @@ from claude_rotater.settings import (
     load_accounts_settings,
     load_settings,
     load_ui_settings,
+    effective_models,
     parse_model_names,
     set_setting,
 )
@@ -259,7 +260,19 @@ class RotaApp(App):
         except Exception:
             self.settings = AutoSwitchSettings()
         self.threshold_pct: float | None = self.settings.threshold
-        self.models: tuple[str, ...] = parse_model_names(self.settings.model)
+        self.configured_models: tuple[str, ...] = parse_model_names(self.settings.model)
+        self.models: tuple[str, ...] = self.configured_models
+        self._refresh_models()
+
+    def _refresh_models(self) -> None:
+        """The model limits that bind: the configured ones plus the models
+        local sessions run (the engine's own view; see
+        ``settings.effective_models``). Cheap: one stat per feed file."""
+        try:
+            in_use = self.switcher.models_in_use()
+        except Exception:
+            in_use = ()
+        self.models = effective_models(self.configured_models, in_use)
 
     def on_mount(self) -> None:
         self.register_theme(ROTA_DARK)
@@ -463,6 +476,7 @@ class RotaApp(App):
         """The scheduled poller only reads the store: the engine fetches."""
         self.memory_mb = self_memory.peak_rss_mb()
         self._memory_log.maybe_log(time.time(), self.memory_mb)
+        self._refresh_models()
         self._start_store_refresh()
         self._refresh_key_spend()
         if (
@@ -612,6 +626,7 @@ class RotaApp(App):
             "identities": {acc.number: account_identity(acc) for acc in snap.accounts},
             "active": next((acc.number for acc in snap.accounts if acc.is_active), None),
             "switch": last_switch_at,
+            "models": self.models,
         }
         with self._estimate_lock:
             if stamps == self._estimate_stamps:

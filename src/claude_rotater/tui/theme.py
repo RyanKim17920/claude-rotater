@@ -14,6 +14,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import ClassVar
 
+from claude_rotater import oauth
+
 from rich.text import Text
 from textual.theme import Theme
 
@@ -97,6 +99,13 @@ class Palette:
             return self.muted
         shades = self.models[family][1]
         return shades[version] if 0 <= version < len(shades) else self.muted
+
+    def model_hue(self, name: str) -> str:
+        """The newest shade of the family of model ``name`` (``Fable``,
+        ``Fable 5.2``); muted for a family rota has no hue for."""
+        family = oauth.model_family(name)
+        known = [fam for fam, _shades in self.models]
+        return self.model(known.index(family)) if family in known else self.muted
 
     def severity(self, pct: float | None) -> str:
         if pct is None:

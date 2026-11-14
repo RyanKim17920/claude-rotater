@@ -29,6 +29,7 @@ from claude_rotater.json_output import (
 from claude_rotater.models import AccountSnapshot, AccountsSnapshot
 from claude_rotater.switcher import ClaudeAccountSwitcher
 from claude_rotater.tui import data as tui_data
+from claude_rotater.tui.main import MODEL_SLOT
 from claude_rotater.tui.theme import SEV_CRIT, SEV_OK, SEV_WARN, Palette
 from claude_rotater.usage_store import UsageEntry
 
@@ -768,8 +769,10 @@ class TestAccountRowText:
 
         return RowLayout.for_width(width, windows, **kw)
 
-    def _text(self, acc, est=None, *, width=120, threshold=90.0, now=None, windows=("5h", "7d"), **kw):
+    def _text(self, acc, est=None, *, width=120, threshold=90.0, now=None, windows=("5h", "7d"),
+              models=(), palette=None, **kw):
         from claude_rotater.tui.main import account_row_text
+        from claude_rotater.tui.theme import Palette
 
         return account_row_text(
             acc,
@@ -777,6 +780,8 @@ class TestAccountRowText:
             self._layout(width, windows, **kw),
             now=now if now is not None else time.time(),
             threshold=threshold,
+            models=models,
+            palette=palette or Palette.DARK,
         )
 
     def _row(self, *args, **kw):
@@ -967,11 +972,47 @@ class TestAccountRowText:
 
     def test_model_window_column(self):
         entry = make_entry(10.0, 20.0, scoped=[("Fable", 55.0)])
-        row = self._row(make_account(1, entry=entry), width=160, windows=("5h", "7d", "Fable"))
+        row = self._row(make_account(1, entry=entry), width=160, windows=("5h", "7d", MODEL_SLOT))
         assert "Fable  55%" in row and row.count("↻") == 3
 
+    def test_three_bars_5h_7d_and_the_model(self):
+        entry = make_entry(10.0, 20.0, scoped=[("Fable", 55.0)])
+        row = self._row(make_account(1, entry=entry), width=160, windows=("5h", "7d", MODEL_SLOT))
+        assert row.index("5h  10%") < row.index("7d  20%") < row.index("Fable  55%")
+        assert row.count("░") >= 3 or row.count("▕") >= 3  # three meters
+
+    def test_two_bars_on_a_plan_without_5h(self):
+        entry = make_entry(None, 20.0, scoped=[("Fable", 55.0)])
+        row = self._row(make_account(1, entry=entry), width=160, windows=("5h", "7d", MODEL_SLOT))
+        assert "no 5h" in row and "7d  20%" in row and "Fable  55%" in row
+        assert "5h " not in row.replace("no 5h", "")
+
+    def test_a_zero_pct_model_window_still_shows(self):
+        entry = make_entry(10.0, 20.0, scoped=[("Fable", 0.0)])
+        row = self._row(make_account(1, entry=entry), width=160, windows=("5h", "7d", MODEL_SLOT))
+        assert "Fable   0%" in row
+
+    def test_the_row_shows_the_most_binding_model(self):
+        entry = make_entry(10.0, 20.0, scoped=[("Opus", 30.0), ("Fable", 70.0)])
+        acc = make_account(1, entry=entry)
+        row = self._row(acc, width=160, windows=("5h", "7d", MODEL_SLOT), model_need=5)
+        assert "Fable  70%" in row and "Opus" not in row
+        # The model in use binds before a fuller one nobody runs.
+        row = self._row(acc, width=160, windows=("5h", "7d", MODEL_SLOT), model_need=5,
+                        models=("opus",))
+        assert "Opus   30%" in row and "Fable" not in row
+
+    def test_model_label_in_its_family_hue(self):
+        from claude_rotater.tui.theme import Palette
+
+        entry = make_entry(10.0, 20.0, scoped=[("Fable", 55.0)])
+        text = self._text(make_account(1, entry=entry), width=160, windows=("5h", "7d", MODEL_SLOT))
+        assert has_color(text, "Fable", Palette.DARK.model_hue("Fable"))
+        assert Palette.DARK.model_hue("Fable") != Palette.DARK.muted
+        assert Palette.DARK.model_hue("Nonesuch") == Palette.DARK.muted
+
     def test_model_column_without_that_window_is_blank(self):
-        row = self._row(make_account(1, entry=make_entry(10.0, 20.0)), width=160, windows=("5h", "7d", "Fable"))
+        row = self._row(make_account(1, entry=make_entry(10.0, 20.0)), width=160, windows=("5h", "7d", MODEL_SLOT))
         assert "Fable" not in row and "·" not in row and "7d  20%" in row
 
     @pytest.mark.parametrize("width", [60, 80, 120, 160])
@@ -979,7 +1020,7 @@ class TestAccountRowText:
         entry = make_entry(62.0, 31.0, scoped=[("Fable", 34.0)])
         est, now = window_est()
         acc = make_account(1, active=True, entry=entry, email="someone@example.com")
-        row = self._row(acc, est, now=now, width=width, windows=("5h", "7d", "Fable"), tag_need=8,
+        row = self._row(acc, est, now=now, width=width, windows=("5h", "7d", MODEL_SLOT), tag_need=8,
                         name_need=19, short_name_need=10)
         assert len(row) <= width
         # name, 5h % and its reset, 7d % at every width
@@ -1085,7 +1126,7 @@ class TestRowLayout:
     def test_bars_shrink_with_the_width(self):
         from claude_rotater.tui.main import RowLayout
 
-        windows = ("5h", "7d", "Fable")
+        windows = ("5h", "7d", MODEL_SLOT)
         widths = [RowLayout.for_width(w, windows, name_need=10, tag_need=9).bar_w for w in (160, 120, 100, 78)]
         assert widths[0] == 10 and 8 <= widths[1] <= 10
         assert widths == sorted(widths, reverse=True) and widths[-1] <= 4
@@ -1093,7 +1134,7 @@ class TestRowLayout:
     def test_degrades_in_order(self):
         from claude_rotater.tui.main import LEVELS, RowLayout
 
-        widths = [RowLayout.for_width(w, ("5h", "7d", "Fable"), tag_need=8)
+        widths = [RowLayout.for_width(w, ("5h", "7d", MODEL_SLOT), tag_need=8)
                   for w in (200, 120, 95, 80, 66, 50)]
         ranks = [LEVELS.index(lay.level) for lay in widths]
         assert ranks == sorted(ranks)
@@ -1515,14 +1556,49 @@ class TestForecast:
 
 
 class TestTableWindows:
-    def test_unused_model_window_is_left_out_unless_it_gates(self):
+    def test_one_model_column_when_any_account_reports_one(self):
+        from claude_rotater.tui.main import MODEL_SLOT, table_windows
+
+        none = [make_account(1, entry=make_entry(10.0, 20.0))]
+        assert table_windows(none) == ("5h", "7d")
+        unused = none + [make_account(2, entry=make_entry(10.0, 20.0, scoped=[("Fable", 0.0)]))]
+        assert table_windows(unused) == ("5h", "7d", MODEL_SLOT)
+        two = [make_account(1, entry=make_entry(10.0, 20.0, scoped=[("Fable", 3.0), ("Opus", 1.0)]))]
+        assert table_windows(two) == ("5h", "7d", MODEL_SLOT)
+
+    def test_a_dead_login_adds_no_column(self):
         from claude_rotater.tui.main import table_windows
 
-        unused = [make_account(1, entry=make_entry(10.0, 20.0, scoped=[("Fable", 0.0)]))]
-        assert table_windows(unused, ()) == ("5h", "7d")
-        assert table_windows(unused, ("fable",)) == ("5h", "7d", "Fable")
-        used = unused + [make_account(2, entry=make_entry(10.0, 20.0, scoped=[("Fable", 3.0)]))]
-        assert table_windows(used, ()) == ("5h", "7d", "Fable")
+        dead = make_account(1, entry=make_entry(sentinel=USAGE_TOKEN_EXPIRED))
+        assert table_windows([dead]) == ("5h", "7d")
+
+    def test_label_width_follows_the_names(self):
+        from claude_rotater.tui.main import model_label_need
+
+        accs = [make_account(1, entry=make_entry(scoped=[("Fable", 1.0)])),
+                make_account(2, entry=make_entry(scoped=[("Sonnet", 1.0)]))]
+        assert model_label_need(accs) == 6
+        assert model_label_need(accs[:1]) == 5
+        assert model_label_need([make_account(3, entry=make_entry(scoped=[("Verylongname", 1.0)]))]) == 6
+
+
+class TestRowModelWindow:
+    def _pick(self, scoped, models=()):
+        from claude_rotater.tui.main import row_model_window
+
+        return row_model_window(make_account(1, entry=make_entry(scoped=scoped)), models)
+
+    def test_none_without_model_windows(self):
+        from claude_rotater.tui.main import row_model_window
+
+        assert row_model_window(make_account(1, entry=make_entry()), ()) is None
+
+    def test_fullest_wins(self):
+        assert self._pick([("Opus", 30.0), ("Fable", 70.0)])[0] == "Fable"
+
+    def test_a_binding_model_beats_a_fuller_free_one(self):
+        assert self._pick([("Opus", 30.0), ("Fable", 70.0)], ("opus",))[0] == "Opus"
+        assert self._pick([("Opus", 30.0), ("Fable", 70.0)], ("all",))[0] == "Fable"
 
 
 class TestRunAction:
@@ -3676,6 +3752,39 @@ class TestChartLines:
         assert len(self._lines(120, 12)) == 12  # fills what is spare
         assert self._lines(80, 18) == [] and len(self._lines(80, 19)) == 19  # stacked
 
+    def test_model_charts_follow_5h_and_7d(self):
+        entry = make_entry(62.0, 31.0, scoped=[("Opus", 10.0), ("Fable", 40.0)])
+        lines = self._lines(200, 20, entry=entry)
+        titles = lines[1].plain
+        # Wide enough for all four side by side; the fuller model first.
+        assert titles.index("5h") < titles.index("7d") < titles.index("Fable") < titles.index("Opus")
+        assert all(len(line.plain) <= 200 for line in lines)
+
+    def test_model_chart_title_in_its_family_hue(self):
+        entry = make_entry(62.0, 31.0, scoped=[("Fable", 40.0)])
+        title = self._lines(200, 12, entry=entry)[1]
+        assert has_color(title, "Fable", Palette.DARK.model_hue("Fable"))
+
+    def test_three_charts_side_by_side_from_150(self):
+        entry = make_entry(62.0, 31.0, scoped=[("Fable", 40.0)])
+        assert "Fable" in self._lines(150, 12, entry=entry)[1].plain
+        assert "Fable" not in self._lines(149, 12, entry=entry)[1].plain
+
+    def test_model_charts_give_way_before_5h_and_7d(self):
+        entry = make_entry(62.0, 31.0, scoped=[("Fable", 40.0)])
+        # 120 wide, 12 rows: room for 5h and 7d side by side, not a third.
+        lines = self._lines(120, 12, entry=entry)
+        assert lines and "5h" in lines[1].plain and "7d" in lines[1].plain
+        assert not any("Fable" in line.plain for line in lines)
+        # Stacked with room for three, the model chart comes back.
+        stacked = self._lines(80, 28, entry=entry)
+        assert any(line.plain.startswith("Fable") for line in stacked)
+
+    def test_no_5h_plan_charts_7d_and_the_model(self):
+        entry = make_entry(None, 31.0, scoped=[("Fable", 40.0)])
+        title = self._lines(120, 12, entry=entry)[1].plain
+        assert title.startswith("7d") and "Fable" in title and "5h" not in title
+
     def test_dead_login_has_no_charts(self):
         from claude_rotater.json_output import USAGE_RELOGIN_REQUIRED
 
@@ -4014,7 +4123,7 @@ class TestWidths:
         plain = make_app(unused)
         async with plain.run_test(size=size) as pilot:
             await settle(pilot)
-            assert "Fable" not in row_plain(plain, "1")  # unused and not gating: no column
+            assert "Fable   0%" in row_plain(plain, "1")  # a real window, even unused
 
     @pytest.mark.parametrize("size", [(80, 24), (120, 40), (160, 50)])
     async def test_long_term_view_fits(self, tmp_path, size):
