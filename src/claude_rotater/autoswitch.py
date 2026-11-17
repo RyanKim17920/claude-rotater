@@ -76,6 +76,7 @@ from claude_rotater.exceptions import ClaudeSwitchError
 from claude_rotater.json_output import (
     SCHEMA_VERSION,
     USAGE_FOREIGN_CREDENTIAL,
+    USAGE_NO_CREDENTIALS,
     USAGE_RELOGIN_REQUIRED,
     USAGE_TOKEN_EXPIRED,
 )
@@ -687,8 +688,14 @@ _COOLDOWN_TRIGGERS = ("proactive", "consume-first", *_POLICY_STRATEGIES)
 # preempt.py). A limit move like at-limit: no cooldown, no manual hold; it
 # still counts against the hourly budget and needs a target with headroom.
 PREEMPT_TRIGGER = "pre-empt"
+# The account on duty is out of rotation (disabled by the user, or refused by
+# the provider): staying is not an option, so like failover it skips the
+# cooldown, the manual hold and the idle-cache wait.
+LEAVE_TRIGGER = "leave"
 # Triggers logged as warnings: the account on duty was (about to be) unusable.
-_LIMIT_TRIGGERS = ("failover", "at-limit", PREEMPT_TRIGGER)
+_LIMIT_TRIGGERS = ("failover", "at-limit", PREEMPT_TRIGGER, LEAVE_TRIGGER)
+# Rows that say an account cannot work: never a leave's last-resort target.
+_DEAD_VALUES = frozenset({USAGE_RELOGIN_REQUIRED, USAGE_NO_CREDENTIALS, USAGE_FOREIGN_CREDENTIAL})
 
 
 class TickOutcome(enum.Enum):
@@ -914,6 +921,36 @@ def note_manual_switch(
         return False
 
 
+def leave_account(
+    switcher: ClaudeAccountSwitcher,
+    settings: AutoSwitchSettings,
+    number: str,
+    why: str,
+) -> dict:
+    """Move this profile off ``number`` if it is on duty, as the auto engine
+    would for a forced move (see ``AutoSwitchEngine.leave_now``). For the
+    user's own disable / remove, from any surface, whoever runs the loop.
+
+    Returns a switch payload: ``{"switched": True, "to": ref}``, or
+    ``{"switched": False, "reason": ...}`` when nothing could take over (or
+    the account was not on duty: ``reason`` is then "").
+    """
+    events: list[AutoSwitchEvent] = []
+    outcome = AutoSwitchEngine(switcher, settings, events.append).leave_now(number, why)
+    moved = next((e for e in events if isinstance(e, SwitchEvent)), None)
+    if outcome is TickOutcome.SWITCHED and moved is not None:
+        return {"switched": True, "from": moved.from_ref, "to": moved.to_ref}
+    said = next(
+        (e for e in reversed(events) if isinstance(e, (NoSwitchEvent, ErrorEvent))), None
+    )
+    reason = ""
+    if isinstance(said, NoSwitchEvent):
+        reason = said.detail or said.reason
+    elif isinstance(said, ErrorEvent):
+        reason = said.message
+    return {"switched": False, "reason": reason}
+
+
 class AutoSwitchEngine:
     """Threshold-policy auto-switcher over a :class:`ClaudeAccountSwitcher`.
 
@@ -1004,6 +1041,8 @@ class AutoSwitchEngine:
         self._login_notifier = login_alerts.LoginNotifier(switcher.backup_dir)
         # The latest tick's usage entries, handed to ``_watch_logins``.
         self._login_entries: dict | None = None
+        # The account a leave is moving off, re-checked under the state lock.
+        self._leaving: str | None = None
 
     # -- state file ---------------------------------------------------------
 
@@ -1289,6 +1328,12 @@ class AutoSwitchEngine:
 
         if not self._model_check_done:
             self._check_model_names(quarantined, usage)
+
+        held = self._held_out(current)
+        if held:
+            # Before every mode and strategy gate: no setting keeps a
+            # profile on an account the user or the provider took away.
+            return self._leave_held_out(current, held, entries, usage, headroom, quarantined)
 
         manual = settings.mode == "manual"
         if manual and not settings.manual_limit_guard:
@@ -1774,6 +1819,89 @@ class AutoSwitchEngine:
         return self._freshen_and_switch(
             ordered, trigger, entries, left_snapshot, failover_reason
         )
+
+    def _held_out(self, number: str) -> str:
+        """Why ``number`` may not stay on duty ("" when it may)."""
+        if self.switcher.is_account_disabled(number):
+            return "disabled"
+        return ""
+
+    def leave_now(self, number: str, why: str) -> TickOutcome:
+        """Move off ``number`` now if it is on duty: the path a user's
+        disable or remove takes, without waiting for the next tick. ``why``
+        is said in the log and the event ("disabled", "being removed")."""
+        current = self.switcher.current_account_number()
+        if current != str(number):
+            return TickOutcome.NO_ACTION
+        state = self._read_state()
+        quarantined = set(
+            state.get("quarantine", {}) if isinstance(state.get("quarantine"), dict) else {}
+        )
+        entries, usage, headroom = self._collect_scheduled_usage(
+            current, quarantined, threshold=self.settings.threshold
+        )
+        return self._leave_held_out(current, why, entries, usage, headroom, quarantined)
+
+    def _leave_held_out(
+        self,
+        current: str,
+        why: str,
+        entries: dict,
+        usage: dict,
+        headroom: dict,
+        quarantined: set,
+    ) -> TickOutcome:
+        """Switch off an account on duty that may not stay there, to the
+        target the strategy would pick for a forced move: readable accounts
+        with room by the strategy's ranking, then (staying being no option)
+        any other one in rotation that is not known dead."""
+        candidates = [
+            n for n in self.switcher.switchable_account_numbers()
+            if n != current and n not in quarantined
+        ]
+        oauth_candidates = [
+            n for n in candidates if self.switcher.account_kind_for(n) != "api_key"
+        ]
+        now = self.clock()
+        ordered, _any_known, _reset = self._rank_candidates(
+            trigger=LEAVE_TRIGGER,
+            consume_first=self.settings.strategy == "consume-first",
+            oauth_candidates=[n for n in oauth_candidates if _fetch_ok(entries.get(n))],
+            no_return=None,
+            usage=usage,
+            headroom=headroom,
+            current=current,
+            active_headroom=None,
+            settings=self.settings,
+            now=now,
+        )
+        if self.settings.strategy in _POLICY_STRATEGIES and len(ordered) > 1:
+            ordered = self._policy_order(current, ordered, usage)
+        if self.settings.include_api_key_accounts:
+            ordered += [n for n in self._usable_keys(current, quarantined) if n not in ordered]
+        ordered += [
+            n for n in oauth_candidates
+            if n not in ordered
+            and not (isinstance(usage.get(n), str) and usage.get(n) in _DEAD_VALUES)
+            and (headroom.get(n) is None or headroom.get(n) > 0)
+        ]
+        if not ordered:
+            self._emit(NoSwitchEvent(
+                reason="held-out-no-target",
+                detail=(
+                    f"account {current} is {why}, but no other account can take "
+                    "over: it stays on duty until one is enabled or added"
+                ),
+            ))
+            return TickOutcome.BLOCKED
+        self._leaving = current
+        try:
+            return self._freshen_and_switch(
+                ordered, LEAVE_TRIGGER, entries, (None, float("inf")),
+                f"leave: account {current} is {why}",
+            )
+        finally:
+            self._leaving = None
 
     def _freshen_and_switch(
         self,
@@ -3120,6 +3248,15 @@ class AutoSwitchEngine:
             paused_until = self._paused_until(state)
             if paused_until is not None:
                 return self._emit_paused(state, paused_until)
+            if trigger == LEAVE_TRIGGER:
+                # Two engines (a TUI's action and a loop) can both see the
+                # held-out account on duty: the loser finds it already left.
+                if self.switcher.current_account_number() != self._leaving:
+                    self._emit(NoSwitchEvent(
+                        reason="already-active",
+                        detail=f"account {self._leaving} was already left",
+                    ))
+                    return TickOutcome.NO_ACTION
 
             result = self.switcher.switch_to(number, json_output=True)
             if not result or not result.get("switched"):
