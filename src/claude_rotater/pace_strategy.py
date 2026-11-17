@@ -36,6 +36,14 @@ account left beside the next one, is not planned (``ALONE_H``): one account
 alone cannot absorb a 5h burst. Without a spend estimate the need ratio
 decides alone.
 
+**Use elsewhere counts.** An account can be spent from another machine, an
+SSH session, claude.ai or another rota profile: its week rises while this
+profile has another account on duty (``estimator.external_burn``). The
+user's own spend leaves that use out, and the plan takes a few hours of it
+(``ELSEWHERE_CREDIT_H``) off what each account has to spend: such use comes
+in bursts, and counting on it for days leaves weeks to expire when it
+stops. An account used up elsewhere loses nothing by being left.
+
 **Finish first.** As an account's reset nears with headroom left, its need
 climbs (hours shrink, headroom does not), so it takes the lead and the
 policy concentrates on it until that quota is spent. No separate rule.
@@ -106,6 +114,15 @@ MOVE_SAVES_PCT = 1.0
 # spent days early, it leaves one account to absorb every 5h burst (the week
 # replay loses more than the switches save without this).
 ALONE_H = 48.0
+# Use elsewhere comes in bursts (another profile's duty, an SSH session):
+# the plan credits this many hours of its recent rate, not a rate that goes
+# on all week. Replaying recorded weeks, about three hours of it predicted
+# the next day's use elsewhere best; counting on a week's average all week
+# left 51 more points to expire in one recorded week, when that use stopped.
+ELSEWHERE_CREDIT_H = 3.0
+# Use elsewhere this fast or faster is named in a planned stay or move: a
+# third of a week's points over a week.
+ELSEWHERE_NOTE_PCT = 0.2
 
 
 def seven_day_left(view: AccountView, threshold: float) -> float:
@@ -152,19 +169,45 @@ def can_wait(
     return seven_day_left(target, threshold) * DEFER_SAFETY <= burn_pct_per_h * spare_h
 
 
+def _elsewhere(external: dict[str, float] | None, view: AccountView) -> float:
+    """7d points per hour someone else spends on ``view`` (0 when unknown)."""
+    return (external or {}).get(view.number, 0.0)
+
+
+def plan_left(
+    view: AccountView,
+    *,
+    threshold: float,
+    now: float,
+    external: dict[str, float] | None = None,
+) -> float:
+    """7d points the user has to spend on ``view``: what it has left, less
+    ``ELSEWHERE_CREDIT_H`` of the use elsewhere it shows (``external``,
+    points per hour, ``estimator.external_burn``), never below 0."""
+    credit_h = min(ELSEWHERE_CREDIT_H, hours_left(view, now))
+    return max(0.0, seven_day_left(view, threshold) - _elsewhere(external, view) * credit_h)
+
+
 def plan_loss(
-    order: list[AccountView], *, threshold: float, rate: float, now: float
+    order: list[AccountView],
+    *,
+    threshold: float,
+    rate: float,
+    now: float,
+    external: dict[str, float] | None = None,
 ) -> float:
     """7d points left unused at the resets if the user spends ``rate`` points
     per hour on ``order[0]`` until it is done (or its week ends), then on the
     rest earliest reset first. ``rate`` is a spend per wall hour, nights
-    included, so a plan that fits at it fits the user's real days."""
+    included, so a plan that fits at it fits the user's real days. What
+    each account has to spend is :func:`plan_left`: use elsewhere that
+    spends an account loses nothing."""
     first, rest = order[0], order[1:]
     rest = sorted(rest, key=lambda v: hours_left(v, now))
     cursor_h = 0.0
     lost = 0.0
     for v in (first, *rest):
-        left = seven_day_left(v, threshold)
+        left = plan_left(v, threshold=threshold, now=now, external=external)
         avail_h = max(0.0, hours_left(v, now) - cursor_h)
         if left <= rate * avail_h:
             cursor_h += left / rate
@@ -181,17 +224,22 @@ def _keeps_a_spare(
     threshold: float,
     rate: float,
     now: float,
+    external: dict[str, float] | None = None,
 ) -> bool:
     """Whether finishing the active account first still leaves a second
     account beside the one in use. Spent early in its week, it is out until
     its reset, and a lone account blocks the user at its 5h limit: so a stay
     is planned only when the active account's week rolls over within
     ``ALONE_H`` of it being done (at the slower planned spend), or two other
-    accounts have meaningful 7d left."""
-    done_h = seven_day_left(active, threshold) / (rate / DEFER_SAFETY)
+    accounts have meaningful 7d left (both after use elsewhere,
+    :func:`plan_left`)."""
+    def left(v: AccountView) -> float:
+        return plan_left(v, threshold=threshold, now=now, external=external)
+
+    done_h = left(active) / (rate / DEFER_SAFETY)
     if hours_left(active, now) - done_h <= ALONE_H:
         return True
-    spare = [v for v in others if seven_day_left(v, threshold) >= MEANINGFUL_ABSORB_PCT]
+    spare = [v for v in others if left(v) >= MEANINGFUL_ABSORB_PCT]
     return len(spare) >= 2
 
 
@@ -208,6 +256,7 @@ def _best_move(
     threshold: float,
     rate: float,
     now: float,
+    external: dict[str, float] | None = None,
 ) -> tuple[AccountView | None, float]:
     """The target whose move saves the most 7d against staying, and how much
     (the most at any planned spend). None when no move saves
@@ -218,8 +267,10 @@ def _best_move(
     for target in targets:
         rest = [v for v in others if v.number != target.number]
         saved = max(
-            plan_loss([active, *others], threshold=threshold, rate=r, now=now)
-            - plan_loss([target, active, *rest], threshold=threshold, rate=r, now=now)
+            plan_loss([active, *others], threshold=threshold, rate=r, now=now,
+                      external=external)
+            - plan_loss([target, active, *rest], threshold=threshold, rate=r, now=now,
+                        external=external)
             for r in _plan_rates(rate)
         )
         if saved > best_saved:
@@ -227,6 +278,18 @@ def _best_move(
     if best_saved < MOVE_SAVES_PCT:
         return None, best_saved
     return best, best_saved
+
+
+def _elsewhere_note(external: dict[str, float] | None, views: list[AccountView]) -> str:
+    """``; #3 used elsewhere at ~0.8%/h`` for each account whose use
+    elsewhere the plan counts (``ELSEWHERE_NOTE_PCT``), most first."""
+    used = sorted(
+        (v for v in views if _elsewhere(external, v) >= ELSEWHERE_NOTE_PCT),
+        key=lambda v: -_elsewhere(external, v),
+    )
+    return "".join(
+        f"; #{v.number} used elsewhere at ~{_elsewhere(external, v):.1f}%/h" for v in used
+    )
 
 
 def _five_used(view: AccountView) -> float:
@@ -314,6 +377,7 @@ def choose(
     cold: bool = True,
     waited_s: float = 0.0,
     typical_burn_pct_per_h: float | None = None,
+    external_pct_per_h: dict[str, float] | None = None,
 ) -> Choice:
     """Stay or move, for an active account that is healthy and below the
     threshold. ``candidates`` must already be filtered to healthy accounts
@@ -325,12 +389,17 @@ def choose(
     ``typical_burn_pct_per_h``, the user's spend per wall hour over the last
     days; ``burn_pct_per_h`` when unknown) or the target is urgent
     (``URGENT_RATIO``) and has waited ``URGENT_WAIT_S`` already
-    (``waited_s``: how long the caller has been holding this move)."""
+    (``waited_s``: how long the caller has been holding this move).
+
+    ``external_pct_per_h``: per account, 7d points per wall hour used
+    elsewhere (``forecast.external_burns``); ``typical_burn_pct_per_h`` is
+    then the user's own spend, without that use."""
     # Only a spend per wall hour can plan a week: the duty burn is a rate
     # per hour of use and would make every stay look affordable.
     choice = _choose(
         active, candidates, threshold=threshold, margin=margin,
         burn_pct_per_h=burn_pct_per_h, now=now, plan_rate=typical_burn_pct_per_h,
+        external=external_pct_per_h,
     )
     if choice.action != "switch" or cold:
         return choice
@@ -368,6 +437,7 @@ def _choose(
     burn_pct_per_h: float | None,
     now: float,
     plan_rate: float | None = None,
+    external: dict[str, float] | None = None,
 ) -> Choice:
     me = active.number
 
@@ -431,22 +501,26 @@ def _choose(
             f"#{lead.number} needs {fleet.pace(lead)} but its 5h is "
             f"{_five_used(lead):.0f}% used"
         )
-    if not plan_rate or not _keeps_a_spare(active, others, threshold=threshold, rate=plan_rate, now=now):
+    note = _elsewhere_note(external, [active, *others])
+    if not plan_rate or not _keeps_a_spare(
+        active, others, threshold=threshold, rate=plan_rate, now=now, external=external,
+    ):
         target = targets[0]
-        return switch(target, f"{fleet.deadline(target)} vs #{me} {fleet.pace(active)}")
+        return switch(target, f"{fleet.deadline(target)} vs #{me} {fleet.pace(active)}{note}")
     target, saved = _best_move(
         active, [active, *others], targets, threshold=threshold, rate=plan_rate, now=now,
+        external=external,
     )
     if target is None:
         return stay(
             f"#{me} can finish its {left:.0f}% of 7d first and every other "
             f"week still fits at {plan_rate:.1f}%/h; #{ahead[0].number} "
-            f"needs {fleet.pace(ahead[0])}"
+            f"needs {fleet.pace(ahead[0])}{note}"
         )
     return switch(
         target,
         f"{fleet.deadline(target)} vs #{me} {fleet.pace(active)}; staying would "
-        f"leave {saved:.0f}% of 7d unused",
+        f"leave {saved:.0f}% of 7d unused{note}",
     )
 
 

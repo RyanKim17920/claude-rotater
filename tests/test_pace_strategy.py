@@ -1038,9 +1038,9 @@ class TestEngineCache:
         h = make_pace(temp_home)
         assert h.engine.feed is None
         burning(h)
-        cold, _ = h.engine._cache_inputs("1", h.clock.now)
+        cold, _, _ = h.engine._cache_inputs("1", h.clock.now)
         assert not cold
-        cold, _ = h.engine._cache_inputs("1", h.clock.now + ps.CACHE_TTL_S)
+        cold, _, _ = h.engine._cache_inputs("1", h.clock.now + ps.CACHE_TTL_S)
         assert cold
 
 
@@ -1084,3 +1084,89 @@ class TestSimulatedCacheCost:
         now = self.totals()
         idle = self.totals(idle_aware=True)
         assert idle[1] <= now[1] * 1.01
+
+
+# ---------------------------------------------------------------------------
+# Use elsewhere (another machine, SSH, another profile)
+# ---------------------------------------------------------------------------
+
+
+class TestUseElsewhere:
+    def test_an_account_spent_elsewhere_loses_nothing_left_alone(self):
+        a = view("1", seven=50.0, reset_h=100.0)
+        b = view("2", seven=84.0, reset_h=3.0)  # 6 left, used elsewhere 2%/h
+        assert ps.plan_loss([a, b], threshold=90.0, rate=1.0, now=NOW) == pytest.approx(6.0)
+        assert ps.plan_loss([a, b], threshold=90.0, rate=1.0, now=NOW,
+                            external={"2": 2.0}) == 0.0
+
+    def test_only_a_few_hours_of_it_are_counted_on(self):
+        b = view("2", seven=40.0, reset_h=100.0)
+        left = ps.plan_left(b, threshold=90.0, now=NOW, external={"2": 2.0})
+        assert left == pytest.approx(50.0 - 2.0 * ps.ELSEWHERE_CREDIT_H)
+        # Never below zero, never past the reset.
+        soon = view("2", seven=89.0, reset_h=1.0)
+        assert ps.plan_left(soon, threshold=90.0, now=NOW, external={"2": 9.0}) == 0.0
+
+    def test_use_elsewhere_turns_a_move_into_a_stay(self):
+        """#2 resets in 6h with 10 left and leads #1 3x: at 1%/h, moving
+        saves 6 points. Spent elsewhere at 4%/h, nothing is saved."""
+        a = view("1", seven=40.0, reset_h=100.0)
+        b = view("2", seven=80.0, reset_h=6.0)
+        assert choose(a, b, burn=1.0, typical=1.0).action == "switch"
+        c = ps.choose(a, [b], threshold=90.0, margin=1.5, hysteresis_pct=10.0,
+                      burn_pct_per_h=1.0, now=NOW, typical_burn_pct_per_h=1.0,
+                      external_pct_per_h={"2": 4.0})
+        assert c.action == "stay"
+        assert "#2 used elsewhere at ~4.0%/h" in c.reason
+
+    def test_use_elsewhere_turns_a_stay_into_a_move(self):
+        """Finishing #1 first leaves it days early: a stay needs two spares.
+        #3 and #4 have 8 points each, but are spent elsewhere at 2%/h."""
+        a = view("1", seven=60.0, reset_h=150.0)
+        b = view("2", seven=70.0, reset_h=50.0)
+        c3 = view("3", seven=82.0, reset_h=160.0)
+        c4 = view("4", seven=82.0, reset_h=160.0)
+        kw = dict(threshold=90.0, margin=1.5, hysteresis_pct=10.0, burn_pct_per_h=2.0,
+                  now=NOW, typical_burn_pct_per_h=2.0)
+        assert ps.choose(a, [b, c3, c4], **kw).action == "stay"
+        moved = ps.choose(a, [b, c3, c4], **kw, external_pct_per_h={"3": 2.0, "4": 2.0})
+        assert (moved.action, moved.target) == ("switch", "2")
+
+    def test_slow_use_elsewhere_is_not_named(self):
+        a = view("1", seven=40.0, reset_h=100.0)
+        b = view("2", seven=80.0, reset_h=6.0)
+        c = ps.choose(a, [b], threshold=90.0, margin=1.5, hysteresis_pct=10.0,
+                      burn_pct_per_h=1.0, now=NOW, typical_burn_pct_per_h=1.0,
+                      external_pct_per_h={"2": 0.1})
+        assert "elsewhere" not in c.reason
+
+
+class TestEngineUseElsewhere:
+    def test_the_engine_reads_use_elsewhere_off_history_and_duty(self, temp_home):
+        h = make_pace(temp_home)
+        history = h.switcher.usage_history
+        history.clock = h.clock
+        idents = h.switcher.usage_identities()
+        start = h.clock.now
+        history.set_duty(h.switcher.backup_dir, active=idents["1"], since=start - 3600,
+                         members=idents.values())
+        for k in range(37):  # #2 climbs 1%/h for 6h while #1 is on duty
+            history.record({"2": usage_at(start, seven=20 + k / 6, reset_h=100)},
+                           {"2": idents["2"]}, start + k * 600)
+        h.clock.now = start + 6 * H
+        _cold, _typical, external = h.engine._cache_inputs("1", h.clock.now)
+        assert external["2"] == pytest.approx(1.0, abs=0.25)
+        assert external["1"] == 0.0
+
+
+def test_the_week_replay_sees_use_elsewhere_and_loses_no_more():
+    """Account 3 is spent elsewhere 1%/h through each afternoon: pace reads
+    it off the replay's readings and loses no more 7d than when blind."""
+    def extra(i, t):
+        return 1.0 if i == 2 and 12 <= (t / H) % 24 < 18 else 0.0
+
+    kw = dict(rate=3.0, weeks=2, extra_fn=extra, switch_cost=0.35, idle_aware=True)
+    seen = _week_sim.simulate("pace", [30.0, 90.0, 150.0], **kw)
+    blind = _week_sim.simulate("pace", [30.0, 90.0, 150.0], see_external=False, **kw)
+    assert seen.lost <= blind.lost + ps.MOVE_SAVES_PCT
+    assert seen.blocked_h <= blind.blocked_h + 0.5

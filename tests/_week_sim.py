@@ -31,6 +31,8 @@ from collections.abc import Callable, Iterable
 
 from claude_rotater import expiring_first as ef
 from claude_rotater import pace_strategy
+from claude_rotater.estimator import EXTERNAL_LOOKBACK_S, external_burn, off_duty
+from claude_rotater.usage_history import Point
 
 H = 3600.0
 WEEK_S = 7 * 24 * H
@@ -124,6 +126,7 @@ def simulate(
     plan_weeks: bool = True,
     want_fn: Callable[[float], float] | None = None,
     extra_fn: Callable[[int, float], float] | None = None,
+    see_external: bool = True,
 ) -> Result:
     """Replay ``weeks`` of work. ``start_seven`` gives each account's 7d use
     at the start (default all fresh) and ``start_active`` the account on duty.
@@ -136,7 +139,9 @@ def simulate(
     ``want_fn``: 7d points per hour the user wants at ``t`` (a recorded
     trace) in place of ``demand``; ``extra_fn``: points per hour spent on
     account ``i`` at ``t`` from elsewhere (another machine or profile),
-    whichever account is active."""
+    whichever account is active. ``see_external``: with ``extra_fn``, give
+    pace the use elsewhere the engine would read: integer 7d readings every
+    step, the duty spans, ``estimator.external_burn``."""
     accts = [
         Acct(str(i + 1), reset_at=off * H, seven=start_seven[i] if start_seven else 0.0)
         for i, off in enumerate(reset_offsets_h)
@@ -150,6 +155,10 @@ def simulate(
     burn_log: list[tuple[float, float]] = []  # (t, points) for the burn estimate
     last_work: float | None = None
     wanted_since: float | None = None  # a move held for cold caches, since
+    watch = extra_fn is not None and see_external
+    readings: dict[str, list[Point]] = {a.number: [] for a in accts}
+    spans: list[tuple[float, float, str | None]] = []  # past duty
+    duty_from = 0.0
     t = 0.0
     while t < weeks * WEEK_S:
         for a in accts:
@@ -178,12 +187,20 @@ def simulate(
             if got < want - 1e-9:
                 res.blocked_h += (1 - got / want) * STEP_S / H
         burn_log = [(bt, p) for bt, p in burn_log if t - bt < 24 * H]
+        if watch:
+            keep = t - EXTERNAL_LOOKBACK_S - H
+            for a in accts:
+                pts = readings[a.number]
+                pts.append(Point(t, float(round(a.seven)), a.reset_at))
+                while pts[0].t < keep:
+                    pts.pop(0)
+            spans = [sp for sp in spans if sp[1] > keep]
         burn = sum(p for _, p in burn_log) / 24.0 or None
 
         cold = pace_strategy.caches_cold(last_work, t)
 
         def move(target: Acct) -> None:
-            nonlocal active, pending, wanted_since
+            nonlocal active, pending, wanted_since, duty_from
             if switch_cost and not cold:
                 spend = min(switch_cost, 100.0 - target.seven)
                 if target.five_reset is None:
@@ -191,6 +208,8 @@ def simulate(
                 target.seven += spend
                 target.five = min(100.0, target.five + spend * FIVE_PER_SEVEN)
                 res.rebuild += spend
+            spans.append((duty_from, t, active.number))
+            duty_from = t
             active = target
             pending = None
             wanted_since = None
@@ -215,6 +234,14 @@ def simulate(
                 continue
             views = [a.view(t) for a in healthy]
             if strategy == "pace":
+                external = None
+                if watch:
+                    duty = [*spans, (duty_from, t, active.number)]
+                    external = {
+                        a.number: external_burn(
+                            readings[a.number], off_duty(duty, a.number, now=t), now=t)
+                        for a in accts
+                    }
                 choice = pace_strategy.choose(
                     active.view(t), views, threshold=threshold, margin=margin,
                     hysteresis_pct=HYSTERESIS, burn_pct_per_h=burn, now=t,
@@ -222,6 +249,7 @@ def simulate(
                     waited_s=0.0 if wanted_since is None else t - wanted_since,
                     # The 24h burn is a spend per wall hour: the typical one.
                     typical_burn_pct_per_h=burn if plan_weeks else None,
+                    external_pct_per_h=external,
                 )
                 if choice.waiting_for is not None:
                     if wanted_since is None:

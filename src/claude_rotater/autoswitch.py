@@ -74,6 +74,7 @@ from claude_rotater.estimator import (
     typical_burn,
 )
 from claude_rotater.exceptions import ClaudeSwitchError
+from claude_rotater.forecast import elsewhere, external_burns
 from claude_rotater.json_output import (
     SCHEMA_VERSION,
     USAGE_FOREIGN_CREDENTIAL,
@@ -2991,7 +2992,9 @@ class AutoSwitchEngine:
         ]
         burn = self._burn_rate(current, now) if healthy else None
         if settings.strategy == "pace":
-            cold, typical = self._cache_inputs(current, now) if healthy else (True, None)
+            cold, typical, external = (
+                self._cache_inputs(current, now) if healthy else (True, None, None)
+            )
             waiting = self._cache_wait
             if waiting is not None and waiting[0] != current:
                 waiting = None
@@ -3006,6 +3009,7 @@ class AutoSwitchEngine:
                 cold=cold,
                 waited_s=0.0 if waiting is None else now - waiting[2],
                 typical_burn_pct_per_h=typical,
+                external_pct_per_h=external,
             )
         return expiring_first.choose(
             active,
@@ -3017,25 +3021,36 @@ class AutoSwitchEngine:
             now=now,
         )
 
-    def _cache_inputs(self, current: str, now: float) -> tuple[bool, float | None]:
-        """``(cold, typical burn)`` for pace's cache rule. Cold: no local
-        turn for a cache lifetime, read off the statusline feed when it has
-        reported one, else off the active account's last usage rise (which
-        also counts use elsewhere, so it errs on waiting). Typical burn: the
-        user's 7d spend per wall hour over the last week, every account
-        summed (``estimator.typical_burn``). History is advisory: unreadable
-        reads as cold and unknown, which moves as before."""
+    def _cache_inputs(
+        self, current: str, now: float
+    ) -> tuple[bool, float | None, dict[str, float] | None]:
+        """``(cold, typical burn, use elsewhere)`` for pace's cache rule and
+        plan. Cold: no local turn for a cache lifetime, read off the
+        statusline feed when it has reported one, else off the active
+        account's last usage rise (which also counts use elsewhere, so it
+        errs on waiting). Use elsewhere: per slot, 7d points per hour spent
+        while this profile had another account on duty
+        (``forecast.external_burns``). Typical burn: the user's own 7d spend
+        per wall hour over the last week, every account summed, that use
+        left out (``estimator.typical_burn``). History is advisory:
+        unreadable reads as cold and unknown, which moves as before."""
         activity = self.feed.last_activity_at if self.feed is not None else None
-        typical = None
+        typical = external = None
         try:
             identities = self.switcher.usage_identities()
-            series = self.switcher.usage_history.live_series(identities)
-            typical = typical_burn(series.values(), now=now)
+            history = self.switcher.usage_history
+            series = history.live_series(identities)
+            off = elsewhere(history.duty(), identities, self.switcher.backup_dir, now=now)
+            external = external_burns(series, off, now=now)
+            typical = typical_burn(
+                [series.get(num, {}) for num in off], now=now,
+                elsewhere=[off[num] for num in off],
+            )
             if activity is None:
                 activity = last_rise(series.get(current, {}))
         except Exception as e:  # never break a tick over advice
             _logger.debug("cache inputs unavailable: %r", e)
-        return pace_strategy.caches_cold(activity, now), typical
+        return pace_strategy.caches_cold(activity, now), typical, external
 
     def _policy_move(
         self,
