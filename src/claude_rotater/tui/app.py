@@ -189,9 +189,12 @@ class RotaApp(App):
         engine_factory: EngineFactory | None = None,
         login_factory: Callable[..., StagedLogin] | None = None,
         refresher_factory: Callable[..., TokenRefresher] | None = None,
+        leaver: Callable[..., dict] | None = None,
     ) -> None:
         super().__init__()
         self.switcher = switcher
+        # Moves off an account the user takes out of rotation (tests fake it).
+        self._leaver = leaver
         self._detected = detected  # terminal background sensed pre-driver, or None
         self._engine_factory = engine_factory or default_engine_factory
         self._login_factory = login_factory or StagedLogin
@@ -847,7 +850,8 @@ class RotaApp(App):
             if payload.get("switched"):
                 to = payload.get("to") or {}
                 target = to.get("email") or f"account {to.get('number')}"
-                self.say(f"switched to {target}", "ok")
+                done = f"{payload['done']}; " if payload.get("done") else ""
+                self.say(f"{done}switched to {target}", "ok")
             else:
                 reason = str(payload.get("reason") or "no switch performed")
                 self.say(f"no switch: {reason}", "warn")
@@ -881,10 +885,21 @@ class RotaApp(App):
             return
         target = not acc.disabled
         verb = "Disable" if target else "Enable"
-        self._start_action(
-            f"{verb} account {number}",
-            partial(self.switcher.set_account_disabled, number, target),
-        )
+        fn = partial(self.switcher.set_account_disabled, number, target)
+        if target and acc.is_active:
+            fn = partial(self._then_leave, fn, number, "disabled")
+        self._start_action(f"{verb} account {number}", fn)
+
+    def _then_leave(self, first, number: str, why: str) -> dict:
+        """Run ``first`` (the disable or the removal's first half), then
+        move this profile off ``number``: staying on an account the user
+        took out of rotation is not an option. Runs on the action thread."""
+        first()
+        payload = self._leave(number, why)
+        payload["done"] = f"{why} account {number}"
+        if not payload["switched"]:
+            payload["reason"] = payload["reason"] or f"account {number} is no longer on duty"
+        return payload
 
     def confirm_remove(self, number: str, email: str) -> None:
         self.prompt.confirm(
@@ -894,11 +909,34 @@ class RotaApp(App):
         )
 
     def _on_remove_confirm(self, number: str, confirmed: bool) -> None:
-        if confirmed:
-            self._start_action(
-                f"Remove account {number}",
-                partial(self.switcher.remove_account, number, assume_yes=True),
+        if not confirmed:
+            return
+        remove = partial(self.switcher.remove_account, number, assume_yes=True)
+        acc = self._account(number)
+        if acc is not None and acc.is_active:
+            remove = partial(self._leave_then_remove, number, remove)
+        self._start_action(f"Remove account {number}", remove)
+
+    def _leave(self, number: str, why: str) -> dict:
+        if self._leaver is None:
+            from claude_rotater.autoswitch import leave_account
+
+            self._leaver = leave_account
+        return self._leaver(self.switcher, self.settings, number, why)
+
+    def _leave_then_remove(self, number: str, remove) -> dict:
+        """Removing the account on duty: switch off it first (while its
+        login is still managed, so the switch backs it up the normal way),
+        then remove it. With nowhere to go it is removed all the same and
+        the live login stays as it is."""
+        payload = self._leave(number, "being removed")
+        remove()
+        payload["done"] = f"removed account {number}"
+        if not payload["switched"]:
+            payload["reason"] = (
+                f"removed account {number}, but {payload['reason'] or 'nothing could take over'}"
             )
+        return payload
 
     def confirm_split(self) -> None:
         """``S``: give this profile a settings.json of its own, so an API key

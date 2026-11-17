@@ -352,10 +352,24 @@ def fake_refresher(monkeypatch):
     return FakeRefresher
 
 
+def fake_leave(fake: FakeSwitcher, _settings, number: str, why: str) -> dict:
+    """Stands in for ``autoswitch.leave_account``: moves to the first other
+    account in rotation, if any."""
+    fake.calls.append(("leave", str(number), why))
+    target = next(
+        (a.number for a in fake._accounts
+         if a.number != str(number) and not a.disabled and a.kind == "oauth"),
+        None,
+    )
+    if target is None:
+        return {"switched": False, "reason": "no other account can take over"}
+    return fake.switch_to(target, json_output=True)
+
+
 def make_app(fake: FakeSwitcher):
     from claude_rotater.tui.app import RotaApp
 
-    return RotaApp(fake)
+    return RotaApp(fake, leaver=fake_leave)
 
 
 async def settle(pilot) -> None:
@@ -2221,13 +2235,52 @@ class TestMainPage:
         app = make_app(three_accounts(tmp_path))
         async with app.run_test(size=(120, 40)) as pilot:
             await settle(pilot)
+            await pilot.press("down", "d")
+            await settle(pilot)
+            assert ("set_disabled", "2", True) in fake_calls(app)
+            assert "disabled" in row_plain(app, "2")
+            assert not any(c[0] == "leave" for c in fake_calls(app))  # not on duty
             await pilot.press("d")
             await settle(pilot)
-            assert ("set_disabled", "1", True) in fake_calls(app)
-            assert "disabled" in row_plain(app, "1")
+            assert ("set_disabled", "2", False) in fake_calls(app)
+
+    async def test_disabling_the_account_on_duty_moves_off_it(self, tmp_path):
+        app = make_app(three_accounts(tmp_path))
+        async with app.run_test(size=(120, 40)) as pilot:
+            await settle(pilot)
             await pilot.press("d")
             await settle(pilot)
-            assert ("set_disabled", "1", False) in fake_calls(app)
+            calls = fake_calls(app)
+            assert calls[:3] == [
+                ("set_disabled", "1", True), ("leave", "1", "disabled"), ("switch_to", "2"),
+            ]
+            assert app.switcher.active == "2"
+            assert prompt_plain(app).startswith("disabled account 1; switched to")
+
+    async def test_disabling_the_last_account_in_rotation_says_it_stays(self, tmp_path):
+        fake = FakeSwitcher([make_account(1, active=True, entry=make_entry()),
+                             make_account(2, disabled=True)], tmp_path)
+        app = make_app(fake)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await settle(pilot)
+            await pilot.press("d")
+            await settle(pilot)
+            assert fake.active == "1"
+            assert "no switch: no other account can take over" in prompt_plain(app)
+
+    async def test_removing_the_account_on_duty_leaves_it_first(self, tmp_path):
+        app = make_app(three_accounts(tmp_path))
+        async with app.run_test(size=(120, 40)) as pilot:
+            await settle(pilot)
+            await pilot.press("x")
+            await pilot.pause()
+            await pilot.press("y")
+            await settle(pilot)
+            calls = fake_calls(app)
+            assert calls[:3] == [
+                ("leave", "1", "being removed"), ("switch_to", "2"), ("remove", "1", True),
+            ]
+            assert prompt_plain(app).startswith("removed account 1; switched to")
 
     async def test_x_asks_on_the_prompt_line_then_removes(self, tmp_path):
         from claude_rotater.tui.main import AccountRow, MainScreen

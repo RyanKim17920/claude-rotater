@@ -1247,8 +1247,8 @@ class ClaudeAccountSwitcher:
             active = data.get("activeAccountNumber")
             if str(active) == account_num:
                 print(dimmed(
-                    "  It is the active account — it stays live until you switch "
-                    "away; it just won't be an automatic switch target."
+                    "  It is the active account: rota moves this profile off it "
+                    "to the next account in rotation."
                 ))
             if not self.switchable_account_numbers():
                 warning(
