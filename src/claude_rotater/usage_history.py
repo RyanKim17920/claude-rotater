@@ -285,19 +285,26 @@ class UsageHistory:
     ) -> None:
         """Say which account ``data_dir`` has on duty (``active``), since its
         last switch (``since``), and which accounts it holds. Written only
-        when something changed, so calling it every pass costs a read."""
+        when something changed, so calling it every pass costs a read.
+
+        The duty it replaces is kept as a past span (``past``, ``[start,
+        end, key]``, for ``DUTY_PAST_S``): when each account was on duty
+        here, which :func:`duty_spans` reads back."""
         record = {
             "active": None if active is None else _identity_key(active),
             "since": since,
             "members": sorted({_identity_key(i) for i in members}),
         }
         key = str(data_dir)
-        if _duty_of(self._read_raw()).get(key) == record:
+        if _same_duty(_duty_of(self._read_raw()).get(key), record):
             return
+        now = self.clock()
 
         def edit(table: dict) -> bool:
-            if table.get(key) == record:
+            prev = table.get(key)
+            if _same_duty(prev, record):
                 return False
+            record["past"] = _past_duty(prev, record, now)
             table[key] = record
             for other in list(table):  # a data dir removed since
                 if other != key and not Path(other).is_dir():
@@ -621,6 +628,72 @@ def shared_duty(
         ]
         out[num] = (on_duty, max(stamps) if stamps else None)
     return out
+
+
+# How long a profile's past duty spans are kept: the week the typical spend
+# looks back over, and a day to spare.
+DUTY_PAST_S = 8 * 86400.0
+
+
+def _same_duty(a: dict | None, b: dict) -> bool:
+    """Two duty records saying the same now (their past aside)."""
+    return a is not None and all(a.get(k) == b[k] for k in ("active", "since", "members"))
+
+
+def _is_epoch(value: object) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+
+def _valid_span(span: object) -> bool:
+    return (
+        isinstance(span, list) and len(span) == 3
+        and _is_epoch(span[0]) and _is_epoch(span[1]) and isinstance(span[2], str)
+    )
+
+
+def _past_duty(prev: dict | None, record: dict, now: float) -> list:
+    """``prev``'s past spans, plus its own duty if ``record`` ends it: from
+    its switch to the new one (to now when no later switch says when). Only
+    a change of members ends nothing; a duty with no switch time has no
+    known start and adds nothing."""
+    past = [
+        span for span in (prev or {}).get("past", ())
+        if _valid_span(span) and span[1] >= now - DUTY_PAST_S
+    ]
+    if prev is None or not isinstance(prev.get("active"), str) or not _is_epoch(prev.get("since")):
+        return past
+    if (prev["active"], prev["since"]) == (record["active"], record["since"]):
+        return past
+    start, since = float(prev["since"]), record["since"]
+    end = float(since) if _is_epoch(since) and since > start else now
+    if end > start:
+        past.append([start, end, prev["active"]])
+    return past
+
+
+def duty_spans(
+    duty: dict[str, dict],
+    identities: dict[str, Identity],
+    data_dir: Path | str,
+    *,
+    now: float,
+) -> list[tuple[float, float, str | None]]:
+    """When ``data_dir`` had which of its slots on duty, oldest first: its
+    past spans and the duty running now (from its switch). The slot is None
+    for an account it no longer holds. Time no span covers is unknown."""
+    record = duty.get(str(data_dir))
+    if not isinstance(record, dict):
+        return []
+    slot = {_identity_key(identity): num for num, identity in identities.items()}
+    past = record.get("past")
+    spans = [
+        (float(a), float(b), slot.get(k))
+        for a, b, k in (span for span in past if _valid_span(span))
+    ] if isinstance(past, list) else []
+    active, since = record.get("active"), record.get("since")
+    if isinstance(active, str) and _is_epoch(since) and since < now:
+        spans.append((float(since), now, slot.get(active)))
+    return sorted(spans)
 
 
 def _rows_of(raw: dict) -> dict[str, dict]:

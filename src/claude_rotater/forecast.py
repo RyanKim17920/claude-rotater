@@ -13,8 +13,14 @@ from __future__ import annotations
 import time
 from pathlib import Path
 
-from claude_rotater.estimator import AccountEstimate, estimate_fleet
-from claude_rotater.usage_history import Point, shared_duty
+from claude_rotater.estimator import (
+    AccountEstimate,
+    Span,
+    estimate_fleet,
+    external_burn,
+    off_duty,
+)
+from claude_rotater.usage_history import Point, duty_spans, shared_duty
 
 Identity = tuple[str, str]
 
@@ -42,3 +48,33 @@ def fleet_estimates(
         shared=shared_duty(history.duty(), identities, data_dir),
     )
     return estimates, series
+
+
+def elsewhere(
+    duty: dict[str, dict],
+    identities: dict[str, Identity],
+    data_dir: Path,
+    *,
+    now: float,
+) -> dict[str, list[Span]]:
+    """Per slot, the recent spans this profile had another account on duty
+    (``estimator.off_duty`` over ``usage_history.duty_spans``): when a rise
+    of that account was someone else's use."""
+    spans = duty_spans(duty, identities, data_dir, now=now)
+    return {num: off_duty(spans, num, now=now) for num in identities}
+
+
+def external_burns(
+    series: dict[str, dict[str, list[Point]]],
+    off: dict[str, list[Span]],
+    *,
+    now: float,
+) -> dict[str, float]:
+    """Per slot, the 7d points per wall hour used elsewhere
+    (``estimator.external_burn``): read off the shared history and this
+    profile's duty spans, so a shared account off duty in both profiles
+    reads the same in each."""
+    return {
+        num: external_burn(series.get(num, {}).get("7d", []), spans, now=now)
+        for num, spans in off.items()
+    }

@@ -11,8 +11,9 @@ import pytest
 
 from claude_rotater import oauth
 from claude_rotater.estimator import estimate_fleet
-from claude_rotater.forecast import fleet_estimates
-from claude_rotater.usage_history import UsageHistory, shared_duty
+from claude_rotater.estimator import SWITCH_GRACE_S
+from claude_rotater.forecast import elsewhere, external_burns, fleet_estimates
+from claude_rotater.usage_history import DUTY_PAST_S, UsageHistory, duty_spans, shared_duty
 from tests.test_autoswitch import EngineHarness, FakeClock, _usage
 
 SHARED = ("s@example.com", "org-s")
@@ -116,6 +117,108 @@ class TestDuty:
         gone.rmdir()
         hist.set_duty(a, active=SHARED, since=None, members=[SHARED])
         assert list(hist.duty()) == [str(a)]
+
+
+class TestDutySpans:
+    """Each profile's past duty, kept in the shared file: when each account
+    was on duty there."""
+
+    SLOTS = {"1": SHARED, "2": OTHER}
+
+    def make(self, tmp_path):
+        a = tmp_path / "a"
+        a.mkdir()
+        clock = FakeClock(NOW - 3600)
+        return a, clock, UsageHistory(tmp_path / "shared", clock=clock)
+
+    def test_a_switch_keeps_the_ended_duty(self, tmp_path):
+        a, clock, hist = self.make(tmp_path)
+        hist.set_duty(a, active=SHARED, since=NOW - 3600, members=[SHARED, OTHER])
+        clock.now = NOW
+        hist.set_duty(a, active=OTHER, since=NOW - 600, members=[SHARED, OTHER])
+        assert duty_spans(hist.duty(), self.SLOTS, a, now=NOW) == [
+            (NOW - 3600, NOW - 600, "1"), (NOW - 600, NOW, "2")]
+
+    def test_a_change_of_members_ends_nothing(self, tmp_path):
+        a, clock, hist = self.make(tmp_path)
+        hist.set_duty(a, active=SHARED, since=NOW - 3600, members=[SHARED])
+        clock.now = NOW
+        hist.set_duty(a, active=SHARED, since=NOW - 3600, members=[SHARED, OTHER])
+        assert duty_spans(hist.duty(), self.SLOTS, a, now=NOW) == [(NOW - 3600, NOW, "1")]
+
+    def test_a_new_account_without_a_new_switch_ends_the_duty_now(self, tmp_path):
+        a, clock, hist = self.make(tmp_path)
+        hist.set_duty(a, active=SHARED, since=NOW - 7200, members=[SHARED, OTHER])
+        clock.now = NOW - 600
+        hist.set_duty(a, active=OTHER, since=NOW - 7200, members=[SHARED, OTHER])
+        assert duty_spans(hist.duty(), self.SLOTS, a, now=NOW)[0] == (NOW - 7200, NOW - 600, "1")
+
+    def test_an_unknown_start_adds_nothing_and_old_spans_drop(self, tmp_path):
+        a, clock, hist = self.make(tmp_path)
+        hist.set_duty(a, active=SHARED, since=None, members=[SHARED, OTHER])
+        hist.set_duty(a, active=OTHER, since=NOW - 3600, members=[SHARED, OTHER])
+        assert duty_spans(hist.duty(), self.SLOTS, a, now=NOW) == [(NOW - 3600, NOW, "2")]
+        clock.now = NOW
+        hist.set_duty(a, active=SHARED, since=NOW, members=[SHARED, OTHER])
+        later = NOW + DUTY_PAST_S + 7200
+        clock.now = later
+        hist.set_duty(a, active=OTHER, since=later, members=[SHARED, OTHER])
+        # The span that ended at NOW is past keeping; SHARED's, ended now, stays.
+        spans = duty_spans(hist.duty(), self.SLOTS, a, now=later + 60)
+        assert spans == [(NOW, later, "1"), (later, later + 60, "2")]
+
+    def test_a_malformed_past_is_ignored(self, tmp_path):
+        a, _clock, hist = self.make(tmp_path)
+        duty = {str(a): {"active": None, "since": None, "members": [],
+                         "past": [[1, 2], "x", [NOW - 60, NOW, 5], [NOW - 60, NOW, "q|"]]}}
+        assert duty_spans(duty, self.SLOTS, a, now=NOW) == [(NOW - 60, NOW, None)]
+        assert duty_spans({str(a): {"past": "bad"}}, self.SLOTS, a, now=NOW) == []
+        assert duty_spans({}, self.SLOTS, a, now=NOW) == []
+
+
+class TestUseElsewhereAcrossProfiles:
+    """Personal holds SHARED and OTHER, work SHARED and THIRD. SHARED climbs
+    1%/h for ten hours."""
+
+    THIRD = ("t@example.com", "org-t")
+
+    def make(self, tmp_path, *, work_active):
+        a, b = tmp_path / "personal", tmp_path / "work"
+        a.mkdir(), b.mkdir()
+        hist = UsageHistory(tmp_path / "shared", clock=lambda: NOW)
+        for i in range(61):
+            t = NOW - 36000 + i * 600
+            hist.record({"1": _u(0, 10 + i / 6)}, {"1": SHARED}, t, by=a)
+        since = NOW - 12 * 3600
+        hist.set_duty(a, active=OTHER, since=since, members=[SHARED, OTHER])
+        hist.set_duty(b, active=work_active, since=since, members=[SHARED, self.THIRD])
+        return a, b, hist
+
+    def burns(self, hist, data_dir, slots):
+        series = hist.live_series(slots)
+        off = elsewhere(hist.duty(), slots, data_dir, now=NOW)
+        return external_burns(series, off, now=NOW)
+
+    def test_an_account_on_duty_in_neither_reads_alike_in_both(self, tmp_path):
+        a, b, hist = self.make(tmp_path, work_active=self.THIRD)
+        from_a = self.burns(hist, a, {"1": SHARED, "2": OTHER})
+        from_b = self.burns(hist, b, {"4": SHARED, "5": self.THIRD})
+        assert from_a["1"] == from_b["4"]
+        assert from_a["1"] == pytest.approx(1.0, abs=0.2)
+        assert from_a["2"] == from_b["5"] == 0.0
+
+    def test_the_other_profiles_duty_is_use_elsewhere_its_own_is_not(self, tmp_path):
+        a, b, hist = self.make(tmp_path, work_active=SHARED)
+        assert self.burns(hist, a, {"1": SHARED, "2": OTHER})["1"] == pytest.approx(1.0, abs=0.2)
+        assert self.burns(hist, b, {"4": SHARED, "5": self.THIRD})["4"] == 0.0
+
+    def test_the_first_minutes_after_a_switch_away_are_not_counted(self, tmp_path):
+        a, _b, hist = self.make(tmp_path, work_active=self.THIRD)
+        # Personal switched off SHARED just now: its last turns may land late.
+        hist.set_duty(a, active=SHARED, since=NOW - 36000, members=[SHARED, OTHER])
+        hist.clock = lambda: NOW - SWITCH_GRACE_S / 2
+        hist.set_duty(a, active=OTHER, since=NOW - SWITCH_GRACE_S / 2, members=[SHARED, OTHER])
+        assert self.burns(hist, a, {"1": SHARED, "2": OTHER})["1"] == 0.0
 
 
 class TestOneForecast:
