@@ -204,6 +204,7 @@ def simulate(
                     hysteresis_pct=HYSTERESIS, burn_pct_per_h=burn, now=t,
                     cold=cold if idle_aware else True,
                     waited_s=0.0 if wanted_since is None else t - wanted_since,
+                    typical_burn_pct_per_h=burn,  # a 24h wall-hour average
                 )
                 if choice.waiting_for is not None:
                     if wanted_since is None:
