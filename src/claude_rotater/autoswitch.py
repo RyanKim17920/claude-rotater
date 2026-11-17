@@ -64,6 +64,7 @@ from claude_rotater import (
     pace_strategy,
     poll_policy,
     preempt,
+    provider_block,
 )
 from claude_rotater.estimator import (
     WindowEstimate,
@@ -77,6 +78,7 @@ from claude_rotater.json_output import (
     SCHEMA_VERSION,
     USAGE_FOREIGN_CREDENTIAL,
     USAGE_NO_CREDENTIALS,
+    USAGE_PROVIDER_BLOCKED,
     USAGE_RELOGIN_REQUIRED,
     USAGE_TOKEN_EXPIRED,
 )
@@ -692,6 +694,9 @@ PREEMPT_TRIGGER = "pre-empt"
 # the provider): staying is not an option, so like failover it skips the
 # cooldown, the manual hold and the idle-cache wait.
 LEAVE_TRIGGER = "leave"
+# How often the transcripts are read for a provider refusal of the account
+# on duty (the tails of the newest few: cheap, but not every tick).
+REFUSAL_SCAN_S = 20.0
 # Triggers logged as warnings: the account on duty was (about to be) unusable.
 _LIMIT_TRIGGERS = ("failover", "at-limit", PREEMPT_TRIGGER, LEAVE_TRIGGER)
 # Rows that say an account cannot work: never a leave's last-resort target.
@@ -1043,6 +1048,8 @@ class AutoSwitchEngine:
         self._login_entries: dict | None = None
         # The account a leave is moving off, re-checked under the state lock.
         self._leaving: str | None = None
+        # When the transcripts were last read for a provider refusal.
+        self._refusal_scanned_at: float | None = None
 
     # -- state file ---------------------------------------------------------
 
@@ -1329,6 +1336,8 @@ class AutoSwitchEngine:
         if not self._model_check_done:
             self._check_model_names(quarantined, usage)
 
+        if not self.dry_run:
+            self._check_provider_refusal(current, state)
         held = self._held_out(current)
         if held:
             # Before every mode and strategy gate: no setting keeps a
@@ -1824,7 +1833,52 @@ class AutoSwitchEngine:
         """Why ``number`` may not stay on duty ("" when it may)."""
         if self.switcher.is_account_disabled(number):
             return "disabled"
+        block = self.switcher.provider_block_of(number)
+        if block is not None:
+            return f"suspended by the provider ({block.reason})"
         return ""
+
+    def _check_provider_refusal(self, current: str, state: dict) -> None:
+        """Read this profile's transcripts since ``current`` went on duty:
+        a refused turn means the provider stopped serving it (block it,
+        every profile sees that), a turn that worked after a block lifts it.
+        At most every REFUSAL_SCAN_S."""
+        # Wall and monotonic time, not self.clock(): transcripts carry wall
+        # time, and this read must not shift the decision's clock reads.
+        scanned = time.monotonic()
+        if self._refusal_scanned_at is not None and scanned - self._refusal_scanned_at < REFUSAL_SCAN_S:
+            return
+        self._refusal_scanned_at = scanned
+        if self.switcher.account_kind_for(current) == "api_key":
+            return  # a key's refusals are api_keys' business
+        since = state.get("lastSwitchAt")
+        if not isinstance(since, (int, float)):
+            since = time.time() - 3600.0
+        block = self.switcher.provider_block_of(current)
+        if block is not None:
+            since = max(since, block.at)
+        from claude_rotater.paths import get_claude_config_home
+
+        found = provider_block.scan(get_claude_config_home(), float(since))
+        if found is None:
+            return
+        verdict, when = found
+        if verdict == provider_block.WORKING:
+            if block is not None and when > block.at:
+                self.switcher.clear_provider_block(current, "a turn on it worked")
+            return
+        if self.switcher.mark_provider_block(
+            current, verdict, provider_block.SOURCE_TRANSCRIPT, when
+        ):
+            try:
+                from claude_rotater.settings import load_ui_settings
+
+                if load_ui_settings(self.switcher.backup_dir).login_notify:
+                    self._login_notifier.send(
+                        "rota", f"#{current} suspended by the provider ({verdict}): rota moves off it"
+                    )
+            except Exception as e:  # pragma: no cover - safety net
+                _logger.debug("Provider block notification failed: %r", e)
 
     def leave_now(self, number: str, why: str) -> TickOutcome:
         """Move off ``number`` now if it is on duty: the path a user's
@@ -3408,6 +3462,7 @@ class AutoSwitchEngine:
                 for num, entry in entries.items()
                 if self.switcher.account_kind_for(num) != "api_key"
                 and not self.switcher.is_account_disabled(num)
+                and entry.sentinel != USAGE_PROVIDER_BLOCKED
             ]
             now = self.clock()
             self._login_notifier.observe(
