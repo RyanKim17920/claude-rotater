@@ -23,6 +23,19 @@ leader's, and moves only when the leader is ahead by more. The move back
 needs the reverse, a swing of margin squared that only real use and time
 produce.
 
+**A move must save some week.** The need ratio says which account is
+behind, not whether moving to it now changes anything. Before a proactive
+move the policy plans the rest of the weeks at the user's typical spend per
+wall hour (and at ``DEFER_SAFETY`` times slower): stay on the active account
+until it is done, then the others earliest reset first, against moving
+first. Unless moving leaves at least ``MOVE_SAVES_PCT`` less 7d unused by
+the resets, it stays: the move would only throw the caches away. When it
+does move, it goes to the account whose move saves the most. A stay that
+would spend the active account days before its reset, with no second
+account left beside the next one, is not planned (``ALONE_H``): one account
+alone cannot absorb a 5h burst. Without a spend estimate the need ratio
+decides alone.
+
 **Finish first.** As an account's reset nears with headroom left, its need
 climbs (hours shrink, headroom does not), so it takes the lead and the
 policy concentrates on it until that quota is spent. No separate rule.
@@ -84,6 +97,15 @@ DEFER_SAFETY = 1.5
 # week allows.
 URGENT_RATIO = 3.0
 URGENT_WAIT_S = 30 * 60.0
+# A proactive move must leave at least this many fewer 7d points unused by
+# the resets than staying would (``plan_loss``): about two cache rebuilds
+# (0.3-0.7% each), so planning noise never pays for a switch.
+MOVE_SAVES_PCT = 1.0
+# Finishing the active account first is planned only if its week rolls over
+# within this long of it being done, or two other accounts can take work:
+# spent days early, it leaves one account to absorb every 5h burst (the week
+# replay loses more than the switches save without this).
+ALONE_H = 48.0
 
 
 def seven_day_left(view: AccountView, threshold: float) -> float:
@@ -128,6 +150,83 @@ def can_wait(
         return False
     spare_h = hours_left(target, now) - CACHE_TTL_S / 3600.0
     return seven_day_left(target, threshold) * DEFER_SAFETY <= burn_pct_per_h * spare_h
+
+
+def plan_loss(
+    order: list[AccountView], *, threshold: float, rate: float, now: float
+) -> float:
+    """7d points left unused at the resets if the user spends ``rate`` points
+    per hour on ``order[0]`` until it is done (or its week ends), then on the
+    rest earliest reset first. ``rate`` is a spend per wall hour, nights
+    included, so a plan that fits at it fits the user's real days."""
+    first, rest = order[0], order[1:]
+    rest = sorted(rest, key=lambda v: hours_left(v, now))
+    cursor_h = 0.0
+    lost = 0.0
+    for v in (first, *rest):
+        left = seven_day_left(v, threshold)
+        avail_h = max(0.0, hours_left(v, now) - cursor_h)
+        if left <= rate * avail_h:
+            cursor_h += left / rate
+        else:
+            lost += left - rate * avail_h
+            cursor_h += avail_h
+    return lost
+
+
+def _keeps_a_spare(
+    active: AccountView,
+    others: list[AccountView],
+    *,
+    threshold: float,
+    rate: float,
+    now: float,
+) -> bool:
+    """Whether finishing the active account first still leaves a second
+    account beside the one in use. Spent early in its week, it is out until
+    its reset, and a lone account blocks the user at its 5h limit: so a stay
+    is planned only when the active account's week rolls over within
+    ``ALONE_H`` of it being done (at the slower planned spend), or two other
+    accounts have meaningful 7d left."""
+    done_h = seven_day_left(active, threshold) / (rate / DEFER_SAFETY)
+    if hours_left(active, now) - done_h <= ALONE_H:
+        return True
+    spare = [v for v in others if seven_day_left(v, threshold) >= MEANINGFUL_ABSORB_PCT]
+    return len(spare) >= 2
+
+
+def _plan_rates(rate: float) -> tuple[float, ...]:
+    """The spends a plan must hold at: the typical one and a slower week."""
+    return (rate, rate / DEFER_SAFETY)
+
+
+def _best_move(
+    active: AccountView,
+    accounts: list[AccountView],
+    targets: list[AccountView],
+    *,
+    threshold: float,
+    rate: float,
+    now: float,
+) -> tuple[AccountView | None, float]:
+    """The target whose move saves the most 7d against staying, and how much
+    (the most at any planned spend). None when no move saves
+    ``MOVE_SAVES_PCT``; ``targets`` order breaks ties."""
+    others = [v for v in accounts if v.number != active.number]
+    best: AccountView | None = None
+    best_saved = 0.0
+    for target in targets:
+        rest = [v for v in others if v.number != target.number]
+        saved = max(
+            plan_loss([active, *others], threshold=threshold, rate=r, now=now)
+            - plan_loss([target, active, *rest], threshold=threshold, rate=r, now=now)
+            for r in _plan_rates(rate)
+        )
+        if saved > best_saved:
+            best, best_saved = target, saved
+    if best_saved < MOVE_SAVES_PCT:
+        return None, best_saved
+    return best, best_saved
 
 
 def _five_used(view: AccountView) -> float:
@@ -227,9 +326,11 @@ def choose(
     days; ``burn_pct_per_h`` when unknown) or the target is urgent
     (``URGENT_RATIO``) and has waited ``URGENT_WAIT_S`` already
     (``waited_s``: how long the caller has been holding this move)."""
+    # Only a spend per wall hour can plan a week: the duty burn is a rate
+    # per hour of use and would make every stay look affordable.
     choice = _choose(
         active, candidates, threshold=threshold, margin=margin,
-        burn_pct_per_h=burn_pct_per_h, now=now,
+        burn_pct_per_h=burn_pct_per_h, now=now, plan_rate=typical_burn_pct_per_h,
     )
     if choice.action != "switch" or cold:
         return choice
@@ -266,6 +367,7 @@ def _choose(
     margin: float,
     burn_pct_per_h: float | None,
     now: float,
+    plan_rate: float | None = None,
 ) -> Choice:
     me = active.number
 
@@ -329,8 +431,23 @@ def _choose(
             f"#{lead.number} needs {fleet.pace(lead)} but its 5h is "
             f"{_five_used(lead):.0f}% used"
         )
-    target = targets[0]
-    return switch(target, f"{fleet.deadline(target)} vs #{me} {fleet.pace(active)}")
+    if not plan_rate or not _keeps_a_spare(active, others, threshold=threshold, rate=plan_rate, now=now):
+        target = targets[0]
+        return switch(target, f"{fleet.deadline(target)} vs #{me} {fleet.pace(active)}")
+    target, saved = _best_move(
+        active, [active, *others], targets, threshold=threshold, rate=plan_rate, now=now,
+    )
+    if target is None:
+        return stay(
+            f"#{me} can finish its {left:.0f}% of 7d first and every other "
+            f"week still fits at {plan_rate:.1f}%/h; #{ahead[0].number} "
+            f"needs {fleet.pace(ahead[0])}"
+        )
+    return switch(
+        target,
+        f"{fleet.deadline(target)} vs #{me} {fleet.pace(active)}; staying would "
+        f"leave {saved:.0f}% of 7d unused",
+    )
 
 
 def rank(

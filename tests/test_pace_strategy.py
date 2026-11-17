@@ -35,7 +35,7 @@ def view(
     )
 
 
-def choose(active, *candidates, burn=None, margin=1.5, threshold=90.0):
+def choose(active, *candidates, burn=None, margin=1.5, threshold=90.0, typical=None):
     return ps.choose(
         active,
         list(candidates),
@@ -44,6 +44,7 @@ def choose(active, *candidates, burn=None, margin=1.5, threshold=90.0):
         hysteresis_pct=10.0,
         burn_pct_per_h=burn,
         now=NOW,
+        typical_burn_pct_per_h=typical,
     )
 
 
@@ -431,6 +432,86 @@ class TestFlapping:
         assert per_day <= 4.0
 
 
+class TestPlannedStay:
+    """Real moves from the owner's logs (accounts renamed, numbers as read
+    then, threshold 99.9): the need ratio called for a move, but staying until
+    the active account was done still let every other account finish its week
+    at the user's typical spend. Each such move only threw caches away."""
+
+    def test_an_account_that_can_finish_first_is_not_left_for_a_fresh_week(self):
+        # Moved a -> b: "b's week resets in 6d20h with 100% left (needs
+        # 0.6%/h) vs a 0.2%/h". a's 23% takes ~13h; c and b still fit.
+        a = view("a", seven=77, reset_h=106)
+        b = view("b", seven=0, reset_h=165)
+        c = view("c", seven=45, reset_h=93)
+        choice = choose(a, b, c, threshold=99.9, typical=1.83)
+        assert choice.action == "stay", choice.reason
+        assert "fits" in choice.reason
+
+    def test_the_last_points_are_finished_before_a_fresh_week(self):
+        # Moved a -> b: "b has 99% to spend in 6d1h — moving now" while a
+        # had 4% left and reset in 9h.
+        a = view("a", seven=96, reset_h=9)
+        b = view("b", seven=4, reset_h=146)
+        assert choose(a, b, threshold=99.9, typical=1.09).action == "stay"
+
+    def test_the_account_resetting_first_is_not_left_for_a_needier_one(self):
+        # Moved a -> b: "b has 94% to spend in 4d23h" while a reset first.
+        a = view("a", seven=54, reset_h=88)
+        b = view("b", seven=6, reset_h=119)
+        assert choose(a, b, threshold=99.9, typical=0.83).action == "stay"
+
+    def test_two_resets_hours_apart_do_not_ping_pong(self):
+        # Moved a -> b at 19:29, then b -> a at 22:06: two rebuilds for
+        # two weeks that both ended within the hour.
+        a = view("a", seven=88, reset_h=6)
+        b = view("b", seven=81, reset_h=5.5)
+        c = view("c", seven=5, reset_h=143)
+        assert choose(a, b, c, threshold=99.9, typical=1.49).action == "stay"
+        assert choose(b, a, c, threshold=99.9, typical=1.49).action == "stay"
+
+    def test_a_week_that_staying_would_lose_still_moves(self):
+        # b can take only ~30 of its 50 points before it resets: every hour
+        # on a first is an hour b loses.
+        a = view("a", seven=10, reset_h=150)
+        b = view("b", seven=50, reset_h=30)
+        choice = choose(a, b, threshold=99.9, typical=1.0)
+        assert (choice.action, choice.target) == ("switch", "b")
+        assert "unused" in choice.reason
+
+    def test_a_move_goes_to_the_account_that_saves_the_most(self):
+        # Both b and c lead a by far; moving to c first loses the least.
+        a = view("a", seven=0, reset_h=160)
+        b = view("b", seven=50, reset_h=40)
+        c = view("c", seven=80, reset_h=12)
+        choice = choose(a, b, c, threshold=99.9, typical=1.5)
+        assert (choice.action, choice.target) == ("switch", "c")
+
+    def test_a_stay_never_leaves_one_account_alone_for_days(self):
+        # Staying fits, but #a would be spent ~5 days before its reset with
+        # only #b beside it: the move to #b happens as before.
+        a = view("a", seven=10, reset_h=160)
+        b = view("b", seven=40, reset_h=60)
+        assert choose(a, b, threshold=100.0, typical=5.0).target == "b"
+        # A third account with room is the spare: then finishing #a first is
+        # planned.
+        c = view("c", seven=0, reset_h=165)
+        assert choose(a, b, c, threshold=100.0, typical=5.0).action == "stay"
+
+    def test_without_a_spend_estimate_the_need_ratio_decides(self):
+        a = view("a", seven=77, reset_h=106)
+        b = view("b", seven=0, reset_h=165)
+        assert choose(a, b, threshold=99.9).action == "switch"
+
+    def test_plan_loss_counts_what_cannot_be_spent_before_each_reset(self):
+        a = view("a", seven=40, reset_h=100)  # 60 left
+        b = view("b", seven=50, reset_h=30)  # 50 left
+        # a first: 60h on a, b's week is over by then.
+        assert ps.plan_loss([a, b], threshold=100.0, rate=1.0, now=NOW) == pytest.approx(50.0)
+        # b first: 30 of its 50 by its reset, then a's 60 in 70h.
+        assert ps.plan_loss([b, a], threshold=100.0, rate=1.0, now=NOW) == pytest.approx(20.0)
+
+
 class TestRank:
     def test_7d_need_first_among_accounts_with_5h_room(self):
         pool = [
@@ -804,12 +885,13 @@ class TestCacheDeferral:
         )
 
     def test_users_case_with_room_to_spare_waits_at_most_the_urgent_wait(self):
-        """At a typical spend that could finish it either way, the 15x need
-        ratio is urgent: wait for idle caches half an hour, no longer."""
-        current = view("1", seven=80, reset_h=6 * 24)
+        """At a typical spend that could finish it after a wait, a 3x need
+        ratio is urgent: wait for idle caches half an hour, no longer. (A
+        current account with 20% left would simply be finished first.)"""
+        current = view("1", seven=0, reset_h=6 * 24)
         early = view("2", seven=0, reset_h=2 * 24)
         kw = dict(burn=6.0, typical=6.0, threshold=100.0)
-        assert ps.required_pace(early, threshold=100.0, now=NOW) >= 14 * ps.required_pace(
+        assert ps.required_pace(early, threshold=100.0, now=NOW) >= ps.URGENT_RATIO * ps.required_pace(
             current, threshold=100.0, now=NOW
         )
         first = warm_choose(current, early, **kw)
@@ -841,7 +923,9 @@ class TestCacheDeferral:
         need_a = 80 / 100
         b_left = need_a * 1.6 * 60  # #2 needs 1.6x as much, 60h out
         b = view("2", seven=90 - b_left, reset_h=60)
-        got = warm_choose(a, b, burn=5.0, typical=5.0, waited_s=4 * H)
+        # At 3%/h a slow week could not fit #1 first, so the move is worth
+        # making, but #2 has the time to wait for it.
+        got = warm_choose(a, b, burn=5.0, typical=3.0, waited_s=4 * H)
         assert got.action == "stay" and got.waiting_for == "2"
 
     def test_unknown_burn_does_not_wait(self):
@@ -854,7 +938,7 @@ class TestCacheDeferral:
     def test_typical_burn_rules_over_the_duty_burn(self):
         a = view("1", seven=10, reset_h=160)
         b = view("2", seven=30, reset_h=64)
-        assert warm_choose(a, b, burn=3.0, typical=0.5).action == "switch"
+        assert warm_choose(a, b, burn=3.0, typical=1.0).action == "switch"
         assert warm_choose(a, b, burn=0.5, typical=3.0).action == "stay"
 
     def test_spent_active_move_waits_too_when_the_target_can(self):
