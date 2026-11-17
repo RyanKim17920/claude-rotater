@@ -427,8 +427,20 @@ def _same_window(a: Point, b: Point) -> bool:
     return abs(a.resets_at - b.resets_at) <= RESET_MATCH_S
 
 
+Span = tuple[float, float]  # [start, end) epochs
+
+
+def _within(spans: Sequence[Span], a: float, b: float) -> bool:
+    """Whether ``[a, b]`` lies inside one of ``spans``."""
+    return any(lo <= a and b <= hi for lo, hi in spans)
+
+
 def typical_burn(
-    accounts: Iterable[dict[str, list[Point]]], *, now: float, window: str = "7d"
+    accounts: Iterable[dict[str, list[Point]]],
+    *,
+    now: float,
+    window: str = "7d",
+    elsewhere: Sequence[Sequence[Span]] | None = None,
 ) -> float | None:
     """The user's spend of ``window`` points per wall hour over the last
     ``TYPICAL_SPAN_S``, nights and breaks included: every rise any account
@@ -436,22 +448,86 @@ def typical_burn(
     a lagging reading), never negative spend. None with under
     ``TYPICAL_MIN_SPAN_S`` of readings.
 
+    ``elsewhere``, aligned with ``accounts``: per account the spans it was
+    known to be off duty in this profile (:func:`off_duty`). A rise inside
+    one is someone else's use (:func:`external_burn`), not the user's, and
+    is left out, so the plan does not count it twice.
+
     It is what an account can count on being spent on it per hour from now
     on: the active burn times the hours a day the user works, without having
     to know either."""
     lo = now - TYPICAL_SPAN_S
     rise = 0.0
     first: float | None = None
-    for series in accounts:
+    accounts = list(accounts)
+    off = list(elsewhere) if elsewhere is not None else [()] * len(accounts)
+    for series, spans in zip(accounts, off):
         points = [p for p in series.get(window, []) if lo <= p.t <= now]
         if points:
             first = points[0].t if first is None else min(first, points[0].t)
         for a, b in zip(points, points[1:]):
-            if b.pct > a.pct and _same_window(a, b):
+            if b.pct > a.pct and _same_window(a, b) and not _within(spans, a.t, b.t):
                 rise += b.pct - a.pct
     if first is None or now - first < TYPICAL_MIN_SPAN_S:
         return None
     return rise / ((now - first) / 3600.0)
+
+
+# External burn (:func:`external_burn`): how far back, how fast older hours
+# fade, how many rising readings make it more than quantisation, and how long
+# after a switch away a rise may still be this profile's last turns landing.
+EXTERNAL_LOOKBACK_S = 24 * 3600.0
+EXTERNAL_HALF_LIFE_S = 3 * 3600.0
+EXTERNAL_MIN_RISES = 2
+SWITCH_GRACE_S = 600.0
+
+
+def off_duty(
+    duty: Sequence[tuple[float, float, str | None]], num: str, *, now: float
+) -> list[Span]:
+    """The spans of the last ``EXTERNAL_LOOKBACK_S`` in which this profile
+    is known to have had another account than ``num`` on duty
+    (``usage_history.duty_spans``), each without its first
+    ``SWITCH_GRACE_S``. Time the duty record does not cover is in none: an
+    unknown duty is never read as someone else's use."""
+    lo = now - EXTERNAL_LOOKBACK_S
+    out: list[Span] = []
+    for start, end, who in duty:
+        a, b = max(start + SWITCH_GRACE_S, lo), min(end, now)
+        if who != num and b > a:
+            out.append((a, b))
+    return out
+
+
+def external_burn(points: Sequence[Point], off: Sequence[Span], *, now: float) -> float:
+    """7d points per wall hour someone else spends on this account (another
+    machine, claude.ai, another profile): how fast its readings rose while
+    this profile had another account on duty (``off``, from
+    :func:`off_duty`), over the last ``EXTERNAL_LOOKBACK_S``.
+
+    Readings are paired inside one window instance (:func:`window_segments`,
+    so an early reset or a lagging reading is no rise or fall) and both
+    inside one span. Each pair's rise and hours are weighted by its age
+    (half-life ``EXTERNAL_HALF_LIFE_S``), so flat readings after the use
+    stops pull the rate down to zero. Under ``EXTERNAL_MIN_RISES`` rising
+    pairs is quantisation (one point of an integer reading), read as 0."""
+    lo = now - EXTERNAL_LOOKBACK_S
+    rise = hours = 0.0
+    rises = 0
+    # Segmented on the whole history, then cut: a reset reads the same
+    # whatever the lookback.
+    for seg in window_segments(p for p in points if p.t <= now):
+        for a, b in zip(seg, seg[1:]):
+            if a.t < lo or not _within(off, a.t, b.t):
+                continue
+            w = 0.5 ** ((now - (a.t + b.t) / 2.0) / EXTERNAL_HALF_LIFE_S)
+            if b.pct > a.pct:
+                rise += w * (b.pct - a.pct)
+                rises += 1
+            hours += w * (b.t - a.t) / 3600.0
+    if rises < EXTERNAL_MIN_RISES or hours <= 0:
+        return 0.0
+    return _clamp_rate(rise / hours)
 
 
 def last_rise(series: dict[str, list[Point]]) -> float | None:

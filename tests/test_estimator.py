@@ -699,3 +699,103 @@ class TestEarlyReset:
         pts = self.screenshot()
         assert est.window_segments(pts)[-1] == est.current_window(pts)
         assert len(est.window_segments(pts)) == 2
+
+
+class TestExternalBurn:
+    """Use elsewhere: how fast an account's week rose while this profile had
+    another account on duty."""
+
+    H = 3600.0
+    WEEK = NOW + 3 * 86400.0
+
+    def polls(self, rate, *, hours, end=NOW, step=600.0, start_pct=20.0, reset=None):
+        """Integer readings every ``step`` over ``hours`` ending at ``end``."""
+        n = int(hours * self.H / step)
+        return [
+            Point(end - (n - i) * step, float(int(start_pct + rate * i * step / self.H)),
+                  self.WEEK if reset is None else reset)
+            for i in range(n + 1)
+        ]
+
+    def ext(self, points, off=None, now=NOW):
+        off = [(now - 30 * self.H, now)] if off is None else off
+        return est.external_burn(points, off, now=now)
+
+    def test_rising_while_off_duty_reads_its_rate(self):
+        assert self.ext(self.polls(1.0, hours=12)) == pytest.approx(1.0, abs=0.15)
+
+    def test_rising_while_on_duty_here_is_not_use_elsewhere(self):
+        pts = self.polls(1.0, hours=12)
+        assert self.ext(pts, off=[]) == 0.0
+        # Off duty only for the first six hours: only those count.
+        assert self.ext(pts, off=[(NOW - 12 * self.H, NOW - 6 * self.H)]) > 0.5
+
+    def test_decays_once_the_use_stops(self):
+        busy = self.polls(1.0, hours=12, end=NOW - 6 * self.H)
+        flat = self.polls(0.0, hours=6, start_pct=busy[-1].pct)[1:]
+        before = self.ext(busy, now=NOW - 6 * self.H)
+        after = self.ext(busy + flat)
+        assert after < before / 3
+        later = busy + flat + self.polls(0.0, hours=12, end=NOW + 12 * self.H,
+                                         start_pct=busy[-1].pct)[1:]
+        assert self.ext(later, now=NOW + 12 * self.H) < 0.05
+
+    def test_looks_back_a_day_only(self):
+        old = self.polls(2.0, hours=6, end=NOW - 26 * self.H)
+        flat = self.polls(0.0, hours=20, start_pct=old[-1].pct)
+        assert self.ext(old + flat, off=[(NOW - 40 * self.H, NOW)]) == 0.0
+
+    def test_an_early_reset_is_no_fall_and_no_rise(self):
+        # 60 -> 10 under the same reset time: a reset, then it climbs again.
+        before = self.polls(1.0, hours=6, end=NOW - 6 * self.H, start_pct=60.0)
+        after = self.polls(1.0, hours=6, start_pct=10.0)[1:]
+        assert self.ext(before + after) == pytest.approx(1.0, abs=0.2)
+
+    def test_a_lagging_reading_is_left_out(self):
+        pts = self.polls(1.0, hours=12)
+        lagging = Point(pts[40].t + 1.0, pts[40].pct - 6.0, self.WEEK)
+        assert self.ext(pts + [lagging]) == pytest.approx(self.ext(pts), abs=1e-9)
+
+    def test_sparse_polls_still_read_the_rate(self):
+        assert self.ext(self.polls(1.0, hours=12, step=2 * self.H)) == pytest.approx(1.0, abs=0.2)
+
+    def test_one_point_of_resolution_is_not_use(self):
+        pts = self.polls(0.0, hours=12)
+        stepped = pts[:30] + [Point(p.t, p.pct + 1.0, p.resets_at) for p in pts[30:]]
+        assert self.ext(stepped) == 0.0
+        twice = stepped[:50] + [Point(p.t, p.pct + 1.0, p.resets_at) for p in stepped[50:]]
+        assert self.ext(twice) > 0.0
+
+    def test_no_readings_is_zero(self):
+        assert self.ext([]) == 0.0
+
+
+class TestOffDuty:
+    H = 3600.0
+
+    def test_spans_of_other_accounts_without_the_switch_grace(self):
+        duty = [(NOW - 10 * self.H, NOW - 4 * self.H, "1"), (NOW - 4 * self.H, NOW, "2")]
+        g = est.SWITCH_GRACE_S
+        assert est.off_duty(duty, "1", now=NOW) == [(NOW - 4 * self.H + g, NOW)]
+        assert est.off_duty(duty, "2", now=NOW) == [(NOW - 10 * self.H + g, NOW - 4 * self.H)]
+        # An account the profile no longer holds is another account too.
+        assert est.off_duty([(NOW - self.H, NOW, None)], "1", now=NOW) == [(NOW - self.H + g, NOW)]
+
+    def test_cut_to_the_lookback_and_unknown_time_is_in_none(self):
+        duty = [(NOW - 50 * self.H, NOW - 10 * self.H, "2")]
+        assert est.off_duty(duty, "1", now=NOW) == [
+            (NOW - est.EXTERNAL_LOOKBACK_S, NOW - 10 * self.H)]
+        assert est.off_duty([], "1", now=NOW) == []
+
+
+class TestTypicalBurnElsewhere:
+    def test_rises_known_to_be_use_elsewhere_are_left_out(self):
+        h = 3600.0
+        week = NOW + 3 * 86400.0
+        a = {"7d": [Point(NOW - 48 * h, 10.0, week), Point(NOW - 24 * h, 30.0, week),
+                    Point(NOW, 40.0, week)]}
+        b = {"7d": [Point(NOW - 12 * h, 5.0, week), Point(NOW, 15.0, week)]}
+        assert est.typical_burn([a, b], now=NOW, elsewhere=[[], [(NOW - 13 * h, NOW)]]) \
+            == pytest.approx(30.0 / 48.0)
+        assert est.typical_burn([a, b], now=NOW, elsewhere=[[], []]) \
+            == pytest.approx(40.0 / 48.0)
