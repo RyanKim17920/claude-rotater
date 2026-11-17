@@ -417,16 +417,14 @@ def effective_models(
     then the family (``fable``) of each model a local session is running
     (``feed.models_in_use``). A model's limit only stops that model, so it
     binds when it is the model in use, or when the user named it. ``none``
-    turns them all off."""
+    turns them all off. The in-use families are sorted, so the result does
+    not depend on the recency order of ``in_use`` and compares stably."""
     if any(m.lower() == MODELS_OFF for m in configured):
         return ()
     out = list(configured)
     seen = {m.lower() for m in configured}
-    for name in in_use:
-        family = oauth.model_family(name)
-        if family is not None and family not in seen:
-            seen.add(family)
-            out.append(family)
+    families = {oauth.model_family(name) for name in in_use}
+    out.extend(sorted(f for f in families if f is not None and f not in seen))
     return tuple(out)
 
 

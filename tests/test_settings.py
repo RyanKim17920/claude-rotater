@@ -601,6 +601,13 @@ class TestEffectiveModels:
 
         assert effective_models(("Fable",), ("Fable 5.2", "Opus 5.5")) == ("Fable", "opus")
 
+    def test_order_does_not_depend_on_in_use_recency(self):
+        from claude_rotater.settings import effective_models
+
+        a = effective_models((), ("Fable 5.2", "Opus 5.5"))
+        assert a == effective_models((), ("Opus 5.5", "Fable 5.2")) == ("fable", "opus")
+        assert effective_models(("opus",), ("Fable 5.2",)) == ("opus", "fable")
+
     def test_none_turns_model_limits_off(self):
         from claude_rotater.settings import effective_models
 

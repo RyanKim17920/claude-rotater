@@ -7609,3 +7609,28 @@ class TestLoginWatch:
         harness.switcher._build_accounts_info()
         ends = harness.switcher.login_ends_by_account()
         assert ends["3"] == 1_900_000_000.0 and ends["2"] is None
+
+
+def test_alternating_in_use_order_logs_model_limits_once(caplog):
+    from types import SimpleNamespace
+
+    from claude_rotater.autoswitch import AutoSwitchEngine
+
+    orders = [("Fable 5.2", "Opus 5.5"), ("Opus 5.5", "Fable 5.2")] * 3
+    calls = iter(orders)
+    fake = SimpleNamespace(
+        switcher=SimpleNamespace(
+            models_in_use=lambda now: next(calls),
+            set_poll_policy_inputs=lambda *a: None,
+        ),
+        clock=lambda: 0.0,
+        _configured_models=(),
+        _models=(),
+        settings=SimpleNamespace(threshold=90.0),
+    )
+    with caplog.at_level("INFO", logger="rota"):
+        for _ in orders:
+            AutoSwitchEngine._refresh_models(fake)
+    lines = [r for r in caplog.records if "Model limits that bind" in r.getMessage()]
+    assert len(lines) == 1
+    assert fake._models == ("fable", "opus")
