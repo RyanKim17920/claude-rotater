@@ -194,6 +194,14 @@ class FakeSwitcher:
         verb = "Disabled" if disabled else "Enabled"
         print(f"{verb} Account-{identifier}")
 
+    def clear_provider_block(self, number: str, why: str) -> bool:
+        self.calls.append(("clear_block", str(number), why))
+        self._accounts = [
+            dataclasses.replace(a, provider_block="") if a.number == str(number) else a
+            for a in self._accounts
+        ]
+        return True
+
     def add_account(self, slot: int | None = None, assume_yes: bool = False) -> None:
         self.calls.append(("add", slot, assume_yes))
         print("Added Account 9: fresh@example.com")
@@ -2243,6 +2251,19 @@ class TestMainPage:
             await pilot.press("d")
             await settle(pilot)
             assert ("set_disabled", "2", False) in fake_calls(app)
+
+    async def test_d_on_a_provider_blocked_account_returns_it(self, tmp_path):
+        accounts = [make_account(1, active=True, entry=make_entry()),
+                    dataclasses.replace(make_account(2), provider_block="payment past due")]
+        app = make_app(FakeSwitcher(accounts, tmp_path))
+        async with app.run_test(size=(120, 40)) as pilot:
+            await settle(pilot)
+            assert "suspended by provider" in row_plain(app, "2")
+            await pilot.press("down", "d")
+            await settle(pilot)
+            assert ("clear_block", "2", "returned by hand") in fake_calls(app)
+            assert not any(c[0] == "set_disabled" for c in fake_calls(app))
+            assert "suspended" not in row_plain(app, "2")
 
     async def test_disabling_the_account_on_duty_moves_off_it(self, tmp_path):
         app = make_app(three_accounts(tmp_path))

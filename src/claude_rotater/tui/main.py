@@ -81,6 +81,7 @@ from claude_rotater.estimator import (
 )
 from claude_rotater.json_output import (
     USAGE_API_KEY,
+    USAGE_PROVIDER_BLOCKED,
     USAGE_RELOGIN_REQUIRED,
     USAGE_TOKEN_EXPIRED,
 )
@@ -611,7 +612,7 @@ def name_color(acc: AccountSnapshot, palette: Palette) -> str:
     return palette.accent if acc.is_active else palette.foreground
 
 
-PROVIDER_BLOCKED = "suspended by provider"
+PROVIDER_BLOCKED = USAGE_PROVIDER_BLOCKED
 
 
 def held_out_text(acc: AccountSnapshot) -> str:
@@ -629,6 +630,7 @@ def account_name(acc: AccountSnapshot) -> str:
 
 _SENTINEL_TAGS = {
     USAGE_RELOGIN_REQUIRED: "re-login",
+    USAGE_PROVIDER_BLOCKED: "suspended",
     # The short-lived access token lapsed while the CLI was idle or offline;
     # it refreshes it on the next request. Not a login problem, so it is not
     # a warning: a red "token expired" sent owners to log in again for nothing.

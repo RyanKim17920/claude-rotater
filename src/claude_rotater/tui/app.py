@@ -883,12 +883,24 @@ class RotaApp(App):
         )
         if acc is None:
             return
+        if acc.provider_block and not acc.disabled:
+            # The provider refused it; d says it works again (if it does
+            # not, the next refused turn blocks it once more).
+            self._start_action(
+                f"Return account {number}",
+                partial(self._return_blocked, number),
+            )
+            return
         target = not acc.disabled
         verb = "Disable" if target else "Enable"
         fn = partial(self.switcher.set_account_disabled, number, target)
         if target and acc.is_active:
             fn = partial(self._then_leave, fn, number, "disabled")
         self._start_action(f"{verb} account {number}", fn)
+
+    def _return_blocked(self, number: str) -> None:
+        self.switcher.clear_provider_block(number, "returned by hand")
+        print(f"Account {number} is back in rotation")
 
     def _then_leave(self, first, number: str, why: str) -> dict:
         """Run ``first`` (the disable or the removal's first half), then

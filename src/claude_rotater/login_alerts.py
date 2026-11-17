@@ -104,9 +104,9 @@ def dead_cause(sentinel: str | None, last_error: str | None) -> str | None:
 def states_from_snapshot(accounts: Iterable) -> list[LoginState]:
     """:class:`LoginState` per OAuth account of an ``AccountsSnapshot``.
 
-    Accounts held out of rotation (``disabled``) are left out: the owner
-    parked them, and nagging about them would train the eye to skip the
-    note."""
+    Accounts held out of rotation (``disabled``, or refused by the
+    provider) are left out: the owner parked them, or cannot use them
+    anyway, and nagging about them would train the eye to skip the note."""
     return [
         LoginState(
             acc.number, acc.email,
@@ -114,7 +114,7 @@ def states_from_snapshot(accounts: Iterable) -> list[LoginState]:
             ends_at=acc.login_expires_at,
         )
         for acc in accounts
-        if acc.kind == "oauth" and not acc.disabled
+        if acc.kind == "oauth" and not acc.disabled and not getattr(acc, "provider_block", "")
     ]
 
 
