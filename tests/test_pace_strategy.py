@@ -1069,6 +1069,17 @@ class TestSimulatedCacheCost:
         assert idle[2] <= now[2] + 1.0
         assert idle[3] < now[3]
 
+    def test_planning_the_weeks_switches_less_and_loses_no_more(self):
+        """Moving only when staying would leave some week unused cuts the
+        switches, and with each warm one charged its rebuild, loses no more
+        (expired plus rebuilt) and blocks no longer."""
+        kw = dict(switch_cost=0.35, idle_aware=True)
+        planned = self.totals(**kw)
+        ratio = self.totals(plan_weeks=False, **kw)
+        assert planned[0] <= ratio[0] * 1.001  # within 0.1%: replay noise
+        assert planned[2] <= ratio[2] + 1.0
+        assert planned[3] < ratio[3] * 0.95
+
     def test_waiting_costs_no_week_without_a_rebuild(self):
         now = self.totals()
         idle = self.totals(idle_aware=True)

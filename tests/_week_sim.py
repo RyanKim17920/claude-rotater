@@ -121,13 +121,16 @@ def simulate(
     idle_aware: bool = False,
     min_dwell_s: float = 0.0,
     no_five_hour: Iterable[int] = (),
+    plan_weeks: bool = True,
 ) -> Result:
     """Replay ``weeks`` of work. ``start_seven`` gives each account's 7d use
     at the start (default all fresh) and ``start_active`` the account on duty.
     ``switch_cost``: 7d points a switch on warm caches costs the target.
     ``idle_aware``: tell pace whether the caches are cold. ``min_dwell_s``:
     no proactive move sooner than this after the last switch.
-    ``no_five_hour``: indexes of accounts whose plan has no 5h limit."""
+    ``no_five_hour``: indexes of accounts whose plan has no 5h limit.
+    ``plan_weeks``: give pace a typical spend, so it plans the weeks before
+    a proactive move; off, the need ratio decides alone (as before)."""
     accts = [
         Acct(str(i + 1), reset_at=off * H, seven=start_seven[i] if start_seven else 0.0)
         for i, off in enumerate(reset_offsets_h)
@@ -204,7 +207,8 @@ def simulate(
                     hysteresis_pct=HYSTERESIS, burn_pct_per_h=burn, now=t,
                     cold=cold if idle_aware else True,
                     waited_s=0.0 if wanted_since is None else t - wanted_since,
-                    typical_burn_pct_per_h=burn,  # a 24h wall-hour average
+                    # The 24h burn is a spend per wall hour: the typical one.
+                    typical_burn_pct_per_h=burn if plan_weeks else None,
                 )
                 if choice.waiting_for is not None:
                     if wanted_since is None:
