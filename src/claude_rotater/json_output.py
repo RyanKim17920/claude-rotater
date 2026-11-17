@@ -40,6 +40,10 @@ USAGE_RELOGIN_REQUIRED = "re-login needed"
 # (stash the foreign credential, restore the slot's backup), so autoswitch
 # should treat the active as unknown-headroom and fail over.
 USAGE_FOREIGN_CREDENTIAL = "foreign credential"
+# The provider refuses to serve the account (org turned off subscription
+# access, payment past due, suspended; see ``provider_block``). Polled only
+# at a slow recheck, never a switch target, until it is seen working again.
+USAGE_PROVIDER_BLOCKED = "suspended by provider"
 
 
 def _window_to_json(entry: dict) -> dict:
@@ -161,6 +165,8 @@ def usage_fields(
         return "relogin_required", None
     if entry == USAGE_FOREIGN_CREDENTIAL:
         return "foreign_credential", None
+    if entry == USAGE_PROVIDER_BLOCKED:
+        return "provider_blocked", None
     if isinstance(entry, str):
         return "no_credentials", None
     return "unavailable", None

@@ -28,7 +28,7 @@ from claude_rotater.exceptions import (
     SwitchError,
     ValidationError,
 )
-from claude_rotater import api_keys, billing, oauth, pace
+from claude_rotater import api_keys, billing, oauth, pace, provider_block
 from claude_rotater.claude_locks import (
     claude_config_lock,
     claude_credentials_lock,
@@ -40,6 +40,7 @@ from claude_rotater.json_output import (
     USAGE_FOREIGN_CREDENTIAL,
     USAGE_KEYCHAIN_UNAVAILABLE,
     USAGE_NO_CREDENTIALS,
+    USAGE_PROVIDER_BLOCKED,
     USAGE_RELOGIN_REQUIRED,
     USAGE_TOKEN_EXPIRED,
     account_ref,
@@ -212,6 +213,10 @@ SENTINEL_NOTES = {
     USAGE_API_KEY: "API key (no quota)",
     USAGE_KEYCHAIN_UNAVAILABLE: "keychain unavailable — locked or in use; try again",
     USAGE_RELOGIN_REQUIRED: "re-login needed — refresh token dead; press l in rota to log in again",
+    USAGE_PROVIDER_BLOCKED: (
+        "suspended by provider — out of rotation; rechecked daily, or press d in rota "
+        "once it works again"
+    ),
 }
 
 
@@ -1042,6 +1047,7 @@ class ClaudeAccountSwitcher:
         entries = self._collect_usage_entries(accounts_info, fetch=fetch)
         seq_data = self._get_sequence_data() or {}
         key_states = api_keys.load(self.backup_dir)
+        blocks = provider_block.load(self.provider_blocks_path)
         active_number: str | None = None
         accounts: list[AccountSnapshot] = []
         for num, email, org_name, org_uuid, is_active, creds, alias in accounts_info:
@@ -1067,6 +1073,9 @@ class ClaudeAccountSwitcher:
                     ),
                     key_tail=creds.strip()[-4:] if is_key and looks_like_api_key(creds) else "",
                     key_state=key_states.get(n, api_keys.KeyState()) if is_key else None,
+                    provider_block=getattr(
+                        provider_block.block_of((email, org_uuid or ""), blocks), "reason", ""
+                    ),
                 )
             )
         return AccountsSnapshot(
@@ -1159,12 +1168,63 @@ class ClaudeAccountSwitcher:
         held out of automatic rotation and the usage-aware strategies.
         """
         data = self._get_sequence_data() or {}
+        blocks = provider_block.load(self.provider_blocks_path)
         return [
             str(num)
             for num in data.get("sequence", [])
             if self._account_is_switchable(str(num))
             and not self._disabled_from_data(data, str(num))
+            and self._provider_block_from_data(data, str(num), blocks) is None
         ]
+
+    # -- accounts the provider refuses (shared by identity; see provider_block) --
+
+    @property
+    def provider_blocks_path(self) -> Path:
+        return get_shared_cache_dir() / provider_block.STORE_FILENAME
+
+    @staticmethod
+    def _identity_from_data(data: dict, account_num: str) -> tuple[str, str] | None:
+        record = data.get("accounts", {}).get(str(account_num))
+        if not record or not record.get("email"):
+            return None
+        return record["email"], record.get("organizationUuid") or ""
+
+    def _provider_block_from_data(
+        self, data: dict, account_num: str, blocks: dict | None = None
+    ) -> provider_block.Block | None:
+        identity = self._identity_from_data(data, account_num)
+        if identity is None:
+            return None
+        return provider_block.block_of(identity, blocks, path=self.provider_blocks_path)
+
+    def provider_block_of(self, account_num: str) -> provider_block.Block | None:
+        """The provider's refusal of this slot's account, or None."""
+        return self._provider_block_from_data(self._get_sequence_data() or {}, str(account_num))
+
+    def mark_provider_block(self, account_num: str, reason: str, source: str, at: float) -> bool:
+        """Record that the provider refuses this slot's account (every
+        profile holding it sees it). True when this is news."""
+        identity = self._identity_from_data(self._get_sequence_data() or {}, str(account_num))
+        if identity is None:
+            return False
+        marked = provider_block.mark(identity, reason, source, at, path=self.provider_blocks_path)
+        if marked:
+            self._logger.warning(
+                f"Account {account_num} is suspended by the provider ({reason}); "
+                "held out of rotation"
+            )
+        return marked
+
+    def clear_provider_block(self, account_num: str, why: str) -> bool:
+        """Lift the provider block on this slot's account. True when there was one."""
+        identity = self._identity_from_data(self._get_sequence_data() or {}, str(account_num))
+        if identity is None:
+            return False
+        cleared = provider_block.clear(identity, path=self.provider_blocks_path)
+        if cleared:
+            self._logger.info(f"Account {account_num} is back in rotation: {why}")
+        return cleared
 
     # Shown wherever a switch skips or refuses a slot held out by policy.
     OAUTH_ONLY_REASON = "(API-key account; accounts.oauthOnly is on)"
@@ -4349,6 +4409,40 @@ class ClaudeAccountSwitcher:
                 account_num, exc_info=True,
             )
 
+    def _judge_provider_blocks(
+        self,
+        records: dict[str, FetchRecord],
+        entries: dict[str, UsageEntry],
+        identities: dict[str, tuple[str, str]],
+        blocked: dict[str, provider_block.Block],
+        now: float,
+    ) -> None:
+        """What this pass's readings say about the provider serving each
+        account: a reading well after a block lifts it; a long run of 403s
+        from the usage endpoint declares one."""
+        for num, record in records.items():
+            if record.sentinel is not None:
+                continue
+            block = blocked.get(num)
+            if record.error is None:
+                if block is not None and now - block.at >= provider_block.RECOVERY_MIN_AGE_S:
+                    self.clear_provider_block(num, "the usage endpoint answers again")
+                continue
+            entry = entries.get(num)
+            if (
+                block is None
+                and record.error == "http-403"
+                and entry is not None
+                # A setup token may lack the usage scope: its 403 says nothing.
+                and not identities[num][0].endswith("@token.local")
+                and provider_block.usage_refusal(
+                    entry.forbidden_strikes, entry.first_forbidden_at, now
+                )
+            ):
+                self.mark_provider_block(
+                    num, provider_block.USAGE_REFUSED, provider_block.SOURCE_USAGE, now
+                )
+
     def _static_usage_sentinel(
         self, account_info: tuple[int, str, str, str, bool, str, str]
     ) -> str | None:
@@ -4611,6 +4705,19 @@ class ClaudeAccountSwitcher:
                     [num], {num: identities[num]}
                 )
                 entries = store.entries(identities, models)
+        # Accounts the provider refuses: no polling but a daily recheck,
+        # whose reading (well after the block) is what lifts it.
+        blocks = provider_block.load(self.provider_blocks_path)
+        blocked = {
+            num: block for num in info_by_num
+            if (block := provider_block.block_of(identities[num], blocks)) is not None
+        }
+        for num in blocked:
+            last = entries[num].last_attempt_at
+            if num not in sentinels and last is not None and (
+                store.clock() - last < provider_block.RECHECK_S
+            ):
+                sentinels[num] = USAGE_PROVIDER_BLOCKED
         requested = [
             num
             for num in info_by_num
@@ -4692,6 +4799,12 @@ class ClaudeAccountSwitcher:
                     entries[num], num, _i[1], _i[5], _i[4]
                 ):
                     sentinels[num] = USAGE_RELOGIN_REQUIRED
+            self._judge_provider_blocks(
+                accepted_records, entries, identities, blocked, now
+            )
+        for num in blocked:
+            if num not in sentinels and self.provider_block_of(num) is not None:
+                sentinels[num] = USAGE_PROVIDER_BLOCKED
 
         return {
             num: with_sentinel(entries[num], sentinels.get(num))
@@ -4920,9 +5033,14 @@ class ClaudeAccountSwitcher:
         try:
             from claude_rotater.autoswitch import note_manual_switch
 
-            note_manual_switch(self.backup_dir, number, clock=self._usage_store.clock)
+            manual = note_manual_switch(self.backup_dir, number, clock=self._usage_store.clock)
         except Exception as e:
             self._logger.warning(f"Manual switch cooldown note failed: {e!r}")
+            return
+        if manual:
+            # Picked by hand although the provider refused it: the user says
+            # it works again. If it does not, the next refused turn says so.
+            self.clear_provider_block(number, "picked by hand")
 
     def _replan_new_active(self, number: str, email: str, org_uuid: str) -> None:
         """Pull the just-activated account's poll plan to the active floor.
