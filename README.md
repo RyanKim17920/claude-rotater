@@ -59,6 +59,12 @@ Windows.
   room breaks ties, and a 5-hour window about to hit is handled by the
   early move below. Every verdict reads like
   `switch → #2: #2's week resets in 9h with 40% left (needs 4.4%/h) …`.
+  Being behind is not enough to move: rota plans the rest of the weeks at
+  your usual spend per hour, and if finishing the active account first still
+  lets every other week be used up, it stays (`#1 can finish its 30% of 7d
+  first and every other week still fits …`). It moves only when staying
+  would leave some week unused, to the account that saves the most, or when
+  finishing the active one would leave a single account for days.
   A switch makes every warm session re-write its prompt cache on the new
   account, so a pace move waits until no local session has answered for an
   hour (Claude Code's cache lifetime), shown as `switch → #2 when idle
