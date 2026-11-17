@@ -314,6 +314,12 @@ class UsageEntry:
     # collector off this slot. Appended for the
     # same positional compatibility as ``claim_until``.
     held_until: float | None = None
+    # The usage endpoint's 403s in a row (no success between; other errors
+    # leave the run alone) and when the run began: repeated refusals are
+    # the usage-side sign the provider stopped serving the account
+    # (``provider_block.usage_refusal``). Appended like ``held_until``.
+    forbidden_strikes: int = 0
+    first_forbidden_at: float | None = None
 
     def fresh(self, now: float, ttl: float = SERVE_TTL_S) -> bool:
         return self.fetched_at is not None and (now - self.fetched_at) <= ttl
@@ -974,6 +980,8 @@ class UsageStore:
                 trust_extended=trust_extended,
                 claim_until=claim_until,
                 held_until=held_until,
+                forbidden_strikes=int(row.get("forbiddenStrikes") or 0),
+                first_forbidden_at=_num_or_none(row.get("firstForbiddenAt")),
             )
         return out
 
@@ -1121,6 +1129,8 @@ class UsageStore:
                 row["backoffUntil"] = None
                 row["rejectedFingerprint"] = None
                 row["authDeadStrikes"] = 0  # a success proves the token is alive
+                row["forbiddenStrikes"] = 0
+                row["firstForbiddenAt"] = None
             else:
                 failures = int(row.get("consecutiveFailures") or 0) + 1
                 row["consecutiveFailures"] = failures
@@ -1129,6 +1139,10 @@ class UsageStore:
                     # Kept across later successes: the poll planner floors the
                     # cadence while a 429 is recent (see UsageEntry.last_429_at).
                     row["last429At"] = now
+                if rec.error == "http-403":
+                    row["forbiddenStrikes"] = int(row.get("forbiddenStrikes") or 0) + 1
+                    if _num_or_none(row.get("firstForbiddenAt")) is None:
+                        row["firstForbiddenAt"] = now
                 row["backoffUntil"] = now + _failure_backoff_s(
                     failures,
                     rec.retry_after_s,
