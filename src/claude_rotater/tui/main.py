@@ -611,6 +611,18 @@ def name_color(acc: AccountSnapshot, palette: Palette) -> str:
     return palette.accent if acc.is_active else palette.foreground
 
 
+PROVIDER_BLOCKED = "suspended by provider"
+
+
+def held_out_text(acc: AccountSnapshot) -> str:
+    """What an account out of rotation says in place of its usage: the
+    provider's refusal, else "disabled" (the user's choice); "" otherwise.
+    Its readings are past news: no bars, no forecast."""
+    if acc.provider_block:
+        return f"{PROVIDER_BLOCKED} · {acc.provider_block}"
+    return "disabled" if acc.disabled else ""
+
+
 def account_name(acc: AccountSnapshot) -> str:
     return f"{acc.alias} ({acc.email})" if acc.alias else acc.email
 
@@ -926,7 +938,7 @@ def forecast(
 ) -> Forecast | None:
     """``ok``, ``~7d limit in 15h`` or ``5h at limit`` (measured). None when
     there is nothing to forecast or too little history to say."""
-    if threshold is None or acc.disabled or acc.usage.sentinel is not None:
+    if threshold is None or held_out_text(acc) or acc.usage.sentinel is not None:
         return None
     pcts = window_pcts(acc, models)
     if not pcts:
@@ -1012,8 +1024,9 @@ def summary_line(
     name = account_name(acc)
     if acc.is_active:
         name += " (active)"
-    if acc.disabled:
-        name += " (off)"
+    held = held_out_text(acc)
+    if held:
+        return " · ".join([name, held])
     parts = [name]
     if acc.kind == "api_key":
         cell = key_cell(acc, 200, now=now, palette=Palette.DARK, hint=False)
@@ -1072,12 +1085,21 @@ def account_row_text(
         text.append(" ")
     name_style = name_color(acc, palette)
     text.append(fit_name(account_name(acc), layout.name_w), style=f"bold {name_style}" if selected else name_style)
+    held = held_out_text(acc)
     if layout.tag_w:
-        if layout.level.org:
+        if held:  # the state is said in place of the bars, not twice
+            tag, warn = ("" if acc.display_tag == "personal" or not layout.level.org
+                         else acc.display_tag), False
+        elif layout.level.org:
             tag, warn = row_tag(acc, now, login_warn_days, cadence)
         else:
             tag, warn = status_tag(acc, now, login_warn_days, cadence) or ("", False)
         text.append(" " * _GAP + _fit(tag, layout.tag_w), style=palette.sev_warn if warn else palette.muted)
+    if held:
+        text.append(" " * _GAP)
+        text.append(held, style=palette.sev_crit if acc.provider_block else palette.muted)
+        text.rstrip()
+        return text
 
     if acc.kind == "api_key":
         width = sum(layout.window_w(label) + _GAP for label in layout.windows) + layout.forecast_w
@@ -1849,9 +1871,11 @@ class MainScreen(Screen):
                 color=self.app.account_color(number, self.palette) if number else None,
             )
         else:
+            # Out of rotation: its history still charts, but nothing will
+            # burn it, so no projection is drawn over it.
             lines = chart_lines(
                 acc,
-                self.app.estimates.get(number) if number else None,
+                self.app.estimates.get(number) if number and acc and not held_out_text(acc) else None,
                 self.app.series.get(number, {}) if number else {},
                 now=time.time(),
                 threshold=self.app.threshold_pct,

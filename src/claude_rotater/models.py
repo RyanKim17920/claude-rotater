@@ -161,6 +161,10 @@ class AccountSnapshot:
     # (``api_keys.KeyState``: out of credit, budget, spend).
     key_tail: str = ""
     key_state: object | None = None
+    # Why the provider refuses this account (``provider_block``: org turned
+    # off subscription access, payment past due, ...); "" when it does not.
+    # Held out of rotation like ``disabled``, but not by the user's choice.
+    provider_block: str = ""
 
     @property
     def display_tag(self) -> str:

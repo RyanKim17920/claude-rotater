@@ -864,9 +864,9 @@ class TestAccountRowText:
         row = self._row(make_account(2, entry=make_entry(12.0, 44.0), email="work@y.com"))
         assert row.startswith("   work@y.com")
 
-    def test_disabled_tag_is_off_personal_tag_hidden(self):
+    def test_disabled_says_so_once_personal_tag_hidden(self):
         row = self._row(make_account(3, disabled=True), tag_need=8)
-        assert "off" in row and "disabled" not in row
+        assert row.count("disabled") == 1 and " off" not in row
         plain = self._row(make_account(3), tag_need=8)
         assert "personal" not in plain and "off" not in plain
 
@@ -1720,7 +1720,7 @@ class TestMainPage:
             assert "\n" not in first
             assert "personal" not in first  # a personal account needs no tag
             assert "work@y.com" in row_plain(app, "2")
-            assert "off" in row_plain(app, "3")
+            assert "disabled" in row_plain(app, "3")
 
     async def test_active_account_is_highlighted_at_start(self, tmp_path):
         fake = FakeSwitcher(
@@ -2224,7 +2224,7 @@ class TestMainPage:
             await pilot.press("d")
             await settle(pilot)
             assert ("set_disabled", "1", True) in fake_calls(app)
-            assert "off" in row_plain(app, "1")
+            assert "disabled" in row_plain(app, "1")
             await pilot.press("d")
             await settle(pilot)
             assert ("set_disabled", "1", False) in fake_calls(app)
@@ -4026,7 +4026,7 @@ class TestWidths:
             page = ["".join(seg.text for seg in strip).rstrip() for strip in strips]
             text = "\n".join(page)
             assert len(page) == size[1] and all(len(line) <= size[0] for line in page)
-            for gone in ("~ = estimate", "~?", "on duty", "not enough data", "disabled"):
+            for gone in ("~ = estimate", "~?", "on duty", "not enough data"):
                 assert gone not in text, gone
             assert page[-1].strip() == "⏎ switch · a add · m manual · $ costs · ? keys"
             assert all(row.region.height == 1 for row in app.screen.query(AccountRow))
@@ -4063,7 +4063,7 @@ class TestWidths:
             assert "work.account@" in work  # the local part survives any width
             assert "62%" in row_plain(app, "1") and "31%" in row_plain(app, "1")
             assert "↻" in row_plain(app, "1")  # the 5h reset, even at 60
-            assert "re-login" in row_plain(app, "5") and "off" in row_plain(app, "4")
+            assert "re-login" in row_plain(app, "5") and "disabled" in row_plain(app, "4")
             if size[0] <= 60:
                 assert "Acme" not in work  # the org goes before the name shrinks
 
@@ -4314,7 +4314,7 @@ def test_summary_line_is_plain_text():
     ).endswith("· 5h at limit")
     assert summary_line(
         make_account(3, disabled=True, entry=UsageEntry()), None, threshold=90.0, now=now
-    ) == "user3@example.com (off) · no reading yet"
+    ) == "user3@example.com · disabled"
     assert summary_line(
         make_account(4, entry=make_entry(sentinel=USAGE_RELOGIN_REQUIRED)), None,
         threshold=90.0, now=now,
@@ -4354,7 +4354,7 @@ class TestCopy:
             await settle(pilot)
             lines = copied[0].splitlines()
             assert [line.split(" · ")[0] for line in lines] == [
-                "me@x.com (active)", "work@y.com", "old@z.com (off)",
+                "me@x.com (active)", "work@y.com", "old@z.com",
             ]
             assert prompt_plain(app) == "copied the table"
 
