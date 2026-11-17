@@ -342,22 +342,36 @@ def _tail(path: str) -> bytes:
         return b""
 
 
-def scan_refusals(config_dir: Path, since: float) -> tuple[str, float] | None:
-    """The newest credit or spend-limit refusal in the transcripts written
-    since ``since``, as ``(reason, when)``; None if there is none. Reads
-    only the tails of the most recently written transcripts."""
+def newest_in_transcripts(
+    config_dir: Path,
+    since: float,
+    classify,
+    needles: tuple[bytes, ...] = (_NEEDLE,),
+) -> tuple[str, float] | None:
+    """The newest entry ``classify`` names (a non-empty verdict) in the
+    transcripts written since ``since``, as ``(verdict, when)``; None if
+    there is none. Reads only lines carrying one of ``needles``, in the
+    tails of the most recently written transcripts."""
     newest: tuple[str, float] | None = None
     for _mtime, path in _transcripts(config_dir, since):
         for line in _tail(path).splitlines():
-            if _NEEDLE not in line.replace(b" ", b""):
+            compact = line.replace(b" ", b"")
+            if not any(needle in compact for needle in needles):
                 continue
             try:
                 entry = json.loads(line)
             except ValueError:
                 continue
-            reason = classify(entry)
-            when = _when(entry.get("timestamp")) if reason else None
-            if reason and when is not None and when >= since:
+            verdict = classify(entry)
+            when = _when(entry.get("timestamp")) if verdict else None
+            if verdict and when is not None and when >= since:
                 if newest is None or when > newest[1]:
-                    newest = (reason, when)
+                    newest = (verdict, when)
     return newest
+
+
+def scan_refusals(config_dir: Path, since: float) -> tuple[str, float] | None:
+    """The newest credit or spend-limit refusal in the transcripts written
+    since ``since``, as ``(reason, when)``; None if there is none. Reads
+    only the tails of the most recently written transcripts."""
+    return newest_in_transcripts(config_dir, since, classify)
