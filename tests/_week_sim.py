@@ -27,7 +27,7 @@ waste less is to block less. Blocked hours are reported beside it.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 
 from claude_rotater import expiring_first as ef
 from claude_rotater import pace_strategy
@@ -122,6 +122,8 @@ def simulate(
     min_dwell_s: float = 0.0,
     no_five_hour: Iterable[int] = (),
     plan_weeks: bool = True,
+    want_fn: Callable[[float], float] | None = None,
+    extra_fn: Callable[[int, float], float] | None = None,
 ) -> Result:
     """Replay ``weeks`` of work. ``start_seven`` gives each account's 7d use
     at the start (default all fresh) and ``start_active`` the account on duty.
@@ -130,7 +132,11 @@ def simulate(
     no proactive move sooner than this after the last switch.
     ``no_five_hour``: indexes of accounts whose plan has no 5h limit.
     ``plan_weeks``: give pace a typical spend, so it plans the weeks before
-    a proactive move; off, the need ratio decides alone (as before)."""
+    a proactive move; off, the need ratio decides alone (as before).
+    ``want_fn``: 7d points per hour the user wants at ``t`` (a recorded
+    trace) in place of ``demand``; ``extra_fn``: points per hour spent on
+    account ``i`` at ``t`` from elsewhere (another machine or profile),
+    whichever account is active."""
     accts = [
         Acct(str(i + 1), reset_at=off * H, seven=start_seven[i] if start_seven else 0.0)
         for i, off in enumerate(reset_offsets_h)
@@ -148,7 +154,14 @@ def simulate(
     while t < weeks * WEEK_S:
         for a in accts:
             res.wasted += a.roll(t)
-        want = demand(t, rate) * STEP_S / H
+        if extra_fn is not None:
+            for i, a in enumerate(accts):
+                extra = min(extra_fn(i, t) * STEP_S / H, 100.0 - a.seven)
+                if extra > 0 and a.five_reset is None and not a.no_five:
+                    a.five_reset = t + FIVE_S
+                a.seven += max(0.0, extra)
+                a.five = min(100.0, a.five + max(0.0, extra) * FIVE_PER_SEVEN)
+        want = (want_fn(t) if want_fn is not None else demand(t, rate)) * STEP_S / H
         if want > 0:
             room = 100.0 - active.seven
             if not active.no_five:
