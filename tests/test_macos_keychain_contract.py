@@ -239,6 +239,25 @@ def tmp_keychain(tmp_path: Path):
         subprocess.run(["security", "delete-keychain", test_keychain], check=False)
 
 
+class TestRealKeychainHomeIsolation:
+    """The real-Keychain tests keep $HOME for ``security``; rota's own files
+    must still land in a temp home. Runs on the fake Keychain, everywhere."""
+
+    @pytest.fixture
+    def tmp_keychain(self) -> None:
+        """Only the name matters: conftest keys its $HOME exemption on it."""
+
+    def test_a_credential_write_stays_out_of_the_real_home(
+        self, tmp_keychain: None, block_real_keychain
+    ):
+        switcher = ClaudeAccountSwitcher()
+        switcher.platform = Platform.MACOS
+        switcher._write_credentials("fake-token-write")
+        account = macos_keychain.keychain_account_name()
+        stored = block_real_keychain.get_password("Claude Code-credentials", account)
+        assert stored == "fake-token-write"
+
+
 @pytest.mark.no_keychain_fake
 @mac_ci_only
 def test_read_credentials_finds_claude_code_seeded_entry(tmp_keychain: str):

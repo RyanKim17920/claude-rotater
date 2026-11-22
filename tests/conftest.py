@@ -490,11 +490,13 @@ def _isolate_real_home(request, tmp_path_factory, monkeypatch):
     to a throwaway dir unless the test already uses ``temp_home`` (which sets its
     own). Runs first (autouse, before the keychain guard and other fixtures).
 
-    Exempt the ``tmp_keychain`` fixture too: the macOS-CI integration tests that
-    use it drive the real ``security`` CLI (``default-keychain`` /
-    ``list-keychains``), which needs the real ``$HOME`` to locate
-    ``~/Library/Keychains``. An isolated ``$HOME`` makes those commands fail. The
-    fixture itself swaps the default keychain to a throwaway one and restores it.
+    The ``tmp_keychain`` fixture keeps the real ``$HOME`` variable: the macOS-CI
+    integration tests that use it drive the real ``security`` CLI
+    (``default-keychain`` / ``list-keychains``), which needs it to locate
+    ``~/Library/Keychains``. An isolated ``$HOME`` makes those commands fail.
+    ``Path.home()``, which rota's own paths resolve through, is still redirected,
+    so a credential write takes its lock in the throwaway home. The fixture
+    itself swaps the default keychain to a throwaway one and restores it.
 
     Always neutralize ``CLAUDE_CONFIG_DIR``, ``XDG_DATA_HOME``, ``ROTA_HOME``
     and ``ROTA_IMPORT_FROM`` (even for ``temp_home`` tests): they bypass
@@ -516,13 +518,13 @@ def _isolate_real_home(request, tmp_path_factory, monkeypatch):
     monkeypatch.setenv("ROTA_SHARED_HOME", str(tmp_path_factory.mktemp("shared_home")))
     if "temp_home" in request.fixturenames:
         return  # temp_home provides its own isolated home
-    if "tmp_keychain" in request.fixturenames:
-        return  # real-keychain integration tests need the real $HOME
     safe_home = tmp_path_factory.mktemp("isolated_home")
     (safe_home / ".claude").mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr("pathlib.Path.home", lambda: safe_home)
+    if "tmp_keychain" in request.fixturenames:
+        return  # the `security` CLI needs the real $HOME; rota's paths do not
     monkeypatch.setenv("HOME", str(safe_home))
     monkeypatch.setenv("USERPROFILE", str(safe_home))
-    monkeypatch.setattr("pathlib.Path.home", lambda: safe_home)
 
 
 @pytest.fixture(autouse=True)
