@@ -992,32 +992,11 @@ class ClaudeAccountSwitcher:
         """Public wrapper for session bootstrap. Empty string when missing."""
         return self._read_account_credentials(account_num, email)
 
-    def write_account_credentials(
-        self, account_num: str, email: str, credentials: str
-    ) -> None:
-        """Public wrapper for session bootstrap.
-
-        Takes NO lock: the caller is expected to hold ``self.lock_file``
-        already. Never combine with the locking persist callback in
-        list_accounts() — FileLock is not re-entrant across instances in one
-        process (see the v0.7.3 deadlock history).
-        """
-        self._write_account_credentials(account_num, email, credentials)
-
     def read_account_config(self, account_num: str, email: str) -> str:
         """Public wrapper for session bootstrap. Empty string when missing."""
         return self._read_account_config(account_num, email)
 
     # -- public accessors for the auto-switch engine -----------------------
-
-    def usage_by_account(self) -> dict[str, dict | str | None]:
-        """Public wrapper: account number → decision-grade usage value.
-
-        Each value is a usage dict (last-good, trusted while ≤
-        ``usage_store.STALE_OK_S`` old), a sentinel string, or ``None``
-        (unknown).
-        """
-        return self._usage_by_account()
 
     def usage_entries_by_account(
         self, fetch: set[str] | None = None, *, scheduled: bool = False
@@ -1354,18 +1333,6 @@ class ClaudeAccountSwitcher:
     def live_session_pids_for(self, account_num: str, email: str) -> list[int]:
         """Public wrapper: PIDs of live ``rota run`` sessions for a slot."""
         return self._live_session_pids(account_num, email)
-
-    def persist_backup_credentials(
-        self, account_num: str, email: str, credentials: str
-    ) -> None:
-        """Persist rotated credentials to a slot's backup store, under the lock.
-
-        For inactive accounts only — never routes to the active store. Mirrors
-        the persist callback ``_fetch_account_usage`` uses. The caller must NOT
-        hold ``self.lock_file`` (FileLock is non-reentrant).
-        """
-        with FileLock(self.lock_file):
-            self._write_account_credentials(account_num, email, credentials)
 
     def account_identity(self, account_num: str) -> dict:
         """Stored identity for a slot: ``{"email", "organizationUuid", "uuid"}``."""

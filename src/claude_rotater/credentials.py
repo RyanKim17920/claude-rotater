@@ -902,21 +902,6 @@ class CredentialStore:
             except Exception as e:
                 self._host._logger.warning(f"Failed to clear primaryApiKey: {e}")
 
-    def _clear_oauth_credential(self) -> None:
-        """Clear the active OAuth credential — Keychain item and plaintext file.
-
-        Best-effort: a down Keychain or missing file is fine. Removing
-        ``.credentials.json`` stops Claude Code from falling back to a stale OAuth
-        login over the just-activated API key.
-        """
-        self._delete_active_keychain_entry()
-        cred_file = get_credentials_path()
-        try:
-            if cred_file.exists():
-                cred_file.unlink()
-        except OSError as e:
-            self._host._logger.warning(f"Failed to remove credentials file: {e}")
-
     def _write_oauth_credentials(self, credentials: str) -> None:
         """Write Claude Code's active OAuth credentials.
 

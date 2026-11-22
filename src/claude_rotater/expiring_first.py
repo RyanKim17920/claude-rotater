@@ -78,14 +78,6 @@ class AccountView:
             return 100.0
         return max(0.0, 100.0 - self.five_hour_pct)
 
-    @property
-    def mid_five_hour_window(self) -> bool:
-        return (
-            self.five_hour_reset is not None
-            and self.five_hour_pct is not None
-            and self.five_hour_pct > 0
-        )
-
 
 @dataclass(frozen=True)
 class Choice:

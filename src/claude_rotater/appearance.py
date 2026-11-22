@@ -46,12 +46,6 @@ _UNSET = object()
 _cache: object | str | None = _UNSET
 
 
-def _reset_cache() -> None:
-    """Test helper: forget any cached detection result."""
-    global _cache
-    _cache = _UNSET
-
-
 def _parse_osc11(reply: bytes) -> tuple[float, float, float] | None:
     """Parse an OSC 11 reply into (r, g, b) each normalised to 0..1."""
     m = _RGB.search(reply)
