@@ -154,3 +154,5 @@ class TestParseBudget:
     def test_labels(self):
         assert ak.Budget("monthly", 100.0).label() == "$100/month"
         assert ak.Budget("topup", 50.0, NOW).label().startswith("$50 since ")
+        since = datetime(2026, 1, 5, 12).timestamp()
+        assert ak.Budget("topup", 50.0, since).label() == "$50 since Jan 5"

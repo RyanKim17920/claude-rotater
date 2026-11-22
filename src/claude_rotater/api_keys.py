@@ -76,8 +76,8 @@ class Budget:
     def label(self) -> str:
         if self.kind == "monthly":
             return f"${self.amount:,.0f}/month"
-        day = datetime.fromtimestamp(self.since).strftime("%b %-d")
-        return f"${self.amount:,.0f} since {day}"
+        since = datetime.fromtimestamp(self.since)  # no %-d: Windows rejects it
+        return f"${self.amount:,.0f} since {since:%b} {since.day}"
 
 
 @dataclass(frozen=True)
