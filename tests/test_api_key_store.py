@@ -589,3 +589,8 @@ class TestThroughTheSwitcher:
         akm.activate(B, switcher.backup_dir, cfg, keychain=True)
         assert switcher.switch_to("2", json_output=True)["switched"]
         assert switcher._read_account_credentials("1", "api-key-1@token.local") == A
+
+    def test_picking_the_key_again_restores_it(self, switcher, dirs):
+        self._lose_key(switcher, dirs)
+        switcher.switch_to("1", json_output=True)
+        assert _served(dirs[0]) == A

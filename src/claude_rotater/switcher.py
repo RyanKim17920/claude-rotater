@@ -6108,6 +6108,8 @@ class ClaudeAccountSwitcher:
 
         - ``("noop", None)`` — live matches the slot's backup; nothing to do
           (issue #79's short-circuit).
+        - ``("reconcile", None)`` — an API-key slot whose key is not the one
+          being served: the switch activates it again.
         - ``("reconcile", provenance)`` — live diverged and its owner was
           resolved: run the full switch so ``_perform_switch`` can classify
           (re-sync a legitimate rotation, or preserve foreign bytes and
@@ -6122,6 +6124,9 @@ class ClaudeAccountSwitcher:
         """
         if self._live_matches_slot_backup(slot, email):
             return "noop", None
+        if self._account_kind(slot) == "api_key":
+            # A key has no newer generation to protect: hand out the slot's.
+            return "reconcile", None
         provenance = self._prefetch_live_identity()
         if provenance.get("resolved") is None:
             self._logger.info(
