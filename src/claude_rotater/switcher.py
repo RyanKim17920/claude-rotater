@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import dataclasses
 import json
-import logging
 import os
 import re
 import shutil
@@ -76,7 +75,6 @@ from claude_rotater.printer import (
     bolded,
     dimmed,
     entrypoint_label,
-    error,
     format_age,
     ide_short_name,
     muted,
