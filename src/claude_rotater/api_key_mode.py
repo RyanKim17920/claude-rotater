@@ -122,7 +122,7 @@ def store_key(
 ) -> None:
     """Make ``key`` ``data_dir``'s active key (kept in the Keychain when
     ``keychain``, default on macOS, else in a 0600 file). Raises OSError or
-    ``KeychainError`` when it cannot; ``key`` is then never served.
+    ``KeychainError`` when it cannot; ``key`` is then not made active.
 
     The record is written after the key, so stopping anywhere before it
     leaves the previous key or, where that key was just overwritten, none.
