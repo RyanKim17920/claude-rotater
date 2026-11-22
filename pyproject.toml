@@ -40,8 +40,9 @@ build-backend = "hatchling.build"
 packages = ["src/claude_rotater"]
 
 [tool.hatch.build.targets.sdist]
-# Editor and CI config are repo-only; the sdist keeps source, tests, docs.
-exclude = [".vscode", ".github"]
+# An allowlist: hatch only honours .gitignore, so anything else lying in a
+# checkout (local notes, screenshots, untracked files) would be packed.
+include = ["/src", "/tests", "/docs", "/scripts", "/CHANGELOG.md", "/uv.lock"]
 
 [dependency-groups]
 dev = [
