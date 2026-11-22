@@ -461,6 +461,11 @@ class SettingsList(Widget, can_focus=True):
                 return
             self._select(self.specs.index(lines[y][1]))
 
+    def focus(self, scroll_visible: bool = False):
+        # Scrolling the whole list into view means scrolling to its top,
+        # away from the selection: whoever hands the keyboard back, don't.
+        return super().focus(scroll_visible)
+
     def on_focus(self) -> None:
         self.refresh()
 

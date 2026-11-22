@@ -14,6 +14,7 @@ from pathlib import Path
 
 import pytest
 from textual.app import App, ComposeResult
+from textual.screen import Screen
 from textual.widgets import Static
 
 from claude_rotater.tui.prompt import PromptLine, hint_text
@@ -80,6 +81,20 @@ def footer(app: Host) -> str:
 
 def plain(app: Host) -> str:
     return lst(app).render().plain
+
+
+def record_frames(monkeypatch) -> list[str]:
+    """Every frame painted from now on. Checking each one leaves nothing to
+    timing: a selection scrolled into view a refresh late shows up here."""
+    frames: list[str] = []
+    paint = Screen._compositor_refresh
+
+    def paint_and_record(screen: Screen) -> None:
+        paint(screen)
+        frames.append("\n".join(screen_lines(screen.app)))
+
+    monkeypatch.setattr(Screen, "_compositor_refresh", paint_and_record)
+    return frames
 
 
 def screen_lines(app: Host) -> list[str]:
@@ -248,6 +263,21 @@ class TestLayout:
             body = app.screen.query_one("#config-body")
             line = lst(app).line_of(lst(app).cursor)
             assert body.scroll_offset.y <= line < body.scroll_offset.y + body.size.height
+
+    async def test_taking_the_focus_back_keeps_the_selection_shown(self, tmp_path, monkeypatch):
+        app = Host(tmp_path)
+        async with app.run_test(size=(60, 20)) as pilot:
+            await pilot.pause()
+            await pilot.press("end")
+            await pilot.pause()
+            app.screen.set_focus(None)
+            await pilot.pause()
+            frames = record_frames(monkeypatch)
+            lst(app).focus()
+            await pilot.pause()
+            await app.animator.wait_until_complete()
+            await pilot.pause()
+            assert frames and all("▌ " in frame for frame in frames)
 
 
 # -- navigation -------------------------------------------------------------------
