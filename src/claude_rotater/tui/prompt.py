@@ -8,7 +8,9 @@ happens on this single line, like a shell prompt:
   (``remove work@y.com?  y yes  n no``); a listed key answers at once, esc
   (and ``n`` where it is not an answer of its own) cancels;
 - :meth:`PromptLine.read`: a line of text (``token: ••••▌``), typed or
-  pasted; enter submits, esc cancels;
+  pasted; enter submits, esc cancels. ``keys`` adds ctrl-key actions that
+  run without closing the entry, and :meth:`PromptLine.update` changes its
+  label or note while it is open (a login's progress);
 - :meth:`PromptLine.say`: a result or an error, shown for a few seconds,
   then the hint comes back. A result that lands while a question is open
   waits until it is answered.
@@ -20,7 +22,7 @@ quits (it is an app-level priority binding).
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Callable
 
 from rich.text import Text
@@ -61,6 +63,7 @@ class _Read:
     secret: bool
     note: str = ""
     buffer: str = ""
+    keys: dict[str, Callable[[], None]] = field(default_factory=dict)
 
 
 class PromptLine(Widget):
@@ -128,10 +131,24 @@ class PromptLine(Widget):
         *,
         secret: bool = False,
         note: str = "",
+        keys: dict[str, Callable[[], None]] | None = None,
     ) -> None:
         """Read one line of text after ``label``; ``done`` gets it (stripped,
-        possibly empty) on enter, or None on esc. ``secret`` draws dots."""
-        self._take(_Read(label, done, secret, note))
+        possibly empty) on enter, or None on esc. ``secret`` draws dots.
+        ``keys`` maps keys (ctrl+ ones: letters are text) to actions run with
+        the entry left open."""
+        self._take(_Read(label, done, secret, note, keys=dict(keys or {})))
+
+    def update(self, *, label: str | None = None, note: str | None = None) -> None:
+        """Change the open entry's label or note; nothing when none is open."""
+        prompt = self._open
+        if not isinstance(prompt, _Read):
+            return
+        if label is not None:
+            prompt.label = label
+        if note is not None:
+            prompt.note = note
+        self.refresh()
 
     def say(self, text: str, role: str = "info") -> None:
         """Show a result for a few seconds (``role``: info / ok / warn / error).
@@ -207,7 +224,10 @@ class PromptLine(Widget):
             if event.key == "n":  # "no" without a choice of its own still cancels
                 self._finish(None)
             return
-        if event.key == "enter":
+        action = prompt.keys.get(event.key)
+        if action is not None:
+            action()
+        elif event.key == "enter":
             self._finish(prompt.buffer.strip())
         elif event.key in ("backspace", "ctrl+h"):
             prompt.buffer = prompt.buffer[:-1]

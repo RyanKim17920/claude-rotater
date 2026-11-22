@@ -135,6 +135,36 @@ class TestPromptLineWidget:
             await pilot.press("enter")
             assert app.answers == ["sk-ant-oat01-abcd"]
 
+    async def test_read_keys_run_actions_and_keep_the_entry_open(self):
+        app = Host()
+        fired: list[str] = []
+        async with app.run_test(size=(80, 10)) as pilot:
+            app.line.read("code:", app.answers.append, keys={"ctrl+o": lambda: fired.append("o")})
+            await pilot.pause()
+            await pilot.press("o", "ctrl+o", "k")
+            assert fired == ["o"] and app.line.is_open
+            assert shown(app).startswith("code: ok▌")  # a plain letter is still text
+            await pilot.press("enter")
+            assert app.answers == ["ok"]
+
+    async def test_update_changes_label_and_note_while_open_only(self):
+        app = Host()
+        async with app.run_test(size=(80, 10)) as pilot:
+            app.line.update(label="ignored", note="ignored")  # nothing open: no-op
+            app.line.read("code:", app.answers.append, note="waiting")
+            await pilot.pause()
+            await pilot.press("x")
+            app.line.update(note="signing in")
+            await pilot.pause()
+            assert shown(app) == "code: x▌  signing in  ⏎ ok · esc cancel"
+            app.line.update(label="log in:")
+            await pilot.pause()
+            assert shown(app).startswith("log in: x▌")
+            app.line.ask("pick:", (Choice("b", "blue", "B"),), app.answers.append)
+            app.line.update(note="nope")  # a question has no note to change
+            await pilot.pause()
+            assert shown(app) == "pick:  b blue  esc"
+
     async def test_a_follow_up_keeps_the_keyboard(self):
         app = Host()
         async with app.run_test(size=(80, 10)) as pilot:
