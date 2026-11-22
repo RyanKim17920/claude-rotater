@@ -88,6 +88,7 @@ class LoginProgress:
     signing_in: bool = False
     succeeded: bool = False
     message: str = ""  # the CLI's latest problem/error line, codes masked
+    messages: int = 0  # how many such lines so far: a repeated problem is news too
 
 
 def _find_url(lines: list[str]) -> str | None:
@@ -132,17 +133,16 @@ def parse_progress(text: str, *, secrets: Iterable[str] = ()) -> LoginProgress:
     lines = text.split("\n")
     url = _find_url(lines)
     succeeded = _SUCCESS in text
-    message = ""
-    for line in reversed(lines):
-        if not _is_chatter(line, url) and line.strip() != _MASK:
-            message = line.strip()
-            break
+    problems = [
+        line.strip() for line in lines if not _is_chatter(line, url) and line.strip() != _MASK
+    ]
     return LoginProgress(
         url=url,
         asks_for_code=PASTE_PROMPT in text or "Sign in at:" in text,
         signing_in=_SIGNING_IN in text and not succeeded,
         succeeded=succeeded,
-        message=message,
+        message=problems[-1] if problems else "",
+        messages=len(problems),
     )
 
 

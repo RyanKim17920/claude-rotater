@@ -84,6 +84,12 @@ class TestParseProgress:
         assert p.message == "Invalid code •••. Paste the code from the page."
         assert "bad-code-123" not in repr(p)
 
+    def test_the_same_problem_twice_is_a_change(self):
+        one = f"visit:\n{URL}\nInvalid code.\nPaste code here if prompted > "
+        two = one + "x\nInvalid code.\nPaste code here if prompted > "
+        a, b = parse_progress(one, secrets=["x"]), parse_progress(two, secrets=["x"])
+        assert a.message == b.message == "Invalid code." and a != b
+
     def test_an_echoed_code_alone_is_never_a_message(self):
         p = parse_progress(f"visit:\n{URL}\nPaste code here if prompted > \nsecret-xyz\n", secrets=("secret-xyz",))
         assert p.message == ""
