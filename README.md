@@ -28,7 +28,10 @@ The statusline feed needs a POSIX shell, so it works on macOS and Linux.
 1. **Open the TUI:** run `rota`.
 2. **Add accounts:** press `a`, then pick how:
    - `b` log in with the browser (runs `claude auth login` in a separate
-     profile, so the account you're using now stays logged in)
+     profile, so the account you're using now stays logged in). You never
+     leave the TUI: the browser opens, the bottom line shows progress, and
+     if the sign-in page shows a code you paste it there. `ctrl+o` opens
+     the page again, `ctrl+y` copies its link, `esc` cancels.
    - `c` add the account Claude Code is logged in with right now
    - `t` paste a setup token
    - `k` an API key (see [API-key accounts](#api-key-accounts))
