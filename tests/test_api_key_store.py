@@ -608,3 +608,16 @@ class TestThroughTheSwitcher:
         monkeypatch.setattr(switcher, "_fetch_active_usage", fetch)
         switcher.accounts_snapshot()
         assert polled == []
+
+    @pytest.mark.parametrize("pick", ["1", "3"], ids=["another", "the-login-again"])
+    def test_a_login_slot_never_takes_the_key(self, switcher, dirs, pick):
+        cfg, data = dirs
+        switcher.add_account_from_token("sk-ant-oat01-" + "o" * 40)
+        email = "setup-token-3@token.local"
+        login = switcher._read_account_credentials("3", email)
+        switcher.switch_to("3", json_output=True)
+        # A crash between handing B out and recording the switch to it.
+        akm.activate(B, switcher.backup_dir, cfg, keychain=True)
+        switcher.switch_to(pick, json_output=True)
+        assert switcher._read_account_credentials("3", email) == login
+        assert switcher._read_credentials() == (A if pick == "1" else login)

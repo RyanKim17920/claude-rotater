@@ -27,7 +27,7 @@ from claude_rotater.exceptions import (
     SwitchError,
     ValidationError,
 )
-from claude_rotater import api_keys, billing, oauth, pace, provider_block
+from claude_rotater import api_key_mode, api_keys, billing, oauth, pace, provider_block
 from claude_rotater.claude_locks import (
     claude_config_lock,
     claude_credentials_lock,
@@ -82,6 +82,7 @@ from claude_rotater.printer import (
 )
 from claude_rotater.paths import (
     get_backup_root,
+    get_claude_config_home,
     get_credentials_path,
     get_default_claude_config_home,
     get_global_config_path,
@@ -6106,6 +6107,10 @@ class ClaudeAccountSwitcher:
             == oauth.credential_fingerprint(backup)
         )
 
+    def _handed_out_key(self) -> str | None:
+        """The key rota's helper hands this profile's sessions, or None."""
+        return api_key_mode.active_key(self.backup_dir, get_claude_config_home())
+
     def _self_switch_action(self, slot: str, email: str) -> tuple[str, dict | None]:
         """How to treat a switch that targets the already-active slot.
 
@@ -6113,8 +6118,9 @@ class ClaudeAccountSwitcher:
 
         - ``("noop", None)`` — live matches the slot's backup; nothing to do
           (issue #79's short-circuit).
-        - ``("reconcile", None)`` — an API-key slot whose key is not the one
-          being served: the switch activates it again.
+        - ``("reconcile", None)`` — an API key is involved (this slot's is
+          not the one being served, or one is served under this login): the
+          switch activates the slot's own again.
         - ``("reconcile", provenance)`` — live diverged and its owner was
           resolved: run the full switch so ``_perform_switch`` can classify
           (re-sync a legitimate rotation, or preserve foreign bytes and
@@ -6129,7 +6135,7 @@ class ClaudeAccountSwitcher:
         """
         if self._live_matches_slot_backup(slot, email):
             return "noop", None
-        if self._account_kind(slot) == "api_key":
+        if self._account_kind(slot) == "api_key" or self._handed_out_key():
             # A key has no newer generation to protect: hand out the slot's.
             return "reconcile", None
         provenance = self._prefetch_live_identity()
@@ -6258,6 +6264,11 @@ class ClaudeAccountSwitcher:
             if looks_like_api_key(original_creds):
                 return ("own-bytes", None)
             return ("known-foreign", None)
+        handed_out = self._handed_out_key()
+        if handed_out and original_creds == handed_out:
+            # A switch to a key stopped before it was recorded: the key is in
+            # its own slot, and is no login for this one.
+            return ("own-bytes", None)
         backup = self._read_account_credentials(current_account, current_email)
         if backup and backup == original_creds:
             return ("own-bytes", None)
