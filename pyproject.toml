@@ -1,5 +1,5 @@
 [project]
-name = "rota"
+name = "rota-cli"
 version = "0.1.0"
 description = "rota: multi-account rotation for Claude Code"
 readme = "README.md"

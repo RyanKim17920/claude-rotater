@@ -20,11 +20,15 @@ def __getattr__(name: str):
     if name == "__version__":
         from importlib.metadata import PackageNotFoundError, version
 
-        try:
-            value = version("rota")
-        except PackageNotFoundError:
-            # An editable install made before the rename keeps its old metadata.
-            value = version("claude-rotater")
+        # Installs made under an earlier distribution name keep that metadata.
+        for dist in ("rota-cli", "rota", "claude-rotater"):
+            try:
+                value = version(dist)
+                break
+            except PackageNotFoundError:
+                pass
+        else:
+            raise PackageNotFoundError("rota-cli")
     elif name == "ClaudeAccountSwitcher":
         from claude_rotater.switcher import ClaudeAccountSwitcher as value
     else:

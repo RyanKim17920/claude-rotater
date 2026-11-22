@@ -68,7 +68,9 @@ def _subprocess_env(**extra: str) -> dict[str, str]:
 @pytest.mark.parametrize(
     "installed, expected",
     [
+        ({"rota-cli": "3"}, "3"),
         ({"rota": "2"}, "2"),
+        ({"rota-cli": "3", "rota": "2", "claude-rotater": "1"}, "3"),
         # An editable install made before the rename, running renamed source.
         ({"claude-rotater": "1"}, "1"),
         ({"rota": "2", "claude-rotater": "1"}, "2"),
