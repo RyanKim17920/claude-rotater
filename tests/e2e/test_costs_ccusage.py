@@ -96,3 +96,15 @@ def test_an_incremental_refresh_matches_a_full_one(tmp_path, runner):
     full = costs.refresh(None, sources, runner, now)
     assert [r.to_json() for r in later.rows] == [r.to_json() for r in full.rows]
     assert costs.is_current(later, sources, now)
+
+
+@pytest.mark.parametrize("model", [
+    "claude-fable-5-2", "claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5"])
+def test_the_bundled_table_prices_the_current_models(tmp_path, runner, model):
+    home = tmp_path / ".claude"
+    path = home / "projects" / "-proj" / "s.jsonl"
+    path.parent.mkdir(parents=True)
+    path.write_text(line(time.time() - 600, 1, model, 5000))
+    sources = costs.transcript_sources(tmp_path / ".rota", [home])
+    rows = costs.refresh(None, sources, runner, time.time()).rows
+    assert [r.model for r in rows] == [model] and rows[0].cost > 0

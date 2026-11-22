@@ -46,7 +46,7 @@ _logger = logging.getLogger(__name__)
 
 # The ccusage release rota is tested against, fetched by bunx/npx when no
 # ccusage is installed. An installed ccusage wins, whatever its version.
-CCUSAGE_VERSION = "20.0.34"
+CCUSAGE_VERSION = "20.0.51"
 RUNNER_TIMEOUT_S = 300.0  # a first npx/bunx run downloads the package
 
 SLOT_S = 900  # 15 minutes: fine enough for switches, aligned to every tz offset
