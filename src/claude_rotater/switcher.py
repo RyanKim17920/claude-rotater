@@ -20,6 +20,7 @@ from typing import Callable
 
 from claude_rotater.exceptions import (
     AccountNotFoundError,
+    ClaudeSwitchError,
     ConfigError,
     CredentialReadError,
     LockError,
@@ -3577,7 +3578,8 @@ class ClaudeAccountSwitcher:
 
         When ``assume_yes`` is True the confirmation prompt is skipped (used by
         the TUI, which collects confirmation before calling). An API key being
-        served is revoked first (see :meth:`_delete_account_files`).
+        served is revoked first (see :meth:`_delete_account_files`), and the
+        login beneath the one on duty takes its place.
         """
         self._refuse_session_shell()
         if not self.sequence_file.exists():
@@ -3659,6 +3661,10 @@ class ClaudeAccountSwitcher:
                 raise ConfigError(
                     f"Account-{account_num} changed meanwhile; nothing was removed"
                 )
+            key_on_duty = (
+                self._api_key_from_data(data, account_num)
+                and self.current_account_number() == account_num
+            )
             # Remove backup files
             self._delete_account_files(account_num, email)
             api_keys.forget(self.backup_dir, account_num)
@@ -3669,8 +3675,53 @@ class ClaudeAccountSwitcher:
             data["lastUpdated"] = get_timestamp()
 
             self._write_json(self.sequence_file, data)
+            if key_on_duty:
+                try:
+                    self._mark_login_beneath(
+                        account_num, email, record.get("organizationUuid") or ""
+                    )
+                except (OSError, ValueError, ClaudeSwitchError) as e:
+                    self._logger.warning(f"Could not mark the login beneath the key: {e}")
         self._logger.info(f"Removed account {account_num}: {email}")
         print(f"{accent('Removed')} Account-{account_num} ({email})")
+
+    def _mark_login_beneath(self, removed: str, email: str, org_uuid: str) -> None:
+        """The removed key is revoked, so sessions use the login beneath it:
+        name that login's slot, else the profile keeps the removed key's
+        identity and rota stops managing it. Only a login one slot's backup
+        proves, read cleanly; no credential is written. Caller holds
+        ``self.lock_file``."""
+        with claude_config_lock(), claude_storage_write_lock():
+            if not self._live_identity_matches(email, org_uuid):
+                return
+            live = self._read_active_credentials()
+            if not live.value or live.degraded:
+                return
+            lineage = oauth.credential_fingerprint(live.value)
+            data = self._get_sequence_data() or {}
+            owners = [
+                (num, account.get("email", ""))
+                for num, account in data.get("accounts", {}).items()
+                if not self._api_key_from_data(data, num)
+                and oauth.credential_fingerprint(
+                    self._read_account_credentials(num, account.get("email", ""))
+                ) == lineage
+            ]
+            if len(owners) != 1:
+                return
+            slot, owner = owners[0]
+            stored = self._read_account_config(slot, owner)
+            identity = json.loads(stored).get("oauthAccount") if stored else None
+            path = self._get_claude_config_path()
+            config = self._read_json(path)
+            if not identity or config is None:
+                return
+            config["oauthAccount"] = identity
+            self._write_json(path, config)
+            data["activeAccountNumber"] = int(slot)
+            self._write_json(self.sequence_file, data)
+            # The wording attribution reads.
+            self._logger.info(f"Switched from account {removed} to {slot}")
 
     def _build_accounts_info(self) -> list[tuple[int, str, str, str, bool, str, str]]:
         """Build per-account (num, email, org_name, org_uuid, is_active, creds, alias).

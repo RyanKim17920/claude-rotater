@@ -1454,3 +1454,32 @@ class TestARemovedKeyIsNeverServed:
         with pytest.raises(CredentialWriteError):
             s.add_account_from_token(PERSONAL_KEY, email=self.EMAIL)
         assert self._served(s) is None
+
+    def test_removing_the_key_on_duty_leaves_the_login_beneath_managed(self, s):
+        s.switch_to("2", json_output=True)
+        s.remove_account("2", assume_yes=True)
+        assert s.current_account_number() == "1"
+        assert s._get_sequence_data()["activeAccountNumber"] == 1
+
+    def test_a_login_beneath_that_is_no_slots_is_not_guessed(self, s):
+        s.switch_to("2", json_output=True)
+        s._store._write_oauth_credentials(OAUTH_JSON)
+        s.remove_account("2", assume_yes=True)
+        assert s.current_account_number() is None
+        assert self._served(s) is None
+
+    def test_a_login_two_slots_hold_is_not_guessed(self, s):
+        s.add_account_from_token(SETUP_TOKEN, email="same@example.com", slot=4)
+        s.switch_to("2", json_output=True)
+        s.remove_account("2", assume_yes=True)
+        assert s.current_account_number() is None
+
+    def test_a_degraded_read_is_not_adopted(self, s, monkeypatch):
+        from claude_rotater.credentials import ActiveCredentials
+
+        login = s._read_credentials()
+        s.switch_to("2", json_output=True)
+        degraded = ActiveCredentials(login, False, True)
+        monkeypatch.setattr(s, "_read_active_credentials", lambda: degraded)
+        s.remove_account("2", assume_yes=True)
+        assert s.current_account_number() is None
