@@ -39,7 +39,7 @@ from textual import events
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Vertical, VerticalScroll
-from textual.geometry import Region
+from textual.geometry import Size
 from textual.message import Message
 from textual.widget import Widget
 from textual.widgets import Static
@@ -185,6 +185,7 @@ class SettingsList(Widget, can_focus=True):
         # replaces it instead of appending (so "85" over "90" is 85, not 9085).
         self.selected_all = False
         self.error: str | None = None  # rejection or clamp note for the detail line
+        self.reveal_pending = False  # a selection the body has yet to show
         self.values: dict[str, tuple[object, bool]] = {}
         self.reload()
 
@@ -303,19 +304,19 @@ class SettingsList(Widget, can_focus=True):
     def _select(self, index: int) -> None:
         self.cursor = max(0, min(index, len(self.specs) - 1))
         self.error = None
+        self.reveal_pending = True
         self._changed_view()
-        self.call_after_refresh(self._scroll_into_view)
 
-    def _scroll_into_view(self) -> None:
-        parent = self.parent
-        if not isinstance(parent, VerticalScroll):
-            return
+    def offset_showing_cursor(self, offset: int, height: int) -> int:
+        """The scroll offset nearest ``offset`` that shows the selected row in
+        ``height`` lines, with its heading when it is the section's first."""
+        lines = self.lines()
         line = self.line_of(self.cursor)
-        # Keep a section's heading in view when its first row is selected.
-        top = line - 1 if line > 0 and self.lines()[line - 1][0] not in ("row", "") else line
-        parent.scroll_to_region(
-            Region(0, top, max(1, self.size.width), line - top + 1), animate=False
-        )
+        top = line
+        if height > 1 and line > 0 and lines[line - 1][0] not in ("row", ""):
+            top = line - 1
+        offset = min(max(offset, line - height + 1), top)
+        return min(offset, max(0, len(lines) - height))
 
     def action_move(self, delta: int) -> None:
         if self.editing is not None and not self._commit():
@@ -473,6 +474,36 @@ class SettingsList(Widget, can_focus=True):
         self.refresh()
 
 
+class _SettingsBody(VerticalScroll):
+    """Scrolls the list to its selection while being laid out.
+
+    The footer is as tall as the selected row's help, so this viewport's
+    height is only known during layout. A scroll requested before that aims
+    at the old height and one after it is a frame late.
+    """
+
+    def __init__(self, settings: SettingsList, *, id: str | None = None) -> None:
+        super().__init__(settings, id=id)
+        self._settings = settings
+        self._height = 0
+
+    def arrange(self, size: Size, optimal: bool = False):
+        arrangement = super().arrange(size, optimal)
+        settings = self._settings
+        if not optimal and (settings.reveal_pending or size.height != self._height):
+            settings.reveal_pending = False
+            self._height = size.height
+            self.app.animator.force_stop_animation(self, "scroll_y")
+            old = self.scroll_y
+            new = settings.offset_showing_cursor(round(old), size.height)
+            if new != old:
+                # Not `scroll_to`: that clamps to the height of the last layout.
+                self.set_reactive(VerticalScroll.scroll_y, new)
+                self.set_reactive(VerticalScroll.scroll_target_y, new)
+                self.vertical_scrollbar.position = new
+        return arrangement
+
+
 class _ConfigTitle(Static):
     """``settings  saved as you change them``: the page's name, in the body."""
 
@@ -545,10 +576,9 @@ class ConfigView(Vertical):
 
     def compose(self) -> ComposeResult:
         yield _ConfigTitle(id="config-title")
-        body = VerticalScroll(id="config-body")
+        body = _SettingsBody(SettingsList(self.backup_dir, id="settings"), id="config-body")
         body.can_focus = False
-        with body:
-            yield SettingsList(self.backup_dir, id="settings")
+        yield body
         yield Static(id="config-detail", markup=False)
 
     @property

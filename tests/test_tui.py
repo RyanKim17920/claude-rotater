@@ -2604,6 +2604,29 @@ class TestMainPage:
                 await pilot.pause()
                 assert not app.is_running, keys
 
+    async def test_settings_keep_the_selection_shown_at_60x20(self, tmp_path):
+        app = make_app(three_accounts(tmp_path))
+        async with app.run_test(size=(60, 20)) as pilot:
+            await settle(pilot)
+            await pilot.press("c")
+            await pilot.pause()
+
+            def selection_shown() -> bool:
+                strips = app.screen._compositor.render_strips()
+                return any("▌ " in "".join(seg.text for seg in strip) for strip in strips)
+
+            for _ in range(len(app.screen.config.settings_list.specs) - 1):
+                await pilot.press("down")
+                await pilot.pause()
+                assert selection_shown(), app.screen.config.settings_list.spec.label
+            app.prompt.confirm("sure?", lambda _ok: None)
+            await pilot.pause()
+            await pilot.press("escape")  # the prompt hands the keyboard back
+            await pilot.pause()
+            await app.animator.wait_until_complete()
+            await pilot.pause()
+            assert selection_shown()
+
     async def test_c_shows_config_in_place_and_back(self, tmp_path):
         from claude_rotater.tui.main import MainScreen
 

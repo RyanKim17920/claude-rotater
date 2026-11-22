@@ -264,6 +264,44 @@ class TestLayout:
             line = lst(app).line_of(lst(app).cursor)
             assert body.scroll_offset.y <= line < body.scroll_offset.y + body.size.height
 
+    @pytest.mark.parametrize("size", [(60, 10), (60, 20), (80, 24), (120, 18)])
+    async def test_every_frame_shows_the_selected_row(self, tmp_path, monkeypatch, size):
+        # The footer is as tall as the selected row's help, so moving can
+        # shrink the list under the cursor.
+        app = Host(tmp_path)
+        async with app.run_test(size=size) as pilot:
+            await pilot.pause()
+            frames = record_frames(monkeypatch)
+            rows = len(lst(app).specs) - 1
+            for key in [*["down"] * rows, *["up"] * rows, "end", "home"]:
+                await pilot.press(key)
+                await pilot.pause()
+                label = lst(app).spec.label
+                assert f"▌ {label}" in "\n".join(screen_lines(app)), (key, label)
+            assert all("▌ " in frame for frame in frames)
+
+    async def test_shrinking_the_terminal_keeps_the_selection_shown(self, tmp_path, monkeypatch):
+        app = Host(tmp_path)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            await pilot.press("end")
+            await pilot.pause()
+            frames = record_frames(monkeypatch)
+            await pilot.resize_terminal(60, 14)
+            await pilot.pause()
+            assert frames and all("▌ " in frame for frame in frames)
+
+    async def test_a_longer_footer_under_an_edit_keeps_the_row_shown(self, tmp_path, monkeypatch):
+        app = Host(tmp_path)
+        async with app.run_test(size=(60, 20)) as pilot:
+            await pilot.pause()
+            await pilot.press("end")
+            await pilot.pause()
+            frames = record_frames(monkeypatch)
+            lst(app)._fail("cannot write settings.json: " + "no space left " * 14)
+            await pilot.pause()
+            assert frames and all("▌ " in frame for frame in frames)
+
     async def test_taking_the_focus_back_keeps_the_selection_shown(self, tmp_path, monkeypatch):
         app = Host(tmp_path)
         async with app.run_test(size=(60, 20)) as pilot:
@@ -278,6 +316,40 @@ class TestLayout:
             await app.animator.wait_until_complete()
             await pilot.pause()
             assert frames and all("▌ " in frame for frame in frames)
+
+    async def test_the_scrollbar_follows_the_selection(self, tmp_path):
+        app = Host(tmp_path)
+        async with app.run_test(size=(60, 20)) as pilot:
+            await pilot.pause()
+            body = app.screen.query_one("#config-body")
+            for key in ("end", "home", "end"):
+                await pilot.press(key)
+                await pilot.pause()
+                assert body.vertical_scrollbar.position == body.scroll_target_y == body.scroll_y
+
+    async def test_moving_takes_over_from_a_scroll_under_way(self, tmp_path):
+        app = Host(tmp_path)
+        async with app.run_test(size=(60, 20)) as pilot:
+            await pilot.pause()
+            body = app.screen.query_one("#config-body")
+            body.scroll_to(y=14, duration=0.5, immediate=True)  # as the wheel does
+            lst(app).action_jump(0)
+            await pilot.pause()
+            await app.animator.wait_until_complete()
+            await pilot.pause()
+            assert "▌ " in "\n".join(screen_lines(app))
+
+    async def test_the_wheel_can_leave_the_selection_until_it_moves(self, tmp_path):
+        app = Host(tmp_path)
+        async with app.run_test(size=(60, 20)) as pilot:
+            await pilot.pause()
+            body = app.screen.query_one("#config-body")
+            body.scroll_to(y=9, animate=False, immediate=True)
+            await pilot.pause()
+            assert body.scroll_offset.y == 9
+            await pilot.press("down")
+            await pilot.pause()
+            assert f"▌ {lst(app).spec.label}" in "\n".join(screen_lines(app))
 
 
 # -- navigation -------------------------------------------------------------------
