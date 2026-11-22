@@ -206,12 +206,44 @@ def test_short_money(usd, text):
     assert view.short_money(usd) == text
 
 
-def test_grid_rows_top_out_at_a_labelled_line_and_never_share_a_row():
-    assert view.grid_rows(3400, 10) == (4000, {2: "$1k", 4: "$2k", 7: "$3k", 9: "$4k"})
-    assert view.grid_rows(2600, 9) == (3000, {2: "$1k", 5: "$2k", 8: "$3k"})
-    assert view.grid_rows(140, 7) == (150, {2: "$50", 4: "$100", 6: "$150"})
-    assert view.grid_rows(100, 2) == (100, {1: "$100"})  # a short chart gets one line
-    assert view.grid_rows(0, 5) == (0.0, {})
+def test_grid_rows_top_out_at_a_labelled_line_evenly_spaced():
+    # 4 steps in 10 rows: 2 rows each, the 2 left over empty at the top
+    assert view.grid_rows(3400, 10)[1] == {1: "$1k", 3: "$2k", 5: "$3k", 7: "$4k"}
+    assert view.grid_rows(2600, 9)[1] == {2: "$1k", 5: "$2k", 8: "$3k"}
+    assert view.grid_rows(140, 7)[1] == {1: "$50", 3: "$100", 5: "$150"}
+    assert view.grid_rows(100, 2)[1] == {1: "$100"}  # a short chart gets one line
+    assert view.grid_rows(0, 5)[1] == {}
+    assert view.grid_rows(3400, 10)[0].top == 4000
+
+
+@pytest.mark.parametrize("peak", [26.0, 140.0, 1900.0, 2600.0, 3400.0, 3.2e9])
+@pytest.mark.parametrize("height", [4, 5, 7, 9, 10, 11, 13])
+def test_bar_gridlines_are_evenly_spaced_and_a_bar_at_one_tops_out_on_its_row(peak, height):
+    scale, grid = view.grid_rows(peak, height)
+    rows = sorted(grid)
+    assert len({b - a for a, b in zip([-1, *rows], rows)}) == 1  # equal steps, equal gaps
+    assert scale.top >= peak and grid[rows[-1]] == view.short_money(scale.top)
+    values = [scale.lo + (k + 1) * scale.step for k in range(len(rows))]
+    lines = view.bar_chart([{"m": v} for v in values], 80, height, ["m"], {}, P,
+                           axis=("", "", ""))[:height]
+    label_w = len(lines[0].plain) - 4 * len(values)
+    for i, (v, row) in enumerate(zip(values, rows)):
+        column = [line.plain[label_w + 4 * i] for line in reversed(lines)]  # row 0 first
+        assert column[row] == "█" and set(column[row + 1:]) <= {" ", "╌"}, (v, column)
+
+
+@pytest.mark.parametrize("height", [6, 9, 10, 11, 13])
+def test_trend_gridlines_are_evenly_spaced_and_a_value_at_one_draws_on_it(height):
+    now = time.time()
+    fit = Fit(now - 10 * 86400, math.log(20.0), 0.0, True, False, 6, 20 * 86400.0)
+    points = tuple((now - d * 86400, v, True) for d, v in ((20, 1.0), (10, 20.0), (2, 38.0)))
+    rep = trend_report(**{"1": PerPct(20.0, True, fit, points)})
+    plot = [line.plain for line in view.trend_chart(rep, "5h", 78, height, {}, P)[:height]]
+    labelled = {i: row.split()[0] for i, row in enumerate(plot) if row.lstrip().startswith("$")}
+    rows = sorted(labelled)
+    assert len({b - a for a, b in zip(rows, rows[1:])}) == 1, labelled
+    flat = [i for i, row in enumerate(plot) if view._FLAT in row]
+    assert [labelled.get(i) for i in flat] == ["$20"]  # the line at $20 sits on its gridline
 
 
 def test_trend_words():
@@ -391,11 +423,13 @@ def test_the_top_row_is_a_labelled_gridline_at_or_above_the_tallest_bar():
     dashes = [span.style for line in lines for span in line.spans
               if "╌" in line.plain[span.start:span.end]]
     assert dashes and all(style.startswith("dim") for style in dashes)
-    # a peak between round values tops out at the next one, never above the last line
+    # a peak between round values tops out at the next one, never above the last
+    # line; rows the even steps leave over stay empty above it
     days = tuple((d, {"Opus 4.7": 26.0 if i == 3 else 4.0}) for i, (d, _) in enumerate(rep.days))
     tall = with_days(rep, days)
-    top = view.money_chart(tall, "monthly", 98, 8, P)[0].plain
-    assert top.lstrip().startswith("$30")
+    plot = [line.plain for line in view.money_chart(tall, "monthly", 98, 8, P)[:-1]]
+    first = next(i for i, row in enumerate(plot) if row.strip())
+    assert plot[first].lstrip().startswith("$30") and first < 3
 
 
 def test_the_week_and_the_day_show_who_was_on_duty():
@@ -511,8 +545,8 @@ def test_by_account_total_marks_days_before_the_priced_range_unattributed():
 
 def test_one_model_alone_gets_its_own_scale_and_color():
     rep = report(n_models=3)
-    def top(lines):
-        return lines[0].plain.split()[0]
+    def top(lines):  # the highest gridline
+        return next(line.plain.split()[0] for line in lines if line.plain.strip())
     every = view.money_chart(rep, "monthly", 98, 8, P)
     haiku = view.money_chart(rep, "monthly", 98, 8, P, view.ALL, "Haiku 4.5")
     assert top(every) == "$30" and top(haiku) == "$6"  # the gridlines follow the one series

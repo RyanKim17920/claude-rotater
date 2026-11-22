@@ -36,6 +36,7 @@ import statistics
 import time
 from collections import Counter
 from collections.abc import Sequence
+from dataclasses import dataclass
 
 from rich.text import Text
 from textual.binding import Binding
@@ -130,6 +131,39 @@ def nice_top(peak: float, max_lines: int = MAX_GRID_LINES) -> tuple[float, float
     ``peak`` the chart tops out at (2600 -> (1000, 3000))."""
     step = nice_step(peak, max_lines)
     return step, math.ceil(peak / step - 1e-9) * step
+
+
+@dataclass(frozen=True)
+class Scale:
+    """A value axis on whole rows: round gridlines ``step`` apart from ``lo``
+    up to ``top``, each ``per_step`` rows above the last, so equal steps sit
+    equal gaps apart and a value on a gridline lands on its row. Rows the
+    steps leave over stay empty above ``top``."""
+
+    lo: float
+    top: float
+    step: float
+    per_step: int
+
+    @property
+    def per_row(self) -> float:
+        return self.step / self.per_step
+
+    def rows(self, value: float) -> float:
+        """How many rows above ``lo`` ``value`` reaches."""
+        return (value - self.lo) / self.per_row
+
+    def lines(self) -> list[tuple[int, float]]:
+        """``[(rows above lo, value)]`` of each gridline above ``lo``."""
+        n = round((self.top - self.lo) / self.step)
+        return [(k * self.per_step, self.lo + k * self.step) for k in range(1, n + 1)]
+
+
+def even_scale(lo: float, top: float, step: float, rows: int) -> Scale:
+    """The :class:`Scale` from ``lo`` to ``top`` in ``rows`` rows: as many
+    rows per step as fit (at least one)."""
+    steps = max(1, round((top - lo) / step))
+    return Scale(lo, top, step, max(1, rows // steps))
 
 
 def short_tokens(n: float) -> str:
@@ -373,21 +407,16 @@ def _stack(column: dict[str, float], order: Sequence[str]) -> list[tuple[str, fl
     return shown + ([("", rest)] if rest > 0 else [])
 
 
-def grid_rows(peak: float, height: int, fmt=short_money) -> tuple[float, dict[int, str]]:
-    """``(top, {row: label})``: the round value the chart tops out at (at or
-    above ``peak``, labelled on the top row) and the gridlines, row 0 at the
-    bottom, each at the row its value reaches, a shared row keeping the lower."""
+def grid_rows(peak: float, height: int, fmt=short_money) -> tuple[Scale | None, dict[int, str]]:
+    """``(scale, {row: label})``: bars from 0 up to the round value at or
+    above ``peak`` (the highest gridline, labelled), and the gridlines, row 0
+    at the bottom, each on the row a bar of its value tops out in, the same
+    number of rows apart. None and no lines when there is nothing to draw."""
     if peak <= 0 or height <= 0:
-        return 0.0, {}
+        return None, {}
     step, top = nice_top(peak, min(MAX_GRID_LINES, max(1, height // 2)))
-    rows: dict[int, str] = {}
-    k = 1
-    while k * step <= top * (1 + 1e-9):
-        row = min(height - 1, max(0, math.ceil(k * step / top * height - 1e-9) - 1))
-        rows.setdefault(row, fmt(k * step))
-        k += 1
-    rows[height - 1] = fmt(top)  # the top is always labelled
-    return top, rows
+    scale = even_scale(0.0, top, step, height)
+    return scale, {row - 1: fmt(v) for row, v in scale.lines()}
 
 
 def bar_chart(
@@ -407,11 +436,11 @@ def bar_chart(
     was on duty, shown where it changes, each in ``under_colors``) and an
     axis of (left, middle,
     right) labels. A bar is cut in eighths at its top and colored by the
-    model holding each cell; dashed rows mark round dollar values, the top
-    row the round value at or above the tallest bar (``fmt`` labels them:
-    dollars, or :func:`short_tokens`)."""
+    model holding each cell; dashed rows mark round dollar values evenly
+    (:func:`grid_rows`), the highest the round value at or above the tallest
+    bar (``fmt`` labels them: dollars, or :func:`short_tokens`)."""
     totals = [sum(c.values()) for c in columns]
-    top, grid = grid_rows(max(totals, default=0.0), height, fmt)
+    scale, grid = grid_rows(max(totals, default=0.0), height, fmt)
     label_w = max([2, *(len(v) for v in grid.values())]) + 1
     n = max(1, len(columns))
     col = max(1, min(4, (width - label_w) // n))
@@ -423,17 +452,17 @@ def bar_chart(
         line = Text(no_wrap=True)
         line.append(f"{grid.get(r, ''):>{label_w - 1}} ", style=palette.muted)
         for column, total in zip(columns, totals):
-            eighths = round(total / top * height * 8) if top > 0 else 0
+            eighths = round(scale.rows(total) * 8) if scale else 0
             lo = r * 8
             if eighths <= lo:
                 line.append(filler * col, style=grid_style)
                 continue
             fill = min(8, eighths - lo)
             mid = lo + fill / 2
-            scale = eighths / total if total else 0.0
+            per_usd = eighths / total if total else 0.0
             acc, who = 0.0, ""
             for name, usd in _stack(column, order):
-                acc += usd * scale
+                acc += usd * per_usd
                 who = name
                 if acc >= mid:
                     break
@@ -706,12 +735,9 @@ def trend_chart(report: CostReport, label: str, width: int, height: int,
     step = nice_step(max(hi_v - lo_v, hi_v * 0.2), min(MAX_GRID_LINES, max(1, height // 2)))
     y_lo = math.floor(lo_v / step + 1e-9) * step
     y_hi = max(y_lo + step, math.ceil(hi_v / step - 1e-9) * step)
-    labels = {}
-    k = 0
-    while y_lo + k * step <= y_hi + 1e-9:
-        v = y_lo + k * step
-        labels[round((v - y_lo) / (y_hi - y_lo) * (height - 1))] = short_money(round(v, 6))
-        k += 1
+    scale = even_scale(y_lo, y_hi, step, height - 1)
+    labels = {row: short_money(round(v, 6))
+              for row, v in [(0, y_lo), *scale.lines()] if row < height}
     if (wider := max(len(v) for v in labels.values()) + 1) > label_w:
         label_w, plot_w = wider, max(4, width - wider)
         columns = {acc.number: _columns(p.points, col_of) for acc, p in shown}
@@ -720,7 +746,7 @@ def trend_chart(report: CostReport, label: str, width: int, height: int,
              for r in range(height)]
 
     def row_of(v: float) -> int:
-        return max(0, min(height - 1, round((v - y_lo) / (y_hi - y_lo) * (height - 1))))
+        return max(0, min(height - 1, round(scale.rows(v))))
 
     for acc, _ in shown:
         for c, (q1, _, q3, _) in columns[acc.number].items():
