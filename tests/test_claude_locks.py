@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import os
+import subprocess
+import sys
+import threading
 import time
 from pathlib import Path
 from types import SimpleNamespace
@@ -594,3 +597,166 @@ class TestWindowsTouchRace:
             assert self._wait_for(lambda: len(calls) >= 1)
             time.sleep(0.2)
             assert len(calls) == 1
+
+
+_CONTENDER = """
+import faulthandler, random, sys, time
+from pathlib import Path
+from types import SimpleNamespace
+
+src, root, name, cycles = sys.argv[1], Path(sys.argv[2]), sys.argv[3], int(sys.argv[4])
+sys.path.insert(0, src)  # the code under test, not an installed copy
+from claude_rotater import claude_locks
+
+faulthandler.dump_traceback_later(120, exit=True)  # never outlive the test
+waits = 0
+
+def brief_wait(seconds):
+    global waits
+    waits += 1
+    time.sleep(min(seconds, random.random() * 0.002))
+
+# Real filesystem calls, with only the backoff cut short so that acquires land
+# on the other process's releases.
+claude_locks.time = SimpleNamespace(
+    monotonic=time.monotonic, time=time.time, sleep=brief_wait
+)
+with open(root / "counter", "r+b", buffering=0) as counter:
+    (root / f"ready-{name}").touch()
+    while not (root / "go").exists():
+        time.sleep(0.005)
+    for _ in range(cycles):
+        with claude_locks.proper_lockfile(root / "target.lock", timeout=60):
+            counter.seek(0)
+            count = int(counter.read(8))
+            time.sleep(0)  # let the other process in, if the lock would
+            counter.seek(0)
+            counter.write(b"%08d" % (count + 1))
+        time.sleep(random.random() * 0.001)
+print(waits)
+"""
+
+
+class TestTwoProcessContention:
+    def test_every_cycle_is_exclusive_and_none_fails(self, tmp_path):
+        cycles = 500
+        names = ("a", "b")
+        (tmp_path / "counter").write_bytes(b"%08d" % 0)
+        src = Path(claude_locks.__file__).resolve().parents[1]
+        children = [
+            subprocess.Popen(
+                [sys.executable, "-c", _CONTENDER,
+                 str(src), str(tmp_path), name, str(cycles)],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            for name in names
+        ]
+        try:
+            deadline = time.monotonic() + 60
+            while not all((tmp_path / f"ready-{name}").exists() for name in names):
+                assert time.monotonic() < deadline, "a contender never started"
+                assert all(child.poll() is None for child in children)
+                time.sleep(0.01)
+        finally:
+            (tmp_path / "go").touch()
+            results = [child.communicate(timeout=150) for child in children]
+
+        for child, (_, stderr) in zip(children, results, strict=True):
+            assert child.returncode == 0, stderr
+            assert stderr == ""  # no failed or stolen release
+        assert int((tmp_path / "counter").read_bytes()) == cycles * len(names)
+        assert sum(int(stdout) for stdout, _ in results) > 0, "never contended"
+        assert not (tmp_path / "target.lock").exists()
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="real Windows handle semantics")
+class TestWindowsRealHandles:
+    """The same races, made by the kernel instead of injected."""
+
+    DELETE = 0x00010000
+    GENERIC_READ = 0x80000000
+    SHARE_READ_WRITE = 0x1 | 0x2
+    SHARE_DELETE = 0x4
+
+    @pytest.fixture
+    def kernel32(self):
+        import ctypes
+        from ctypes import wintypes
+
+        k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        k32.CreateFileW.restype = wintypes.HANDLE
+        k32.CreateFileW.argtypes = [
+            wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD, wintypes.LPVOID,
+            wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE,
+        ]
+        k32.SetFileInformationByHandle.argtypes = [
+            wintypes.HANDLE, ctypes.c_int, wintypes.LPVOID, wintypes.DWORD,
+        ]
+        k32.CloseHandle.argtypes = [wintypes.HANDLE]
+        return k32
+
+    def _open_dir(self, k32, path: Path, access: int, share: int) -> int:
+        import ctypes
+
+        handle = k32.CreateFileW(
+            str(path), access, share, None,
+            3,  # OPEN_EXISTING
+            0x02000000,  # FILE_FLAG_BACKUP_SEMANTICS, needed for a directory
+            None,
+        )
+        if handle == ctypes.c_void_p(-1).value:
+            raise ctypes.WinError(ctypes.get_last_error())
+        return handle
+
+    @pytest.fixture
+    def delete_pending(self, lock_dir, kernel32):
+        import ctypes
+
+        lock_dir.mkdir()
+        handle = self._open_dir(
+            kernel32, lock_dir, self.DELETE, self.SHARE_READ_WRITE | self.SHARE_DELETE
+        )
+        delete = ctypes.c_ubyte(1)
+        assert kernel32.SetFileInformationByHandle(
+            handle, 4, ctypes.byref(delete), 1  # FileDispositionInfo
+        )
+        with pytest.raises(PermissionError) as refused:
+            os.mkdir(lock_dir)
+        assert refused.value.winerror == 5
+        return handle
+
+    def test_delete_pending_dir_is_waited_out(self, lock_dir, kernel32, delete_pending):
+        closer = threading.Timer(0.4, kernel32.CloseHandle, (delete_pending,))
+        closer.start()
+        try:
+            with proper_lockfile(lock_dir, timeout=5.0):
+                assert lock_dir.is_dir()
+        finally:
+            closer.join()
+        assert not lock_dir.exists()
+
+    def test_endless_refusal_surfaces_as_itself(
+        self, lock_dir, kernel32, delete_pending
+    ):
+        try:
+            with pytest.raises(PermissionError) as caught:
+                with proper_lockfile(lock_dir, timeout=0.5):
+                    pass
+            assert caught.value.winerror == 5
+        finally:
+            kernel32.CloseHandle(delete_pending)
+
+    def test_release_outlasts_a_sharing_violation(self, lock_dir, kernel32):
+        with proper_lockfile(lock_dir):
+            handle = self._open_dir(
+                kernel32, lock_dir, self.GENERIC_READ, self.SHARE_READ_WRITE
+            )
+            with pytest.raises(PermissionError) as refused:
+                os.rmdir(lock_dir)
+            assert refused.value.winerror == 32
+            closer = threading.Timer(0.05, kernel32.CloseHandle, (handle,))
+            closer.start()
+        closer.join()
+        assert not lock_dir.exists()
