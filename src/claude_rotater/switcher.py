@@ -904,24 +904,64 @@ class ClaudeAccountSwitcher:
     def _delete_account_credentials(self, account_num: str, email: str) -> None:
         self._store._delete_account_credentials(account_num, email)
 
-    def _delete_account_files(self, account_num: str, email: str) -> None:
+    def _delete_account_files(
+        self, account_num: str, email: str, *, moving: bool = False
+    ) -> None:
         """Delete all backup files for an account (credentials + config).
 
         Single chokepoint for every path that removes or displaces a slot
         (remove_account, add_account/add_token slot overwrite & migration):
         refuses while a session-mode claude is live against the slot, and
         removes the slot's session profile alongside the backups so a stale
-        profile can never outlive its account.
+        profile can never outlive its account. An API key is revoked before
+        its copy is deleted, unless the account is only ``moving`` slots.
 
         Raises:
             SessionError: a live session-mode instance is using this account.
+            ConfigError: its key could not be revoked; nothing was deleted.
         """
         self._ensure_no_live_session(account_num, email, "the operation")
+        if not moving and self._account_kind(account_num) == "api_key":
+            self._revoke_key_of(account_num, email)
         self._delete_account_credentials(account_num, email)
         config_file = self.configs_dir / f".claude-config-{account_num}-{email}.json"
         if config_file.exists():
             config_file.unlink()
         self._delete_session_profile(account_num, email)
+
+    def _key_in_service(self, account_num: str, key: str) -> bool:
+        """Whether API-key slot ``account_num``, holding ``key`` ("" when that
+        cannot be read), is the one sessions are served. The slot on duty is.
+        So is a key the record names (a switch can stop before it writes the
+        identity), unless the slot on duty holds that same key."""
+        current = self.current_account_number()
+        if current == account_num:
+            return True
+        data_dir = self.backup_dir
+        if not api_key_mode.mode(data_dir).on:
+            return False
+        if key and not api_key_mode.names(data_dir, key):
+            return False
+        if current is None:
+            return True
+        held = self._read_account_credentials(current, self.account_email(current))
+        return not api_key_mode.names(data_dir, held)
+
+    def _revoke_key_of(self, account_num: str, email: str) -> None:
+        """Stop serving ``account_num``'s key; a removed key never is again."""
+        with claude_storage_write_lock():
+            key = self._read_account_credentials(account_num, email)
+            if self._key_in_service(account_num, key):
+                self._revoke_active_key(account_num)
+
+    def _revoke_active_key(self, account_num: str) -> None:
+        try:
+            api_key_mode.revoke(self.backup_dir, get_claude_config_home())
+        except OSError as e:
+            raise ConfigError(
+                f"could not revoke Account-{account_num}'s API key, which may "
+                f"still be handed to sessions: {e}"
+            ) from e
 
     def _read_account_config(self, account_num: str, email: str) -> str:
         """Read account config from backup."""
@@ -3250,7 +3290,7 @@ class ClaudeAccountSwitcher:
             if migrate_from:
                 data = self._get_sequence_data()
                 old_email = data["accounts"][migrate_from].get("email", "")
-                self._delete_account_files(migrate_from, old_email)
+                self._delete_account_files(migrate_from, old_email, moving=True)
                 if int(migrate_from) in data["sequence"]:
                     data["sequence"].remove(int(migrate_from))
                 del data["accounts"][migrate_from]
@@ -3465,7 +3505,7 @@ class ClaudeAccountSwitcher:
         if migrate_from:
             data = self._get_sequence_data()
             old_email = data["accounts"][migrate_from].get("email", "")
-            self._delete_account_files(migrate_from, old_email)
+            self._delete_account_files(migrate_from, old_email, moving=True)
             if int(migrate_from) in data["sequence"]:
                 data["sequence"].remove(int(migrate_from))
             del data["accounts"][migrate_from]
@@ -3510,7 +3550,8 @@ class ClaudeAccountSwitcher:
         """Remove account from managed accounts.
 
         When ``assume_yes`` is True the confirmation prompt is skipped (used by
-        the TUI, which collects confirmation before calling).
+        the TUI, which collects confirmation before calling). An API key being
+        served is revoked first (see :meth:`_delete_account_files`).
         """
         self._refuse_session_shell()
         if not self.sequence_file.exists():
@@ -3580,16 +3621,28 @@ class ClaudeAccountSwitcher:
                 print(dimmed("Cancelled"))
                 return
 
-        # Remove backup files
-        self._delete_account_files(account_num, email)
-        api_keys.forget(self.backup_dir, account_num)
+        # Under the switch's lock, on a fresh roster: a switch made while the
+        # prompt waited is kept, and one under way cannot hand the key out
+        # again after it is revoked.
+        with FileLock(self.lock_file):
+            data = self._get_sequence_data() or {}
+            record = data.get("accounts", {}).get(account_num) or {}
+            if (record.get("email"), record.get("added")) != (
+                email, account_info.get("added")
+            ):
+                raise ConfigError(
+                    f"Account-{account_num} changed meanwhile; nothing was removed"
+                )
+            # Remove backup files
+            self._delete_account_files(account_num, email)
+            api_keys.forget(self.backup_dir, account_num)
 
-        # Update sequence.json
-        del data["accounts"][account_num]
-        data["sequence"] = [n for n in data["sequence"] if n != int(account_num)]
-        data["lastUpdated"] = get_timestamp()
+            # Update sequence.json
+            del data["accounts"][account_num]
+            data["sequence"] = [n for n in data["sequence"] if n != int(account_num)]
+            data["lastUpdated"] = get_timestamp()
 
-        self._write_json(self.sequence_file, data)
+            self._write_json(self.sequence_file, data)
         self._logger.info(f"Removed account {account_num}: {email}")
         print(f"{accent('Removed')} Account-{account_num} ({email})")
 

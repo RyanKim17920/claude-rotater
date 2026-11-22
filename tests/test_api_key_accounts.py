@@ -1237,3 +1237,192 @@ class TestOauthOnlyProfile:
         s = self._switcher(oauth_only=True)
         set_setting(s.backup_dir, "accounts.oauthOnly", "false")
         assert "2" in s.switchable_account_numbers()
+
+
+class TestARemovedKeyIsNeverServed:
+    """Removing, overwriting or replacing a key revokes it on every path, not
+    only the TUI's, which switches off it first."""
+
+    EMAIL = "api-key-2@token.local"
+
+    @pytest.fixture(params=["file", "keychain"])
+    def s(self, request, temp_home: Path, monkeypatch) -> ClaudeAccountSwitcher:
+        from claude_rotater import api_key_mode
+
+        in_keychain = request.param == "keychain"
+        monkeypatch.setattr(api_key_mode, "_use_keychain", lambda: in_keychain)
+        s = _macos_switcher() if in_keychain else _linux_switcher()
+        s.add_account_from_token(SETUP_TOKEN)  # 1: OAuth
+        s.add_account_from_token(API_KEY)  # 2
+        s.add_account_from_token(OTHER_KEY)  # 3
+        s.switch_to("1", json_output=True)
+        return s
+
+    @staticmethod
+    def _served(s: ClaudeAccountSwitcher) -> str | None:
+        """What a helper still routed here prints, whatever settings.json says."""
+        import io
+
+        from claude_rotater import api_key_mode
+        from claude_rotater.paths import get_claude_config_home
+
+        cfg, out = str(get_claude_config_home()), io.StringIO()
+        api_key_mode.main(
+            ["--route", cfg, str(s.backup_dir)],
+            environ={"CLAUDE_CONFIG_DIR": cfg},
+            stdout=out,
+        )
+        return out.getvalue().strip() or None
+
+    @staticmethod
+    def _helper() -> str | None:
+        from claude_rotater.paths import get_claude_config_home
+
+        path = get_claude_config_home() / "settings.json"
+        return json.loads(path.read_text(encoding="utf-8")).get("apiKeyHelper")
+
+    def test_removing_the_key_on_duty_revokes_it(self, s):
+        login = s._read_credentials()
+        s.switch_to("2", json_output=True)
+        assert self._served(s) == API_KEY
+        s.remove_account("2", assume_yes=True)
+        assert self._served(s) is None
+        assert self._helper() is None
+        assert s._read_credentials() == login  # the login beneath is untouched
+
+    def test_a_confirmed_prompt_revokes_it_too(self, s, monkeypatch):
+        s.switch_to("2", json_output=True)
+        monkeypatch.setattr("builtins.input", lambda _prompt: "y")
+        s.remove_account("2")
+        assert self._served(s) is None
+
+    def test_a_declined_prompt_keeps_it(self, s, monkeypatch):
+        s.switch_to("2", json_output=True)
+        monkeypatch.setattr("builtins.input", lambda _prompt: "n")
+        s.remove_account("2")
+        assert self._served(s) == API_KEY
+
+    @pytest.mark.parametrize("other", ["1", "3"])
+    def test_removing_another_account_keeps_the_key_on_duty(self, s, other):
+        s.switch_to("2", json_output=True)
+        s.remove_account(other, assume_yes=True)
+        assert self._served(s) == API_KEY
+        assert self._helper()
+
+    def test_a_key_served_under_another_identity_is_revoked(self, s):
+        # A switch that stopped after storing the key, before the identity.
+        s._write_credentials(API_KEY)
+        assert s.current_account_number() == "1"
+        s.remove_account("2", assume_yes=True)
+        assert self._served(s) is None
+
+    def test_a_key_two_slots_hold_stays_for_the_one_on_duty(self, s):
+        s.add_account_from_token(API_KEY, email="twin@example.com", slot=4)
+        s.switch_to("4", json_output=True)
+        s.remove_account("2", assume_yes=True)
+        assert self._served(s) == API_KEY
+
+    def test_its_stored_copy_being_gone_does_not_spare_it(self, s):
+        s.switch_to("2", json_output=True)
+        s._delete_account_credentials("2", self.EMAIL)
+        s.remove_account("2", assume_yes=True)
+        assert self._served(s) is None
+
+    def test_it_is_revoked_when_the_identity_is_unknown(self, s):
+        s.switch_to("2", json_output=True)
+        s._delete_account_credentials("2", self.EMAIL)
+        get_global_config_path().write_text("{}", encoding="utf-8")
+        s.remove_account("2", assume_yes=True)
+        assert self._served(s) is None
+
+    def test_a_key_switched_in_during_the_prompt_is_revoked(self, s, monkeypatch):
+        def answer(_prompt):
+            s.switch_to("2", json_output=True)
+            return "y"
+
+        monkeypatch.setattr("builtins.input", answer)
+        s.remove_account("2")
+        assert self._served(s) is None
+        assert "2" not in s._get_sequence_data()["accounts"]
+
+    def test_a_switch_during_the_prompt_is_not_undone(self, s, monkeypatch):
+        def answer(_prompt):
+            s.switch_to("3", json_output=True)
+            return "y"
+
+        monkeypatch.setattr("builtins.input", answer)
+        s.remove_account("2")
+        assert s._get_sequence_data()["activeAccountNumber"] == 3
+        assert self._served(s) == OTHER_KEY
+
+    def test_an_account_put_in_the_slot_during_the_prompt_stays(self, s, monkeypatch):
+        def answer(_prompt):
+            s.add_account_from_token(
+                PERSONAL_KEY, email="new@example.com", slot=2, assume_yes=True
+            )
+            return "y"
+
+        monkeypatch.setattr("builtins.input", answer)
+        with pytest.raises(ClaudeSwitchError, match="changed"):
+            s.remove_account("2")
+        assert s._read_account_credentials("2", "new@example.com") == PERSONAL_KEY
+
+    def test_a_switch_in_flight_finishes_before_the_removal(self, s, monkeypatch):
+        import threading
+
+        from claude_rotater import api_key_mode
+
+        storing, go, removed = threading.Event(), threading.Event(), threading.Event()
+        store = api_key_mode.store_key
+
+        def slow(*args, **kwargs):
+            storing.set()
+            assert go.wait(5)
+            store(*args, **kwargs)
+
+        def remove():
+            s.remove_account("2", assume_yes=True)
+            removed.set()
+
+        monkeypatch.setattr(api_key_mode, "store_key", slow)
+        switching = threading.Thread(target=lambda: s.switch_to("2", json_output=True))
+        removing = threading.Thread(target=remove)
+        switching.start()
+        assert storing.wait(5)
+        removing.start()
+        early = removed.wait(0.3)
+        go.set()
+        switching.join(10)
+        removing.join(10)
+        assert not early and removed.is_set()
+        assert self._served(s) is None
+
+    def test_a_key_that_cannot_be_revoked_is_not_removed(self, s, monkeypatch):
+        from claude_rotater import api_key_mode
+
+        s.switch_to("2", json_output=True)
+        real = Path.unlink
+
+        def unlink(path, *args, **kwargs):
+            if path.name == api_key_mode.STATE_FILENAME:
+                raise PermissionError("read-only")
+            return real(path, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "unlink", unlink)
+        with pytest.raises(ClaudeSwitchError, match="could not revoke"):
+            s.remove_account("2", assume_yes=True)
+        assert "2" in s._get_sequence_data()["accounts"]
+        assert s._read_account_credentials("2", self.EMAIL) == API_KEY
+
+    def test_overwriting_its_slot_revokes_it(self, s):
+        s.switch_to("2", json_output=True)
+        s.add_account_from_token(
+            PERSONAL_KEY, email="new@example.com", slot=2, assume_yes=True
+        )
+        assert self._served(s) is None
+
+    def test_moving_it_to_another_slot_keeps_it(self, s):
+        s.switch_to("2", json_output=True)
+        s.add_account_from_token(API_KEY, email=self.EMAIL, slot=5)
+        assert "2" not in s._get_sequence_data()["accounts"]
+        assert self._served(s) == API_KEY

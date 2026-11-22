@@ -186,6 +186,25 @@ def read_key(data_dir: Path) -> str | None:
     return fitting.pop() if len(fitting) == 1 else None
 
 
+def names(data_dir: Path, key: str) -> bool:
+    """Whether ``data_dir``'s record names ``key`` as the active one."""
+    record = mode(data_dir)
+    key = key.strip()
+    if not key or not record.on:
+        return False
+    if record.digest:
+        return record.digest == _fingerprint(key)
+    return key[-4:] == record.tail
+
+
+def revoke(data_dir: Path, config_dir: Path) -> None:
+    """:func:`deactivate`, for a key that must never be served again (its
+    account is going). Raises OSError when the record cannot be removed:
+    the key could still be served, so the caller must not go on."""
+    _clear_mode(data_dir)
+    deactivate(data_dir, config_dir)
+
+
 def forget_key(data_dir: Path) -> None:
     """Revoke ``data_dir``'s active key and drop its copies; best-effort. A
     copy that cannot be deleted is not served once the record is gone."""

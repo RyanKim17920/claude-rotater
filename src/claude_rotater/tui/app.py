@@ -959,8 +959,8 @@ class RotaApp(App):
     def _leave_then_remove(self, number: str, remove) -> dict:
         """Removing the account on duty: switch off it first (while its
         login is still managed, so the switch backs it up the normal way),
-        then remove it. With nowhere to go it is removed all the same and
-        the live login stays as it is."""
+        then remove it. With nowhere to go it is removed all the same: an API
+        key is revoked by the removal, and the live login stays as it is."""
         payload = self._leave(number, "being removed")
         remove()
         payload["done"] = f"removed account {number}"
