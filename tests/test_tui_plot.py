@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ctypes
 import os
 import time
 
@@ -28,11 +29,13 @@ BRAILLE = range(0x2800, 0x2900)
 @pytest.fixture
 def utc(monkeypatch):
     """Pin local time to UTC so axis clocks are deterministic."""
+    # Windows has no time.tzset, but its C runtime has the same call.
+    tzset = getattr(time, "tzset", None) or ctypes.CDLL("ucrtbase")._tzset
     monkeypatch.setenv("TZ", "UTC")
-    time.tzset()
+    tzset()
     yield
     monkeypatch.undo()
-    time.tzset()
+    tzset()
 
 
 def burn_5h(n: int = 13, step: float = 600.0, start: float = 20.0, per_step: float = 3.5):
