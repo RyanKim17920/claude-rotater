@@ -5,10 +5,11 @@ from __future__ import annotations
 import os
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
-from claude_rotater import claude_locks
+from claude_rotater import claude_locks, fsutil
 from claude_rotater.claude_locks import (
     claude_config_lock,
     claude_credentials_lock,
@@ -332,3 +333,189 @@ class TestStorageWriteLock:
         monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(temp_home / "p2"))
         with claude_locks.claude_storage_write_lock(timeout=0.3):
             assert (temp_home / "p2" / ".storage-write.lock").is_dir()
+
+
+def _win_error(winerror: int) -> PermissionError:
+    e = PermissionError(13, "Access is denied")
+    e.winerror = winerror
+    return e
+
+
+def _fault(monkeypatch, call: str, path: Path, *errors, forever=None) -> list:
+    """Make ``os.<call>`` on ``path`` raise ``errors`` in turn (None = run it),
+    then ``forever`` if given, else behave. Returns the calls made."""
+    real = getattr(os, call)
+    pending = list(errors)
+    calls = []
+
+    def faulty(target, *args, **kwargs):
+        if target == path:
+            calls.append(target)
+            error = pending.pop(0) if pending else forever
+            if error is not None:
+                raise error
+        return real(target, *args, **kwargs)
+
+    monkeypatch.setattr(os, call, faulty)
+    return calls
+
+
+@pytest.fixture
+def platform(monkeypatch):
+    """Set the platform the Windows-error check sees, and only that."""
+    def use(name: str) -> None:
+        monkeypatch.setattr(fsutil, "sys", SimpleNamespace(platform=name))
+
+    return use
+
+
+@pytest.fixture
+def clock(monkeypatch):
+    """A clock for the acquire loop that only moves when it sleeps."""
+    fake = SimpleNamespace(now=0.0, sleeps=[])
+
+    def sleep(seconds):
+        fake.sleeps.append(seconds)
+        fake.now += seconds
+        assert len(fake.sleeps) < 1000, "the wait never ended"
+
+    monkeypatch.setattr(
+        claude_locks,
+        "time",
+        SimpleNamespace(monotonic=lambda: fake.now, time=time.time, sleep=sleep),
+    )
+    return fake
+
+
+class TestWindowsAcquireRace:
+    """A holder's rmdir leaves the directory delete-pending until the last
+    handle on it closes; mkdir and stat get WinError 5 until then."""
+
+    @pytest.fixture(autouse=True)
+    def _windows(self, platform):
+        platform("win32")
+
+    @pytest.mark.parametrize("winerror", [5, 32, 33])
+    def test_mkdir_refusal_is_waited_out(self, lock_dir, monkeypatch, clock, winerror):
+        error = _win_error(winerror)
+        calls = _fault(monkeypatch, "mkdir", lock_dir, error, error, error)
+        with proper_lockfile(lock_dir, timeout=3.0):
+            assert lock_dir.is_dir()
+        assert len(calls) == 4
+        assert len(clock.sleeps) == 3
+        assert all(0.25 <= s <= 0.5 for s in clock.sleeps)
+        assert not lock_dir.exists()
+
+    @pytest.mark.parametrize("winerror", [5, 32, 33])
+    def test_stat_refusal_is_waited_out(self, lock_dir, monkeypatch, clock, winerror):
+        _fault(monkeypatch, "mkdir", lock_dir, FileExistsError())
+        _fault(monkeypatch, "stat", lock_dir, _win_error(winerror))
+        with proper_lockfile(lock_dir, timeout=3.0):
+            pass
+        assert len(clock.sleeps) == 1
+        assert 0.25 <= clock.sleeps[0] <= 0.5
+
+    def test_persistent_mkdir_refusal_surfaces_itself(
+        self, lock_dir, monkeypatch, clock
+    ):
+        first = _win_error(5)
+        calls = _fault(monkeypatch, "mkdir", lock_dir, first, forever=_win_error(32))
+        with pytest.raises(PermissionError) as caught:
+            with proper_lockfile(lock_dir, timeout=3.0):
+                pass
+        assert caught.value is first
+        assert 3.0 < clock.now <= 3.5
+        assert len(calls) <= 14, "spun instead of backing off"
+
+    def test_persistent_stat_refusal_surfaces_itself(
+        self, lock_dir, monkeypatch, clock
+    ):
+        lock_dir.mkdir()
+        error = _win_error(5)
+        calls = _fault(monkeypatch, "stat", lock_dir, forever=error)
+        with pytest.raises(PermissionError) as caught:
+            with proper_lockfile(lock_dir, timeout=3.0):
+                pass
+        assert caught.value is error
+        assert 3.0 < clock.now <= 3.5
+        assert len(calls) <= 14, "spun instead of backing off"
+
+    def test_refusal_after_a_seen_holder_is_a_timeout(
+        self, lock_dir, monkeypatch, clock
+    ):
+        lock_dir.mkdir()
+        _fault(monkeypatch, "mkdir", lock_dir, None, forever=_win_error(5))
+        with pytest.raises(ClaudeCodeLockTimeout):
+            with proper_lockfile(lock_dir, timeout=3.0):
+                pass
+
+    def test_refusal_before_a_seen_holder_is_a_timeout(
+        self, lock_dir, monkeypatch, clock
+    ):
+        lock_dir.mkdir()
+        _fault(monkeypatch, "mkdir", lock_dir, _win_error(5))
+        with pytest.raises(ClaudeCodeLockTimeout):
+            with proper_lockfile(lock_dir, timeout=3.0):
+                pass
+
+    def test_refusal_after_a_holder_left_is_a_timeout(
+        self, lock_dir, monkeypatch, clock
+    ):
+        _fault(monkeypatch, "mkdir", lock_dir, FileExistsError(), forever=_win_error(5))
+        with pytest.raises(ClaudeCodeLockTimeout):
+            with proper_lockfile(lock_dir, timeout=3.0):
+                pass
+
+    def test_refusal_while_retaking_a_stale_lock(self, lock_dir, monkeypatch, clock):
+        lock_dir.mkdir()
+        past = time.time() - 30
+        os.utime(lock_dir, (past, past))
+        _fault(monkeypatch, "mkdir", lock_dir, None, _win_error(5))
+        with proper_lockfile(lock_dir, timeout=3.0):
+            assert lock_dir.is_dir()
+        assert len(clock.sleeps) == 1
+
+    @pytest.mark.parametrize("call", ["mkdir", "stat"])
+    def test_other_errors_are_not_waited_on(self, lock_dir, monkeypatch, clock, call):
+        if call == "stat":
+            lock_dir.mkdir()
+        error = _win_error(1314)  # ERROR_PRIVILEGE_NOT_HELD
+        _fault(monkeypatch, call, lock_dir, forever=error)
+        with pytest.raises(PermissionError) as caught:
+            with proper_lockfile(lock_dir, timeout=3.0):
+                pass
+        assert caught.value is error
+        assert clock.sleeps == []
+
+    @pytest.mark.parametrize("call", ["mkdir", "stat"])
+    def test_posix_refusal_surfaces_at_once(
+        self, lock_dir, monkeypatch, clock, platform, call
+    ):
+        platform("linux")
+        if call == "stat":
+            lock_dir.mkdir()
+        error = _win_error(5)
+        calls = _fault(monkeypatch, call, lock_dir, forever=error)
+        with pytest.raises(PermissionError) as caught:
+            with proper_lockfile(lock_dir, timeout=3.0):
+                pass
+        assert caught.value is error
+        assert len(calls) == 1
+        assert clock.sleeps == []
+
+    def test_storage_write_lock_waits_it_out(self, temp_home, monkeypatch, clock):
+        lock = claude_locks.storage_write_lock_dir()
+        _fault(monkeypatch, "mkdir", lock, _win_error(5))
+        with claude_locks.claude_storage_write_lock(timeout=3.0):
+            assert lock.is_dir()
+
+    def test_refused_legacy_lock_releases_the_primary(
+        self, temp_home, monkeypatch, clock
+    ):
+        monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
+        primary = claude_locks.oauth_refresh_lock_dir()
+        _fault(monkeypatch, "mkdir", credentials_lock_dir(), forever=_win_error(5))
+        with pytest.raises(PermissionError):
+            with claude_credentials_lock(timeout=1.0):
+                pass
+        assert not primary.exists()

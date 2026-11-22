@@ -71,6 +71,7 @@ from contextlib import contextmanager
 from pathlib import Path
 
 from claude_rotater.exceptions import ClaudeCodeLockTimeout
+from claude_rotater.fsutil import is_transient_win_error
 from claude_rotater.paths import get_claude_config_home, get_global_config_path
 
 # Claude Code's credential-refresh locks run ``stale: 60000, update: 5000``
@@ -144,36 +145,60 @@ def proper_lockfile(
     older than ``staleness``, touches the directory mtime while held so other
     holders don't deem us stale, and removes it on exit.
 
+    On Windows a directory being removed is delete-pending until its last
+    handle closes, and mkdir or stat on it is refused (WinError 5) rather than
+    answered. That is waited out like a held lock.
+
     Raises:
         ClaudeCodeLockTimeout: The lock stayed held past ``timeout``.
+        OSError: The directory cannot be created or read. A Windows refusal
+            raises only after ``timeout``, and only if no holder was ever seen.
     """
     if timeout is None:
         timeout = DEFAULT_TIMEOUT_S
     lock_dir.parent.mkdir(parents=True, exist_ok=True)
     start = time.monotonic()
+    saw_holder = False
+    refusal: OSError | None = None
     while True:
         try:
             os.mkdir(lock_dir)
             break
         except FileExistsError:
-            pass
+            exists = True
+        except OSError as e:
+            if not is_transient_win_error(e):
+                raise
+            exists = False
+            refusal = refusal or e
         if time.monotonic() - start > timeout:
+            if refusal is not None and not saw_holder:
+                raise refusal  # never contention, e.g. an ACL: say so
             raise ClaudeCodeLockTimeout(
                 f"Could not acquire {lock_dir.name} — Claude Code appears "
                 "to be refreshing credentials. Retry in a few seconds."
             )
-        try:
-            held_mtime = os.stat(lock_dir).st_mtime
-        except FileNotFoundError:
-            continue  # holder released between mkdir and stat; retry now
-        if time.time() - held_mtime > staleness:
-            # Dead holder per the protocol: remove and retake. Losing the
-            # rmdir/mkdir race to another waiter just means looping again.
+        if exists:
             try:
-                os.rmdir(lock_dir)
-            except OSError:
-                time.sleep(0.05)  # can't remove it either; don't spin hot
-            continue
+                held_mtime = os.stat(lock_dir).st_mtime
+            except FileNotFoundError:
+                saw_holder = True
+                continue  # holder released between mkdir and stat; retry now
+            except OSError as e:
+                if not is_transient_win_error(e):
+                    raise
+                refusal = refusal or e
+            else:
+                saw_holder = True
+                if time.time() - held_mtime > staleness:
+                    # Dead holder per the protocol: remove and retake. Losing
+                    # the rmdir/mkdir race to another waiter just means looping
+                    # again.
+                    try:
+                        os.rmdir(lock_dir)
+                    except OSError:
+                        time.sleep(0.05)  # can't remove it either; don't spin hot
+                    continue
         time.sleep(0.25 + random.random() * 0.25)
 
     stop_touching = threading.Event()
