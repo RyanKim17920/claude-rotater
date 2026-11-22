@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import json
 import os
-import pwd
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -23,6 +22,8 @@ from claude_rotater import costs
 
 @pytest.fixture
 def runner(monkeypatch):
+    import pwd  # POSIX only: Windows must still collect, to report the skip
+
     real_home = Path(pwd.getpwuid(os.getuid()).pw_dir)
     # The parent conftest swaps HOME; point the package caches back at the
     # owner's so bunx/npx do not fetch ccusage again for every test.

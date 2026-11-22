@@ -9,7 +9,6 @@ login keychain, config dirs and rota data.
 from __future__ import annotations
 
 import os
-import pwd
 import subprocess
 import sys
 
@@ -23,8 +22,8 @@ ENABLED = os.environ.get("ROTA_E2E") == "1"
 def pytest_collection_modifyitems(config, items):
     if ENABLED and sys.platform == "darwin":
         return
-    reason = ("end-to-end: set ROTA_E2E=1 to run" if not ENABLED
-              else "end-to-end tests need macOS")
+    reason = ("end-to-end tests need macOS (POSIX and the Keychain)"
+              if sys.platform != "darwin" else "end-to-end: set ROTA_E2E=1 to run")
     here = os.path.dirname(__file__)
     for item in items:
         if str(item.fspath).startswith(here):
@@ -34,6 +33,8 @@ def pytest_collection_modifyitems(config, items):
 def _owner_keychain_state() -> tuple[str, str]:
     """The owner's own keychain search list and default, read with the
     owner's real HOME (the parent conftest swaps HOME for every test)."""
+    import pwd  # POSIX only: Windows must still collect, to report the skip
+
     env = {"HOME": pwd.getpwuid(os.getuid()).pw_dir, "PATH": "/usr/bin:/bin"}
 
     def run(*a: str) -> str:
