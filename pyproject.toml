@@ -40,7 +40,12 @@ build-backend = "hatchling.build"
 packages = ["src/claude_rotater"]
 
 [dependency-groups]
-dev = ["pytest>=8.0", "pytest-asyncio>=0.24", "pytest-xdist>=3.5"]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.24",
+    "pytest-xdist>=3.5",
+    "ruff>=0.15,<0.16",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
