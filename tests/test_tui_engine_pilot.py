@@ -134,6 +134,18 @@ async def test_pace_switch_moves_cursor_charts_and_forecasts(world, monkeypatch)
         original(event)
 
     app._on_engine_event = on_event
+    # Count the feed records the engine has read, so each step waits for
+    # the engine to see it rather than for a fixed span of wall time.
+    from claude_rotater.feed_ingest import FeedIngestor
+
+    ingested = [0]
+    original_apply = FeedIngestor._apply
+
+    def counting_apply(self, records, result):
+        ingested[0] += len(records)
+        return original_apply(self, records, result)
+
+    monkeypatch.setattr(FeedIngestor, "_apply", counting_apply)
     async with app.run_test(size=(140, 45)) as pilot:
         await until(pilot, lambda: app.snapshot is not None and "~" in page(app)["rows"]["1"])
         before = page(app)
@@ -145,10 +157,13 @@ async def test_pace_switch_moves_cursor_charts_and_forecasts(world, monkeypatch)
         # (#1 past about 63%). Only the feed says so (the endpoint still
         # answers 43%), so the switch proves the ingestion.
         five, seven = 70.0, 43.0
+        appended = 0
         while not any(isinstance(e, SwitchEvent) for e in seen):
             assert seven < 85.0, [e.human() for e in seen]
             five, seven = five + 1.0, seven + 2.0
             feed.append_record(path, feed_record(home, five, seven, r5_a, r7, time.time()))
+            appended += 1
+            await until(pilot, lambda: ingested[0] >= appended)
             await pilot.pause(0.4)
         switch = next(e for e in seen if isinstance(e, SwitchEvent))
         assert switch.trigger == "pace" and switch.to_ref["number"] == 2

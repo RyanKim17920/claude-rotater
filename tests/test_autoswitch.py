@@ -2746,12 +2746,27 @@ class TestFeedInTheLoop:
         )
 
     def test_a_feed_write_wakes_a_sleeping_loop(self, harness, tmp_path, monkeypatch):
+        from claude_rotater import feed_watch
+
+        watchers: list = []
+
+        class RecordingWatcher(feed_watch.FeedWatcher):
+            def start(self):
+                watchers.append(self)
+                return super().start()
+
+        monkeypatch.setattr(feed_watch, "FeedWatcher", RecordingWatcher)
         engine, feed_obj = self._engine(harness, tmp_path)
         worker, ticks, ticked = self._run(engine, monkeypatch, min_tick=0.0)
         try:
             assert ticked.wait(5)
             ticked.clear()
-            time.sleep(0.2)  # let the watcher arm
+            # Wait for the watch to arm, not a fixed sleep: under load a
+            # write before arming is missed and the loop sleeps its 30 s.
+            deadline = time.monotonic() + 5
+            while not watchers and time.monotonic() < deadline:
+                time.sleep(0.01)
+            assert watchers and watchers[0].ready.wait(5)
             self._write(feed_obj)
             assert ticked.wait(5), "feed write did not wake the 30 s sleep"
             assert feed_obj.ingests >= 2
@@ -4146,8 +4161,10 @@ class TestEveryAccountAboveThreshold:
         then trade places forever.
         """
         h = EngineHarness(temp_home, strategy="consume-first")
-        h.seed(1, "a@example.com"); h.seed(2, "b@example.com")
-        h.seed(3, "c@example.com"); h.make_live("a@example.com", 1)
+        h.seed(1, "a@example.com")
+        h.seed(2, "b@example.com")
+        h.seed(3, "c@example.com")
+        h.make_live("a@example.com", 1)
         a = self._at(h, 600)
         b = self._at(h, 660)  # 60s apart — inside RECOVERY_HYSTERESIS_S
         outcome = h.tick_with_usage({
@@ -4256,6 +4273,7 @@ class TestRecoveryHorizon:
             "2": _usage(94, self._at(harness, 80 * 3600)),
             "3": _usage(98, self._at(harness, 50 * 3600)),   # 2 left, soonest
         })
+        assert outcome is not TickOutcome.SWITCHED
         assert harness.active_number() == 1, (
             "traded 9 points of headroom for 2 on a reset nobody reaches today"
         )

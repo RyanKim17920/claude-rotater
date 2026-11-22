@@ -66,7 +66,12 @@ class TestProperLockfile:
         with proper_lockfile(lock_dir):
             past = time.time() - 30
             os.utime(lock_dir, (past, past))
-            time.sleep(0.4)
+            # Poll rather than sleep a fixed span: a loaded machine can hold
+            # the toucher thread off for longer than a few intervals.
+            deadline = time.monotonic() + 10
+            while (time.time() - lock_dir.stat().st_mtime >= 10.0
+                   and time.monotonic() < deadline):
+                time.sleep(0.05)
             assert time.time() - lock_dir.stat().st_mtime < 10.0
 
     def test_creates_missing_parent(self, tmp_path):
