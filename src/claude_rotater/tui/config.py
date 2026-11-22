@@ -554,6 +554,7 @@ class ConfigView(Vertical):
     }
     ConfigView #config-body {
         height: 1fr;
+        min-height: 1;
         scrollbar-size-vertical: 1;
     }
     ConfigView #config-detail {

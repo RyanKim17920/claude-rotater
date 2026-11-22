@@ -264,7 +264,7 @@ class TestLayout:
             line = lst(app).line_of(lst(app).cursor)
             assert body.scroll_offset.y <= line < body.scroll_offset.y + body.size.height
 
-    @pytest.mark.parametrize("size", [(60, 10), (60, 20), (80, 24), (120, 18)])
+    @pytest.mark.parametrize("size", [(60, 8), (60, 10), (60, 20), (80, 24), (120, 18)])
     async def test_every_frame_shows_the_selected_row(self, tmp_path, monkeypatch, size):
         # The footer is as tall as the selected row's help, so moving can
         # shrink the list under the cursor.
