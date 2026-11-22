@@ -234,6 +234,31 @@ class TestLayout:
             assert "…" not in plain(app)
             assert lst(app).spec.help not in plain(app)
 
+    @pytest.mark.parametrize("size", [(60, 10), (60, 20), (80, 24)])
+    async def test_every_settings_help_is_on_screen_whole(self, tmp_path, size):
+        app = Host(tmp_path)
+        async with app.run_test(size=size) as pilot:
+            await pilot.pause()
+            for spec in ordered_specs():
+                # Wrapping moves only blanks.
+                want = "".join(spec_detail(spec).split())
+                lines = screen_lines(app)
+                assert want in "".join("".join(lines).split()), spec.label
+                assert f"▌ {spec.label}" in "\n".join(lines), spec.label
+                await pilot.press("down")
+                await pilot.pause()
+
+    async def test_a_footer_taller_than_the_screen_leaves_the_row(self, tmp_path):
+        app = Host(tmp_path)
+        async with app.run_test(size=(60, 12)) as pilot:
+            await pilot.pause()
+            await pilot.press("end")
+            lst(app)._fail("cannot write settings.json: " + "no space left " * 80)
+            await pilot.pause()
+            lines = screen_lines(app)
+            assert f"▌ {lst(app).spec.label}" in "\n".join(lines)
+            assert lines[-1].rstrip().endswith("esc back")
+
     @pytest.mark.parametrize("size", [(140, 40), (160, 50)])
     async def test_rows_carry_no_help_the_footer_has_it_whole(self, tmp_path, size):
         app = Host(tmp_path)

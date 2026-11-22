@@ -559,7 +559,6 @@ class ConfigView(Vertical):
     }
     ConfigView #config-detail {
         height: auto;
-        max-height: 4;
         padding: 0 1;
         margin-bottom: 1;
         color: $text-muted;

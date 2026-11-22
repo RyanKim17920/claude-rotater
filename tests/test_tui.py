@@ -2627,6 +2627,23 @@ class TestMainPage:
             await pilot.pause()
             assert selection_shown()
 
+    async def test_settings_show_every_help_whole_at_60x20(self, tmp_path):
+        from claude_rotater.tui.config import spec_detail
+
+        app = make_app(three_accounts(tmp_path))
+        async with app.run_test(size=(60, 20)) as pilot:
+            await settle(pilot)
+            await pilot.press("c")
+            await pilot.pause()
+            for spec in app.screen.config.settings_list.specs:
+                strips = app.screen._compositor.render_strips()
+                lines = ["".join(seg.text for seg in strip) for strip in strips]
+                want = "".join(spec_detail(spec).split())
+                assert want in "".join("".join(lines).split()), spec.label
+                assert any("▌ " in line for line in lines), spec.label
+                await pilot.press("down")
+                await pilot.pause()
+
     async def test_c_shows_config_in_place_and_back(self, tmp_path):
         from claude_rotater.tui.main import MainScreen
 
