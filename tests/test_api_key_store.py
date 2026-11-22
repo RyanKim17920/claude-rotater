@@ -594,3 +594,17 @@ class TestThroughTheSwitcher:
         self._lose_key(switcher, dirs)
         switcher.switch_to("1", json_output=True)
         assert _served(dirs[0]) == A
+
+    def test_a_key_slot_never_polls_the_login_under_it(self, switcher, dirs, monkeypatch):
+        self._lose_key(switcher, dirs)
+        from claude_rotater.switcher import FetchRecord
+
+        polled = []
+
+        def fetch(*args, **kwargs):
+            polled.append(args)
+            return FetchRecord(error="not expected")
+
+        monkeypatch.setattr(switcher, "_fetch_active_usage", fetch)
+        switcher.accounts_snapshot()
+        assert polled == []

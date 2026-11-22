@@ -4424,6 +4424,11 @@ class ClaudeAccountSwitcher:
         if looks_like_api_key(creds):
             # Managed API-key account: no subscription quota to fetch.
             return USAGE_API_KEY
+        if is_active and creds and self._account_kind(str(num)) == "api_key":
+            # The key is not being served, so this is the login under it:
+            # not this slot's to poll, refresh (which would revoke the key
+            # mode) or save.
+            return USAGE_NO_CREDENTIALS
         if is_active and creds and oauth.is_wiped(creds):
             # Claude Code emptied the live tokens: the server refused its
             # refresh. That is a dead login, not a missing one — saying "no
