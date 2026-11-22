@@ -17,10 +17,11 @@ uv tool install git+https://github.com/RyanKim17920/rota
 rota --version
 ```
 
-Upgrade with `uv tool upgrade rota`.
+Upgrade with `uv tool upgrade rota-cli`.
 
-Renamed from claude-rotater, which `upgrade` can't follow: quit rota, run
-`uv tool uninstall claude-rotater`, then install again (git as above, or `--editable <checkout>`).
+The package was called claude-rotater, then rota; `upgrade` can't follow a rename. If
+`uv tool list` shows either name, quit rota, run `uv tool uninstall claude-rotater` (or
+`uv tool uninstall rota`), then install again (git as above, or `--editable <checkout>`).
 
 Works on macOS, Linux and Windows. On macOS, stored logins live in the
 Keychain. On other systems they are files readable only by you (mode 0600).
@@ -261,7 +262,7 @@ can't break your statusline.
 
 1. In the TUI, press `s` to remove the statusline feed (restores your
    original statusline command).
-2. `uv tool uninstall rota`
+2. `uv tool uninstall rota-cli`
 3. Delete `~/.rota` (and any `ROTA_HOME` directories).
 4. On macOS, delete the Keychain items whose service is `rota` or
    `rota-<8 hex digits>` (Keychain Access, or
