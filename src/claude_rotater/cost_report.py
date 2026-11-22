@@ -130,6 +130,8 @@ class ProfileSpend:
     spans: tuple[Span, ...]
     built_at: float
     lo: float
+    # account key -> slots holding tokens ccusage had no rate for
+    unpriced: dict[str, list[int]] = field(default_factory=dict)
 
     def key(self, identity: Identity) -> str:
         """The account's number here, else the key its spend from before
@@ -140,8 +142,14 @@ class ProfileSpend:
         return identity in self.numbers or attribution.removed_key(identity) in self.spend
 
     def covers(self, key: str, a: float, b: float) -> bool:
-        """Whether every stretch ``key`` was on duty in ``[a, b)`` is priced
-        and no spend in it went to nobody (it may have been this account's)."""
+        """Whether every stretch ``key`` was on duty in ``[a, b)`` is priced,
+        with a rate for all it held, and no spend in it went to nobody (it
+        may have been this account's)."""
+        for who in (key, UNATTRIBUTED):
+            slots = self.unpriced.get(who, ())
+            i = bisect.bisect_right(slots, a - costs.SLOT_S)
+            if i < len(slots) and slots[i] < b:
+                return False
         for start, end, who in self.spans:
             if who != key or end <= a or start >= b:
                 continue
@@ -171,8 +179,9 @@ def profile_spend(
 ) -> ProfileSpend:
     lo = costs.range_start(now)
     rows = [r for r in cache.rows if lo <= r.slot <= now]
-    return ProfileSpend(numbers, attribute(rows, sources, spans), tuple(spans),
-                        cache.built_at, lo)
+    no_rate = attribute([r for r in rows if r.unpriced], sources, spans)
+    return ProfileSpend(numbers, attribute(rows, sources, spans), tuple(spans), cache.built_at,
+                        lo, {who: [slot for slot, _ in per] for who, per in no_rate.items()})
 
 
 def profile_spans(backup_dir: Path, sources: Sequence[costs.Source], lo: float,

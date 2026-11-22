@@ -570,6 +570,18 @@ class TestUnpriced:
         assert second.ran and second.report.month == pytest.approx(2.0)
         assert second.report.unpriced == ()
 
+    def test_a_window_with_unpriced_spend_gives_no_dollars_per_pct(self, now):
+        base = int(now // costs.SLOT_S) * costs.SLOT_S - 8 * 3600
+        rows = [costs.Row("s0", base + 900, "claude-opus-4-7", 1.0, 5, 5, 5, 5),
+                costs.Row("s0", base + 4 * 3600, NEW_MODEL, 0.0, 5, 5, 5, 5),
+                costs.Row("s0", base + 6 * 3600, NEW_MODEL, 0.0, 5, 5, 5, 5)]  # nobody's
+        spans = [(base, base + 2 * 3600, "1"), (base + 3 * 3600, base + 5 * 3600, "2")]
+        spend = cr.profile_spend(make_cache(rows, now), [costs.Source("s0", "/a")], spans, {}, now)
+        assert spend.covers("1", base, base + 2 * 3600)
+        assert not spend.covers("2", base + 3 * 3600, base + 5 * 3600)
+        assert spend.covers("1", base + 3 * 3600, base + 5 * 3600)  # all of it #2's
+        assert not spend.covers("1", base, base + 7 * 3600)  # may have been #1's
+
 
 # -- attribution ---------------------------------------------------------------------------
 
