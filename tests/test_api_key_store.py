@@ -354,6 +354,18 @@ class TestLeavingKeyMode:
         kc.failing = frozenset()
         assert _served(cfg) == B
 
+    def test_the_helper_cannot_be_removed(self, kc, dirs, monkeypatch):
+        cfg, data = dirs
+        akm.activate(A, data, cfg, keychain=True)
+        kc.failing = frozenset({"delete"})
+
+        def refuse(*args):
+            raise statusline_setup.StatuslineSetupError("read-only")
+
+        monkeypatch.setattr(statusline_setup, "write_settings", refuse)
+        akm.deactivate(data, cfg)
+        assert _served(cfg) is None
+
 
 class TestFileOnlyPlatforms:
     def test_never_touches_the_keychain(self, block_real_keychain, dirs, monkeypatch):

@@ -384,8 +384,10 @@ def activate(
 
 def deactivate(data_dir: Path, config_dir: Path) -> None:
     """Take ``config_dir`` off its key; the helper goes once no profile
-    uses it. A helper that is not rota's is never touched. Best-effort:
-    an unreadable settings.json is left as it is."""
+    uses it. A helper that is not rota's is never touched. Best-effort: a
+    settings.json that cannot be read or written is left as it is, and
+    the key is revoked all the same, so a helper left there prints none
+    rather than bill the account that was switched away from."""
     ss = _settings()
     path = settings_file(config_dir)
     try:
@@ -403,7 +405,7 @@ def deactivate(data_dir: Path, config_dir: Path) -> None:
             try:
                 ss.write_settings(path, settings, raw, Path(data_dir))
             except ss.StatuslineSetupError:
-                return
+                pass
     forget_key(data_dir)
 
 
