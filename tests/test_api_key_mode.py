@@ -198,6 +198,9 @@ class TestKeyCommand:
         assert done.value.code == 0
         assert capsys.readouterr().out == KEY + "\n"
 
+    @pytest.mark.skipif(
+        os.name == "nt", reason="Windows has no POSIX file modes; NTFS uses ACLs"
+    )
     def test_file_permissions(self, homes):
         pc, pd, _, _ = homes
         akm.activate(KEY, pd, pc, keychain=False)

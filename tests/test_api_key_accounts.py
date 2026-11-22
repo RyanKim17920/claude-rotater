@@ -241,7 +241,8 @@ class TestWriteCredentialsHelper:
         assert helper.endswith("# rota-key") and " key --route " in helper
         assert key not in json.dumps(_settings())  # the key never lands in settings
         assert (s.backup_dir / "active-key").read_text(encoding="utf-8") == key
-        assert oct((s.backup_dir / "active-key").stat().st_mode & 0o777) == "0o600"
+        if sys.platform != "win32":  # no POSIX modes there: NTFS uses ACLs
+            assert oct((s.backup_dir / "active-key").stat().st_mode & 0o777) == "0o600"
         assert cred_file.read_text(encoding="utf-8") == OAUTH_JSON  # login kept
         assert s._read_credentials() == key  # the key is what sessions use
 
