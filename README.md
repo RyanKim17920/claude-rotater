@@ -13,11 +13,14 @@ You need [uv](https://docs.astral.sh/uv/) and
 command). uv fetches Python 3.12 or newer if you don't have it.
 
 ```bash
-uv tool install git+https://github.com/RyanKim17920/claude-rotater
+uv tool install git+https://github.com/RyanKim17920/rota
 rota --version
 ```
 
-Upgrade with `uv tool upgrade claude-rotater`.
+Upgrade with `uv tool upgrade rota`.
+
+Renamed from claude-rotater, which `upgrade` can't follow: quit rota, run
+`uv tool uninstall claude-rotater`, then install again (git as above, or `--editable <checkout>`).
 
 Works on macOS, Linux and Windows. On macOS, stored logins live in the
 Keychain. On other systems they are files readable only by you (mode 0600).
@@ -258,7 +261,7 @@ can't break your statusline.
 
 1. In the TUI, press `s` to remove the statusline feed (restores your
    original statusline command).
-2. `uv tool uninstall claude-rotater`
+2. `uv tool uninstall rota`
 3. Delete `~/.rota` (and any `ROTA_HOME` directories).
 4. On macOS, delete the Keychain items whose service is `rota` or
    `rota-<8 hex digits>` (Keychain Access, or
