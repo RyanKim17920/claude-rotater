@@ -168,12 +168,15 @@ def sample(days_ago: float, ratio: float, pct: float = 4.0, elsewhere: float = 0
 
 
 class TestSummarize:
-    def test_recent_sure_climb_gives_the_figure(self):
-        got = dpp.summarize([sample(1, 2.0, 20), sample(2, 2.0, 6), sample(3, 4.0, 4)], "5h", NOW)
+    def test_one_day_of_recent_sure_climb_gives_the_pooled_figure(self):
+        # one day: no line yet, so the figure pools the day's climbs
+        got = dpp.summarize([sample(1, 2.0, 20), sample(1.1, 2.0, 6), sample(1.2, 4.0, 4)],
+                            "5h", NOW)
+        assert got.fit is None
         assert got.sure and got.dollars == pytest.approx((40 + 12 + 16) / 30)
 
     def test_too_little_sure_climb_falls_back_to_unsure_samples(self):
-        got = dpp.summarize([sample(1, 2.0, 10), sample(2, 1.0, 10, elsewhere=0.3)], "5h", NOW)
+        got = dpp.summarize([sample(1, 2.0, 10), sample(1.1, 1.0, 10, elsewhere=0.3)], "5h", NOW)
         assert not got.sure and got.dollars == pytest.approx(1.5)
         assert dpp.summarize([sample(1, 9.0, 10)], "7d", NOW).sure  # 10 points of 7d will do
 
@@ -187,6 +190,25 @@ class TestSummarize:
         got = dpp.summarize(found, "5h", NOW)
         assert got.points == ((NOW - 3 * DAY, pytest.approx(2.0), True),
                               (NOW - 2 * DAY, pytest.approx(1.0), False))
+
+    def test_the_figure_is_the_line_at_now_so_the_row_and_the_chart_agree(self):
+        # three weeks of noise around $10 and one big climb at $30 lately: the
+        # pooled recent climb reads far above the steady line
+        found = [sample(d + h / 24, 10.0 * (1.2 if d % 2 else 0.8)) for d in range(21, 0, -1)
+                 for h in range(2)] + [sample(1.2, 30.0, pct=40)]
+        got = dpp.summarize(found, "7d", NOW)
+        assert got.fit.steady and got.sure
+        assert got.dollars == pytest.approx(got.fit.at(NOW))
+        moving = [sample(d, 5.0 * 0.97 ** (21 - d)) for d in range(21, 0, -1)]
+        got = dpp.summarize(moving, "7d", NOW)
+        assert not got.fit.steady and got.dollars == pytest.approx(got.fit.at(NOW))
+
+    def test_a_figure_read_off_a_line_of_unsure_samples_is_unsure(self):
+        # enough sure climb lately, but on one day: the line rests on unsure ones
+        found = [sample(1, 2.0, 12)] + [sample(d, 3.0, elsewhere=0.3) for d in (9, 5, 3)]
+        got = dpp.summarize(found, "7d", NOW)
+        assert got.fit is not None and not got.fit.sure
+        assert not got.sure and got.dollars == pytest.approx(got.fit.at(NOW))
 
     def test_a_climb_made_elsewhere_beside_a_trickle_of_local_spend_is_left_out(self):
         # An idle local session spends a little through every rise, so each

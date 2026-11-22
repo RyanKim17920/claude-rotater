@@ -247,6 +247,7 @@ class Fit:
     provisional: bool
     n: int  # days with samples
     span_s: float
+    sure: bool = True  # read from sure samples only
 
     @property
     def change(self) -> float:
@@ -324,6 +325,7 @@ def fit(found: Iterable[Sample], now: float) -> Fit | None:
         provisional=(not sure or n < TREND_MIN_N or span < TREND_MIN_SPAN_S),
         n=n,
         span_s=span,
+        sure=bool(sure),
     )
 
 
@@ -334,8 +336,8 @@ Point = tuple[float, float, bool]  # (t, $ per 1%, sure)
 class PerPct:
     """An account's $ per 1% of one window kind, and how it moves."""
 
-    dollars: float
-    sure: bool  # enough recent climb not used elsewhere
+    dollars: float  # the trend line at now, the one the chart draws
+    sure: bool  # enough recent climb not used elsewhere, and a line from it
     fit: Fit | None = None
     points: tuple[Point, ...] = ()  # every sample of the trend span not left out
 
@@ -375,9 +377,12 @@ def screen(found: Iterable[Sample], now: float) -> list[Sample]:
 
 
 def summarize(found: Iterable[Sample], label: str, now: float) -> PerPct | None:
-    """The figure to show: recent sure samples if they climb far enough,
-    else every recent sample not left out (marked unsure); None without
-    any. Climbs made elsewhere are screened out first (:func:`screen`)."""
+    """The figure to show: the trend line at ``now``, so the row reads what
+    the chart draws; under two days of samples (no line), the pooled recent
+    sure samples if they climb far enough, else every recent sample not left
+    out. Unsure without that sure climb or when the line rests on unsure
+    samples; None without any recent sample. Climbs made elsewhere are
+    screened out first (:func:`screen`)."""
     usable = sorted((s for s in screen(found, now) if s.grade != "out"), key=lambda s: s.t)
     recent = [s for s in usable if s.t >= now - RECENT_S]
     if not recent:
@@ -385,7 +390,10 @@ def summarize(found: Iterable[Sample], label: str, now: float) -> PerPct | None:
     recent_sure = [s for s in recent if s.grade == "sure"]
     is_sure = sum(s.pct for s in recent_sure) >= SURE_PCT.get(label, SURE_PCT["5h"])
     points = tuple((s.t, s.ratio, s.grade == "sure") for s in usable if s.t >= now - TREND_S)
-    return PerPct(_ratio(recent_sure if is_sure else recent), is_sure, fit(usable, now), points)
+    line = fit(usable, now)
+    if line is None:
+        return PerPct(_ratio(recent_sure if is_sure else recent), is_sure, None, points)
+    return PerPct(line.at(now), is_sure and line.sure, line, points)
 
 
 # -- the store ----------------------------------------------------------------------
