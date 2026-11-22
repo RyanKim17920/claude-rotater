@@ -19,7 +19,6 @@ the user's terminal or of rota is in it.
 
 from __future__ import annotations
 
-import fcntl
 import os
 import re
 import select
@@ -27,7 +26,6 @@ import signal
 import struct
 import subprocess
 import sys
-import termios
 import threading
 import time
 from collections.abc import Iterable
@@ -147,6 +145,9 @@ def parse_progress(text: str, *, secrets: Iterable[str] = ()) -> LoginProgress:
 
 
 def _set_winsize(fd: int, rows: int, cols: int) -> None:
+    import fcntl  # Unix only, like everything that runs a PtyLogin
+    import termios
+
     try:
         fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("HHHH", rows, cols, 0, 0))
     except OSError:

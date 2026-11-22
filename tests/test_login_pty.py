@@ -21,7 +21,22 @@ from claude_rotater import login_pty
 from claude_rotater.exceptions import LoginCancelled, LoginError
 from claude_rotater.login_pty import LoginProgress, PtyLogin, clean_output, parse_progress
 
-pytestmark = pytest.mark.skipif(not login_pty.pty_supported(), reason="no pseudo-terminals here")
+needs_pty = pytest.mark.skipif(not login_pty.pty_supported(), reason="no pseudo-terminals here")
+
+
+def test_imports_nothing_unix_only_at_module_level():
+    """login (and so the TUI) imports this module on Windows too, where the
+    TUI falls back to suspending: its Unix-only modules load lazily."""
+    import ast
+
+    tree = ast.parse(Path(login_pty.__file__).read_text(encoding="utf-8"))
+    top = {
+        alias.name.split(".")[0]
+        for node in tree.body
+        if isinstance(node, (ast.Import, ast.ImportFrom))
+        for alias in (node.names if isinstance(node, ast.Import) else [ast.alias(node.module or "")])
+    }
+    assert not top & {"fcntl", "termios", "pty", "tty", "resource"}, top
 
 FAKE = Path(__file__).parent / "fixtures" / "fake_login_cli.py"
 URL = "https://example.invalid/oauth/authorize?code=true&client_id=fake&state=abc123"
@@ -148,6 +163,7 @@ def _alive(pid: int) -> bool:
     return bool(state) and not state.startswith("Z")
 
 
+@needs_pty
 class TestPtyLogin:
     def test_browser_callback_succeeds(self):
         session, seen = _session("callback")
@@ -266,6 +282,7 @@ class TestPtyLogin:
         assert len(os.listdir("/dev/fd")) <= before
 
 
+@needs_pty
 class TestStagedLoginInAPty:
     """StagedLogin.pty_login + finish_pty: the same command and stage as the
     terminal login, run by PtyLogin, then confirmed with ``auth status``."""
