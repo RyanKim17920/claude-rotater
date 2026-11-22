@@ -10,6 +10,11 @@ removing it: the OAuth login is never touched, so returning is instant.
 - The key lives only in a rota-owned secret: the Keychain item
   ``<backup service>-active-key`` on macOS, else ``<data dir>/active-key``
   (0600). Never in settings.json, logs or argv.
+- Which key that is, ``<data dir>/api-key-mode.json`` says, by SHA-256.
+  Writing it is what activates a key and removing it what revokes one. A
+  copy it does not name (one left in a Keychain that could not be written,
+  a file that could not be deleted) is never served: neither store outranks
+  the other, and when the named key cannot be read none is served.
 - The helper is ``<rota> key --route CONFIG_DIR DATA_DIR … # rota-key``.
   ``rota key`` picks the data dir by the session's ``CLAUDE_CONFIG_DIR``
   (unset reads as ``~/.claude``) and prints that profile's key.
@@ -27,16 +32,19 @@ Import-light: ``rota key`` runs on Claude Code's request path.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import shlex
 import shutil
 import sys
+import tempfile
 import time
 from dataclasses import dataclass
 from pathlib import Path
 
 from claude_rotater import feed, macos_keychain, paths
+from claude_rotater.fsutil import read_text_with_retry, replace_with_retry
 
 MARKER = "rota-key"
 SETTINGS_KEY = "apiKeyHelper"
@@ -47,11 +55,13 @@ OVERRIDE_ENV = ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN")
 
 @dataclass(frozen=True)
 class KeyMode:
-    """This profile's key mode: on since ``since`` with the key ending in
-    ``tail``, or off (``since`` None)."""
+    """This profile's key mode: on since ``since`` with the key whose
+    SHA-256 is ``digest`` and that ends in ``tail``, or off (``since``
+    None). State written before the digest was recorded has none."""
 
     since: float | None
     tail: str = ""
+    digest: str = ""
 
     @property
     def on(self) -> bool:
@@ -90,53 +100,115 @@ def session_config_dir(environ=os.environ) -> str:
 # -- the stored key ---------------------------------------------------------------
 
 
-def store_key(data_dir: Path, key: str, keychain: bool | None = None) -> None:
-    """Keep ``key`` as ``data_dir``'s active key (the Keychain when
-    ``keychain``, default on macOS, else a 0600 file). Raises OSError or
-    ``KeychainError`` when it cannot be stored."""
-    if _use_keychain() if keychain is None else keychain:
+def _fingerprint(key: str) -> str:
+    return hashlib.sha256(key.encode("utf-8")).hexdigest()
+
+
+def _write_private(path: Path, text: str) -> None:
+    """Replace ``path`` atomically with a 0600 file holding ``text``."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=f".{path.name}.", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(text)
+        replace_with_retry(tmp, path)
+    except BaseException:
+        Path(tmp).unlink(missing_ok=True)
+        raise
+
+
+def store_key(
+    data_dir: Path, key: str, keychain: bool | None = None, now: float | None = None
+) -> None:
+    """Make ``key`` ``data_dir``'s active key (kept in the Keychain when
+    ``keychain``, default on macOS, else in a 0600 file). Raises OSError or
+    ``KeychainError`` when it cannot; ``key`` is then never served.
+
+    The record is written after the key, so stopping anywhere before it
+    leaves the previous key or, where that key was just overwritten, none.
+    Callers serialize (the credential store's write lock)."""
+    data_dir = Path(data_dir)
+    in_keychain = _use_keychain() if keychain is None else keychain
+    key = key.strip()
+    previous = mode(data_dir)
+    if previous.on and not previous.digest:
+        # Four characters could name the new key as well: make the old
+        # record exact before a copy of the new one exists.
+        old = read_key(data_dir)
+        if old:
+            _write_mode(data_dir, old, previous.since)
+        else:
+            _clear_mode(data_dir)
+        previous = mode(data_dir)
+    if in_keychain:
         macos_keychain.set_password(
             key_service(data_dir), macos_keychain.keychain_account_name(), key
         )
-        return
-    path = Path(data_dir) / KEY_FILENAME
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(f".{KEY_FILENAME}.{os.getpid()}.tmp")
-    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(fd, "w", encoding="utf-8") as handle:
-        handle.write(key)
-    os.replace(tmp, path)
+    else:
+        _write_private(data_dir / KEY_FILENAME, key)
+    if previous.on and previous.digest == _fingerprint(key):
+        since = previous.since
+    else:
+        since = time.time() if now is None else now
+    _write_mode(data_dir, key, since)
+    if in_keychain:
+        _delete_key_file(data_dir)
+    else:
+        _delete_key_item(data_dir)
 
 
 def read_key(data_dir: Path) -> str | None:
-    """``data_dir``'s active key, or None: the Keychain item on macOS, then
-    the file (where a Keychain that failed at activation left it)."""
-    value = None
+    """The key last activated for ``data_dir``, from whichever store holds
+    it, or None when there is none or it cannot be read."""
+    record = mode(data_dir)
+    if not record.on:
+        return None
+    try:
+        filed = read_text_with_retry(Path(data_dir) / KEY_FILENAME).strip()
+    except (OSError, ValueError):
+        filed = ""
+    if filed and record.digest == _fingerprint(filed):
+        return filed
+    item = ""
     if _use_keychain():
         try:
-            value = macos_keychain.get_password(
+            item = macos_keychain.get_password(
                 key_service(data_dir), macos_keychain.keychain_account_name()
             )
         except macos_keychain.KEYCHAIN_ERRORS:
-            value = None
-    if not value:
-        try:
-            value = (Path(data_dir) / KEY_FILENAME).read_text(encoding="utf-8")
-        except OSError:
-            value = None
-    value = (value or "").strip()
-    return value or None
+            return None
+        item = (item or "").strip()
+    if record.digest:
+        return item if item and record.digest == _fingerprint(item) else None
+    # A record from before the digest knows four characters, which two keys
+    # can share: serve only when a single key fits.
+    fitting = {key for key in (filed, item) if key and key[-4:] == record.tail}
+    return fitting.pop() if len(fitting) == 1 else None
 
 
 def forget_key(data_dir: Path) -> None:
-    """Drop ``data_dir``'s active key wherever it is; best-effort."""
-    if _use_keychain():
-        try:
-            macos_keychain.delete_password(
-                key_service(data_dir), macos_keychain.keychain_account_name()
-            )
-        except macos_keychain.KEYCHAIN_ERRORS:
-            pass
+    """Revoke ``data_dir``'s active key and drop its copies; best-effort. A
+    copy that cannot be deleted is not served once the record is gone."""
+    try:
+        _clear_mode(data_dir)
+    except OSError:
+        pass
+    _delete_key_item(data_dir)
+    _delete_key_file(data_dir)
+
+
+def _delete_key_item(data_dir: Path) -> None:
+    if not _use_keychain():
+        return
+    try:
+        macos_keychain.delete_password(
+            key_service(data_dir), macos_keychain.keychain_account_name()
+        )
+    except macos_keychain.KEYCHAIN_ERRORS:
+        pass
+
+
+def _delete_key_file(data_dir: Path) -> None:
     try:
         (Path(data_dir) / KEY_FILENAME).unlink(missing_ok=True)
     except OSError:
@@ -144,35 +216,29 @@ def forget_key(data_dir: Path) -> None:
 
 
 def mode(data_dir: Path) -> KeyMode:
-    """When key mode began for ``data_dir`` (from its state file)."""
+    """Which key ``data_dir`` is on, and since when (from its state file)."""
     try:
-        raw = json.loads((Path(data_dir) / STATE_FILENAME).read_text(encoding="utf-8"))
+        raw = json.loads(read_text_with_retry(Path(data_dir) / STATE_FILENAME))
     except (OSError, ValueError):
         return KeyMode(None)
     since = raw.get("since") if isinstance(raw, dict) else None
     if isinstance(since, bool) or not isinstance(since, (int, float)):
         return KeyMode(None)
-    tail = raw.get("tail")
-    return KeyMode(float(since), tail if isinstance(tail, str) else "")
+    tail, digest = raw.get("tail"), raw.get("sha256")
+    return KeyMode(
+        float(since),
+        tail if isinstance(tail, str) else "",
+        digest if isinstance(digest, str) else "",
+    )
 
 
-def _write_mode(data_dir: Path, key: str, now: float) -> None:
-    previous = mode(data_dir)
-    since = previous.since if previous.on and previous.tail == key[-4:] else now
-    paths_dir = Path(data_dir)
-    paths_dir.mkdir(parents=True, exist_ok=True)
-    target = paths_dir / STATE_FILENAME
-    tmp = target.with_name(f".{STATE_FILENAME}.{os.getpid()}.tmp")
-    state = {"since": since, "tail": key[-4:]}
-    tmp.write_text(json.dumps(state), encoding="utf-8")
-    os.replace(tmp, target)
+def _write_mode(data_dir: Path, key: str, since: float) -> None:
+    state = {"since": since, "tail": key[-4:], "sha256": _fingerprint(key)}
+    _write_private(Path(data_dir) / STATE_FILENAME, json.dumps(state))
 
 
 def _clear_mode(data_dir: Path) -> None:
-    try:
-        (Path(data_dir) / STATE_FILENAME).unlink(missing_ok=True)
-    except OSError:
-        pass
+    (Path(data_dir) / STATE_FILENAME).unlink(missing_ok=True)
 
 
 # -- the helper command -------------------------------------------------------------
@@ -286,7 +352,8 @@ def activate(
     now: float | None = None,
 ) -> str | None:
     """Switch ``config_dir``'s sessions to ``key``. Returns None when done,
-    else why it could not be (nothing was changed then)."""
+    else why it could not be: ``key`` is then not served, and the previous
+    key only while its own copy is intact."""
     why = unavailable(config_dir)
     if why is not None:
         return why
@@ -299,7 +366,8 @@ def activate(
     current = settings.get(SETTINGS_KEY)
     routes = _routes_without(helper_routes(current), config_dir)
     try:
-        store_key(data_dir, key, keychain)
+        # before the helper is written, so it never runs on an older record
+        store_key(data_dir, key, keychain, now)
     except (OSError, *macos_keychain.KEYCHAIN_ERRORS) as e:
         return f"could not store the key: {type(e).__name__}"
     routes.append((_norm(config_dir), _norm(data_dir)))
@@ -311,10 +379,6 @@ def activate(
         except ss.StatuslineSetupError as e:
             forget_key(data_dir)
             return str(e)
-    try:
-        _write_mode(data_dir, key, time.time() if now is None else now)
-    except OSError:
-        pass  # only the start time for the costs and error scans is lost
     return None
 
 
@@ -341,7 +405,6 @@ def deactivate(data_dir: Path, config_dir: Path) -> None:
             except ss.StatuslineSetupError:
                 return
     forget_key(data_dir)
-    _clear_mode(data_dir)
 
 
 def split_settings(config_dir: Path, data_dir: Path) -> None:
