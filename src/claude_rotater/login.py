@@ -6,8 +6,10 @@ in a throwaway profile instead:
 
 1. create a private temp dir under ``<backup>/logins/`` and export it,
    verbatim, as ``CLAUDE_CONFIG_DIR`` (auth-override env vars dropped);
-2. run ``claude auth login --claudeai`` attached to the
-   terminal, so the browser / paste-code flow works;
+2. run ``claude auth login --claudeai``: from the TUI in a pseudo-terminal
+   of its own (``login_pty``), so the browser / paste-code flow happens on
+   rota's prompt line; attached to the real terminal only where there are
+   no pseudo-terminals;
 3. confirm with ``claude auth status --json``;
 4. capture the staged profile with ``add_account(source_dir=...)``: the
    credential from the profile's hashed keychain item
@@ -22,7 +24,7 @@ can still leave a stage behind, so each new login first sweeps stages older
 than ``STALE_STAGE_S`` (never a younger one: it may be a concurrent login).
 
 The interactive step (2-3) and the capture (4) are separate calls so the TUI
-can run the first with the app suspended and the second in a worker thread.
+can drive the first from its prompt line and run the second in a worker.
 There is deliberately no CLI verb: the TUI's log-in key (l) is the entry
 point.
 """
@@ -39,6 +41,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Callable
 
 from claude_rotater.exceptions import LoginCancelled, LoginError
+from claude_rotater.login_pty import LoginProgress, PtyLogin
 from claude_rotater.session import AUTH_OVERRIDE_ENV_VARS, delete_macos_keychain_entry
 
 if TYPE_CHECKING:
@@ -148,13 +151,7 @@ class StagedLogin:
         exits non-zero when the flow is abandoned) and :class:`LoginError`
         when claude cannot run or the status check does not confirm a login.
         """
-        if method not in LOGIN_METHODS:
-            raise LoginError(f"Unknown login method {method!r}; use one of {', '.join(LOGIN_METHODS)}")
-        config_dir = self.open()
-        env = login_env(config_dir)
-        argv = [self.claude_bin, "auth", "login", f"--{method}"]
-        if email:
-            argv += ["--email", email]
+        argv, env = self._login_command(method, email)
         try:
             result = self._run(argv, env=env)
         except KeyboardInterrupt:
@@ -169,6 +166,37 @@ class StagedLogin:
                 "nothing was stored."
             )
         self.status = self._confirm(env)
+        return self.status
+
+    def _login_command(self, method: str, email: str | None) -> tuple[list[str], dict[str, str]]:
+        """The ``claude auth login`` argv and env for this stage (claude.ai
+        logins only, see ``LOGIN_METHODS``)."""
+        if method not in LOGIN_METHODS:
+            raise LoginError(f"Unknown login method {method!r}; use one of {', '.join(LOGIN_METHODS)}")
+        env = login_env(self.open())
+        argv = [self.claude_bin, "auth", "login", f"--{method}"]
+        if email:
+            argv += ["--email", email]
+        return argv, env
+
+    def pty_login(
+        self,
+        *,
+        on_progress: Callable[[LoginProgress], None],
+        method: str = "claudeai",
+        email: str | None = None,
+    ) -> PtyLogin:
+        """The same login, set up to run in a pseudo-terminal of its own (the
+        TUI's way): pass it to :meth:`finish_pty` in a worker; meanwhile its
+        ``send_code`` / ``cancel`` drive it."""
+        argv, env = self._login_command(method, email)
+        return PtyLogin(argv, env, on_progress=on_progress)
+
+    def finish_pty(self, session: PtyLogin) -> dict:
+        """Run ``session`` to its end, then confirm the login like
+        :meth:`authenticate` does. Raises LoginCancelled / LoginError."""
+        session.run()
+        self.status = self._confirm(session.env)
         return self.status
 
     def _confirm(self, env: dict[str, str]) -> dict:

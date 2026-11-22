@@ -258,3 +258,58 @@ class TestPtyLogin:
             except LoginError:
                 pass
         assert len(os.listdir("/dev/fd")) <= before
+
+
+class TestStagedLoginInAPty:
+    """StagedLogin.pty_login + finish_pty: the same command and stage as the
+    terminal login, run by PtyLogin, then confirmed with ``auth status``."""
+
+    @staticmethod
+    def _cli(tmp_path, mode="callback", logged_in=True) -> str:
+        script = tmp_path / "fake-cli"
+        status = '{"loggedIn": true}' if logged_in else '{"loggedIn": false}'
+        script.write_text(
+            "#!/bin/sh\n"
+            f'if [ "$2" = status ]; then echo \'{status}\'; exit 0; fi\n'
+            f'echo "$@" > "{tmp_path}/argv"; echo "$CLAUDE_CONFIG_DIR" > "{tmp_path}/config_dir"\n'
+            f'FAKE_LOGIN_MODE={mode} exec "{sys.executable}" "{FAKE}"\n'
+        )
+        script.chmod(0o755)
+        return str(script)
+
+    def test_logs_in_the_stage_and_confirms(self, tmp_path):
+        from claude_rotater.login import StagedLogin
+
+        stage = StagedLogin(tmp_path / "backup", claude_bin=self._cli(tmp_path))
+        seen: list[LoginProgress] = []
+        try:
+            session = stage.pty_login(on_progress=seen.append, email="who@example.com")
+            assert stage.finish_pty(session) == {"loggedIn": True}
+            assert (tmp_path / "argv").read_text().split() == [
+                "auth", "login", "--claudeai", "--email", "who@example.com"
+            ]
+            assert (tmp_path / "config_dir").read_text().strip() == stage.config_dir
+            assert seen[-1].succeeded
+        finally:
+            stage.cleanup()
+        assert list((tmp_path / "backup" / "logins").iterdir()) == []
+
+    def test_unconfirmed_login_is_an_error(self, tmp_path):
+        from claude_rotater.login import StagedLogin
+
+        stage = StagedLogin(tmp_path / "backup", claude_bin=self._cli(tmp_path, logged_in=False))
+        try:
+            with pytest.raises(LoginError, match="does not report a login"):
+                stage.finish_pty(stage.pty_login(on_progress=lambda p: None))
+        finally:
+            stage.cleanup()
+
+    def test_only_claude_ai_logins(self, tmp_path):
+        from claude_rotater.login import StagedLogin
+
+        stage = StagedLogin(tmp_path / "backup", claude_bin=self._cli(tmp_path))
+        try:
+            with pytest.raises(LoginError, match="Unknown login method"):
+                stage.pty_login(on_progress=lambda p: None, method="console")
+        finally:
+            stage.cleanup()
