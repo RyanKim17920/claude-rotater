@@ -594,7 +594,8 @@ def test_a_matching_uuid_does_not_excuse_a_different_org(
     carries an accountUuid.
     """
     s = ClaudeAccountSwitcher()
-    s._setup_directories(); s._init_sequence_file()
+    s._setup_directories()
+    s._init_sequence_file()
     s._get_claude_config_path().write_text(json.dumps({"oauthAccount": {
         "emailAddress": "ax@example.com", "organizationUuid": "",
         "accountUuid": "u-ax"}}), encoding="utf-8")
@@ -619,7 +620,8 @@ def test_a_null_account_uuid_does_not_trip_the_commit_time_recheck(
     address as both before and after -- and no re-run could clear it.
     """
     s = ClaudeAccountSwitcher()
-    s._setup_directories(); s._init_sequence_file()
+    s._setup_directories()
+    s._init_sequence_file()
     s._get_claude_config_path().write_text(json.dumps({"oauthAccount": {
         "emailAddress": "ax@example.com", "organizationUuid": "",
         "accountUuid": None}}), encoding="utf-8")

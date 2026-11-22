@@ -3,7 +3,6 @@ and one poller for an account two profiles hold."""
 
 from __future__ import annotations
 
-import json
 import os
 import signal
 import subprocess

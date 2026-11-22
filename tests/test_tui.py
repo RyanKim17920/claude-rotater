@@ -3620,12 +3620,15 @@ class TestThemeWiring:
         async with app.run_test() as pilot:
             await settle(pilot)
             assert app.theme == "rota-dark"          # setting dark
-            app.action_toggle_theme(); await pilot.pause()
+            app.action_toggle_theme()
+            await pilot.pause()
             assert app.theme == "rota-light"          # → light
-            app.action_toggle_theme(); await pilot.pause()
+            app.action_toggle_theme()
+            await pilot.pause()
             assert app.theme == "rota-light"          # → auto, detected=light
             assert json.loads((tmp_path / "settings.json").read_text())["ui"]["theme"] == "auto"
-            app.action_toggle_theme(); await pilot.pause()
+            app.action_toggle_theme()
+            await pilot.pause()
             assert app.theme == "rota-dark"           # → back to dark
 
     async def test_ctrl_t_cycles_theme(self, tmp_path):
@@ -3686,7 +3689,7 @@ class TestLongTermLines:
         lt = LongTerm(peaks_5h=((now - 86400, 50.0),))
         for width, note in ((80, False), (120, True), (160, False)):
             text = "\n".join(
-                l.plain for l in long_term_lines(self._acc(), lt, now=now, threshold=90, width=width, height=20)
+                line.plain for line in long_term_lines(self._acc(), lt, now=now, threshold=90, width=width, height=20)
             )
             assert ("/bar" in text) == note, width
 
@@ -3695,11 +3698,11 @@ class TestLongTermLines:
 
         now = time.time()
         lt = LongTerm(peaks_5h=((now - 86400, 50.0),), series_7d=(Point(now - 3600, 20.0, None),))
-        wide = [l.plain for l in long_term_lines(self._acc(), lt, now=now, threshold=90, width=120, height=20)]
-        assert any("5h peaks" in l and "7d usage" in l for l in wide)
-        narrow = [l.plain for l in long_term_lines(self._acc(), lt, now=now, threshold=90, width=80, height=20)]
-        assert not any("5h peaks" in l and "7d usage" in l for l in narrow)
-        assert any("5h peaks" in l for l in narrow) and any("7d usage" in l for l in narrow)
+        wide = [line.plain for line in long_term_lines(self._acc(), lt, now=now, threshold=90, width=120, height=20)]
+        assert any("5h peaks" in line and "7d usage" in line for line in wide)
+        narrow = [line.plain for line in long_term_lines(self._acc(), lt, now=now, threshold=90, width=80, height=20)]
+        assert not any("5h peaks" in line and "7d usage" in line for line in narrow)
+        assert any("5h peaks" in line for line in narrow) and any("7d usage" in line for line in narrow)
 
     def test_loading_and_empty_states(self):
         from claude_rotater.tui.main import LongTerm, long_term_lines

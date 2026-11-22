@@ -5032,6 +5032,7 @@ class TestAddAccountFromToken:
         with patch.object(switcher, "_write_account_credentials") as mock_creds, \
              patch.object(switcher, "_write_account_config"):
             switcher.add_account_from_token("sk-ant-oat01-abc", "user@example.com")
+        mock_creds.assert_called_once()
 
         data = switcher._get_sequence_data()
         assert "1" in data["accounts"]
@@ -8997,6 +8998,7 @@ class TestDegradedReadProvenance:
                 "1", "test@example.com", stale
             )
         mock_refresh.assert_not_called()   # the rt is never consumed
+        mock_fetch.assert_not_called()
         assert result.sentinel == USAGE_KEYCHAIN_UNAVAILABLE
         assert result.error is None        # no strike-advancing error
 
@@ -9232,7 +9234,7 @@ class TestBackupUnreadableDisplay:
         sample_sequence_data: dict,
     ):
         from claude_rotater.json_output import (
-            USAGE_KEYCHAIN_UNAVAILABLE, USAGE_NO_CREDENTIALS,
+            USAGE_KEYCHAIN_UNAVAILABLE,
         )
         s = ClaudeAccountSwitcher()
         s.platform = Platform.MACOS
@@ -10200,7 +10202,6 @@ class TestConsumeGateLockFailures:
         s = self._switcher(sample_sequence_data)
         s._write_account_credentials("1", "test@example.com", self._OLD)
 
-        from claude_rotater.locking import FileLock as real_lock
 
         class FailingLock:
             def __init__(self, *a, **k): pass

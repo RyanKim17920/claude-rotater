@@ -13,8 +13,6 @@ import pytest
 
 from claude_rotater.process_detection import (
     PID_REUSE_SLACK_S,
-    ClaudeSession,
-    IdeInstance,
     _lstart_seconds,
     _stat_start_ticks,
     get_claude_dir,

@@ -20,7 +20,6 @@ from .test_tui import (
     FakeSwitcher,
     burn_history,
     make_app,
-    prompt_plain,
     settle,
     three_accounts,
     with_history,

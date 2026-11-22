@@ -403,8 +403,10 @@ class TestAtomicWriteThroughSymlink:
     a foreign one)."""
 
     def test_write_preserves_the_link_and_updates_the_target(self, tmp_path):
-        repo = tmp_path / "repo"; repo.mkdir()
-        live = tmp_path / "live"; live.mkdir()
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        live = tmp_path / "live"
+        live.mkdir()
         tracked = repo / "settings.json"
         tracked.write_text(json.dumps({"tracked": True}))
         link = live / "settings.json"
@@ -437,10 +439,14 @@ class TestAtomicWriteThroughSymlink:
         directly; staging two filesystems in a unit test is not portable."""
         import tempfile
         from claude_rotater import settings as S
-        repo = tmp_path / "repo"; repo.mkdir()
-        live = tmp_path / "live"; live.mkdir()
-        tracked = repo / "settings.json"; tracked.write_text("{}")
-        link = live / "settings.json"; link.symlink_to(tracked)
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        live = tmp_path / "live"
+        live.mkdir()
+        tracked = repo / "settings.json"
+        tracked.write_text("{}")
+        link = live / "settings.json"
+        link.symlink_to(tracked)
         seen = []
         real_mkstemp = tempfile.mkstemp
         monkeypatch.setattr(
@@ -457,10 +463,14 @@ class TestAtomicWriteThroughSymlink:
         """The 0700 belongs to rota's own dir. On the target's parent it
         would narrow a foreign directory, and raise PermissionError when
         that parent cannot be chmod'ed at all."""
-        repo = tmp_path / "repo"; repo.mkdir(mode=0o755)
-        live = tmp_path / "live"; live.mkdir()
-        tracked = repo / "settings.json"; tracked.write_text("{}")
-        link = live / "settings.json"; link.symlink_to(tracked)
+        repo = tmp_path / "repo"
+        repo.mkdir(mode=0o755)
+        live = tmp_path / "live"
+        live.mkdir()
+        tracked = repo / "settings.json"
+        tracked.write_text("{}")
+        link = live / "settings.json"
+        link.symlink_to(tracked)
 
         atomic_write_json(link, {"x": 1})
 

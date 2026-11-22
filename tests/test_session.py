@@ -2827,10 +2827,6 @@ class TestAConsumedGrantIsNotSpentOnAProfileThatWonBootstrap:
     def test_the_early_return_leaves_the_profile_on_the_rotated_generation(
         self, manager, seeded_switcher, auth_status_tracks_seed, monkeypatch
     ):
-        session_dir = session_dir_for(
-            seeded_switcher.backup_dir, ACCOUNT_NUM, ACCOUNT_EMAIL
-        )
-
         # The gate rotates the backup, exactly as the real one does.
         def fake_gate(self, num, email, snapshot):
             self._write_account_credentials(num, email, ROTATED_CREDS)
@@ -2880,10 +2876,6 @@ class TestAConsumedGrantIsNotSpentOnAProfileThatWonBootstrap:
         VALID, which IS the live case, so it needed the guard most and had
         nothing pinning it.
         """
-        session_dir = session_dir_for(
-            seeded_switcher.backup_dir, ACCOUNT_NUM, ACCOUNT_EMAIL
-        )
-
         def fake_gate(self, num, email, snapshot):
             self._write_account_credentials(num, email, ROTATED_CREDS)
             return oauth.RefreshOutcome(ROTATED_CREDS, None)

@@ -1485,7 +1485,8 @@ class TestInvalidGrantTaxonomy:
     systemic kind, never a dead-token verdict."""
 
     def _refresh_with_body(self, monkeypatch, code, body):
-        import urllib.error, io
+        import urllib.error
+        import io
         creds = json.dumps({
             "claudeAiOauth": {"refreshToken": "rt-x", "accessToken": "a"}
         })

@@ -20,7 +20,12 @@ from claude_rotater.autoswitch import (
     TickOutcome,
     note_manual_switch,
 )
-from tests.test_autoswitch import _usage, harness  # noqa: F401  (fixture)
+from tests import test_autoswitch
+from tests.test_autoswitch import _usage
+
+# Reuse the engine fixture by binding it here; pytest finds fixtures by
+# module-level name, and a plain import of it reads as unused to linters.
+harness = test_autoswitch.harness
 
 
 def _state(harness) -> dict:

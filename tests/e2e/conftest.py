@@ -35,8 +35,11 @@ def _owner_keychain_state() -> tuple[str, str]:
     """The owner's own keychain search list and default, read with the
     owner's real HOME (the parent conftest swaps HOME for every test)."""
     env = {"HOME": pwd.getpwuid(os.getuid()).pw_dir, "PATH": "/usr/bin:/bin"}
-    run = lambda *a: subprocess.run(["/usr/bin/security", *a], env=env, capture_output=True,
-                                    text=True, timeout=30).stdout
+
+    def run(*a: str) -> str:
+        return subprocess.run(["/usr/bin/security", *a], env=env, capture_output=True,
+                              text=True, timeout=30).stdout
+
     return run("list-keychains", "-d", "user"), run("default-keychain", "-d", "user")
 
 
