@@ -11,3 +11,6 @@ wheels/
 
 # superpowers session planning artifacts (not part of the project)
 docs/superpowers/
+
+# screenshot sources (scripts/screenshot.py); the PNGs are committed
+docs/*.svg
