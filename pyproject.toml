@@ -39,6 +39,10 @@ build-backend = "hatchling.build"
 [tool.hatch.build.targets.wheel]
 packages = ["src/claude_rotater"]
 
+[tool.hatch.build.targets.sdist]
+# Editor and CI config are repo-only; the sdist keeps source, tests, docs.
+exclude = [".vscode", ".github"]
+
 [dependency-groups]
 dev = [
     "pytest>=8.0",
