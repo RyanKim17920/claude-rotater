@@ -113,6 +113,10 @@ from claude_rotater.usage_store import (
 # on profile endpoints. Matches Claude Code's CLAUDE_CODE_OAUTH_TOKEN path.
 SETUP_TOKEN_SCOPES = ("user:inference",)
 
+# What every command that needs an account says on a fresh install: the
+# fact, then the one place accounts are added.
+NO_ACCOUNTS_MESSAGE = "No accounts are managed yet. Run `rota` and press a to add one."
+
 # Delay between successive usage-request launches in one collect pass, so N
 # accounts never burst the shared usage endpoint from one IP in the same
 # instant (request hygiene; see issue #85).
@@ -1276,7 +1280,7 @@ class ClaudeAccountSwitcher:
             AccountNotFoundError: identifier doesn't match any account.
         """
         if not self.sequence_file.exists():
-            raise ConfigError("No accounts are managed yet")
+            raise ConfigError(NO_ACCOUNTS_MESSAGE)
 
         # resolve_account migrates org fields and hard-errors on ambiguity.
         account_num, email, _ = self.resolve_account(identifier)
@@ -3542,7 +3546,7 @@ class ClaudeAccountSwitcher:
         """
         self._refuse_session_shell()
         if not self.sequence_file.exists():
-            raise ConfigError("No accounts are managed yet")
+            raise ConfigError(NO_ACCOUNTS_MESSAGE)
 
         # Ensure org fields are migrated before resolving accounts
         self._get_sequence_data_migrated()
@@ -5601,7 +5605,7 @@ class ClaudeAccountSwitcher:
             ))
 
         if not self.sequence_file.exists():
-            raise ConfigError("No accounts are managed yet")
+            raise ConfigError(NO_ACCOUNTS_MESSAGE)
 
         identity = self._get_current_account()
 
@@ -5620,7 +5624,7 @@ class ClaudeAccountSwitcher:
             if not preferred and sequence:
                 preferred = sequence[0]
             if not preferred:
-                raise ConfigError("No accounts are managed yet")
+                raise ConfigError(NO_ACCOUNTS_MESSAGE)
 
             target = str(preferred)
             target_disabled = self._disabled_from_data(data, target)
@@ -5969,7 +5973,7 @@ class ClaudeAccountSwitcher:
         the recovery path for a live login gone stale.
         """
         if not self.sequence_file.exists():
-            raise ConfigError("No accounts are managed yet")
+            raise ConfigError(NO_ACCOUNTS_MESSAGE)
 
         # Ensure org fields are migrated before resolving accounts
         self._get_sequence_data_migrated()

@@ -743,3 +743,27 @@ def test_importing_the_module_allocates_no_temp_dir(tmp_path, tmp_path_factory):
     home = Path(_subprocess_env()["HOME"])
     assert home.is_dir(), f"the isolated HOME is not a real directory: {home}"
     assert home.is_relative_to(tmp_path_factory.getbasetemp()), f"{home} escapes basetemp"
+
+
+class TestFirstRun:
+    """A fresh install (empty data dir, no accounts) answers every verb with
+    a message that names the next step, never a traceback."""
+
+    @pytest.mark.parametrize("argv", [["switch"], ["switch", "2"]])
+    def test_switch_without_accounts_points_at_the_tui(self, temp_home, argv, capsys):
+        with patch.object(sys, "argv", ["rota", *argv]), \
+             patch("os.geteuid", return_value=1000, create=True):
+            with pytest.raises(SystemExit) as excinfo:
+                cli.main()
+        assert excinfo.value.code == 1
+        err = capsys.readouterr()
+        text = err.out + err.err
+        assert "No accounts are managed yet" in text
+        assert "press a to add one" in text
+        assert "Traceback" not in text
+
+    def test_status_without_accounts_is_not_an_error(self, temp_home, capsys):
+        with patch.object(sys, "argv", ["rota", "status", "--json"]), \
+             patch("os.geteuid", return_value=1000, create=True):
+            cli.main()
+        assert json.loads(capsys.readouterr().out)["active"] is None
