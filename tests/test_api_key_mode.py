@@ -127,9 +127,11 @@ class TestActivate:
         backups = list((pd / "statusline-backups").glob("settings.*.json"))
         assert [b.read_text(encoding="utf-8") for b in backups] == ['{"theme": "dark"}\n']
 
-    def test_keychain_storage(self, homes, block_real_keychain):
+    def test_keychain_storage(self, homes, block_real_keychain, monkeypatch):
         from claude_rotater import macos_keychain
 
+        # activate is told the backend; deactivate asks the host.
+        monkeypatch.setattr(akm, "_use_keychain", lambda: True)
         pc, pd, _, _ = homes
         akm.activate(KEY, pd, pc, keychain=True)
         acct = macos_keychain.keychain_account_name()

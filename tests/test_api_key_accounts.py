@@ -250,9 +250,13 @@ class TestWriteCredentialsHelper:
         assert not (s.backup_dir / "active-key").exists()
         assert s._read_credentials() == OAUTH_JSON
 
-    def test_activate_key_macos_uses_rota_keychain_item(self, temp_home, block_real_keychain):
+    def test_activate_key_macos_uses_rota_keychain_item(
+        self, temp_home, block_real_keychain, monkeypatch
+    ):
         from claude_rotater import api_key_mode
 
+        # api_key_mode asks the host, not the switcher's faked platform.
+        monkeypatch.setattr(api_key_mode, "_use_keychain", lambda: True)
         store = block_real_keychain
         s = _macos_switcher()
         acct = macos_keychain.keychain_account_name()
