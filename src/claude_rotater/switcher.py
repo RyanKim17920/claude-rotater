@@ -1368,6 +1368,17 @@ class ClaudeAccountSwitcher:
         data = self._get_sequence_data() or {}
         return data.get("accounts", {}).get(str(account_num), {}).get("email", "")
 
+    def key_unserved_over_login(self, account_num: str) -> bool:
+        """Whether API-key slot ``account_num`` hands sessions no key while a
+        login lies beneath it. False when either cannot be read, and without
+        a login: a switch cannot leave such a profile."""
+        if self._account_kind(account_num) != "api_key":
+            return False
+        if not api_key_mode.key_missing(self.backup_dir, get_claude_config_home()):
+            return False
+        beneath = self._read_active_credentials()
+        return bool(beneath.value) and not beneath.degraded
+
     def current_account_number(self) -> str | None:
         """Slot of the live login; ``None`` when there is none or it's unmanaged.
 

@@ -160,6 +160,25 @@ def store_key(
 def read_key(data_dir: Path) -> str | None:
     """The key last activated for ``data_dir``, from whichever store holds
     it, or None when there is none or it cannot be read."""
+    try:
+        return _named_key(data_dir)
+    except macos_keychain.KEYCHAIN_ERRORS:
+        return None
+
+
+def key_missing(data_dir: Path, config_dir: Path) -> bool:
+    """Whether ``config_dir``'s sessions are handed no key. False when the
+    Keychain cannot be read: that says nothing about the key."""
+    if not routed_here(data_dir, config_dir):
+        return True
+    try:
+        return _named_key(data_dir) is None
+    except macos_keychain.KEYCHAIN_ERRORS:
+        return False
+
+
+def _named_key(data_dir: Path) -> str | None:
+    """:func:`read_key`, raising what a Keychain that cannot be read raises."""
     record = mode(data_dir)
     if not record.on:
         return None
@@ -171,12 +190,9 @@ def read_key(data_dir: Path) -> str | None:
         return filed
     item = ""
     if _use_keychain():
-        try:
-            item = macos_keychain.get_password(
-                key_service(data_dir), macos_keychain.keychain_account_name()
-            )
-        except macos_keychain.KEYCHAIN_ERRORS:
-            return None
+        item = macos_keychain.get_password(
+            key_service(data_dir), macos_keychain.keychain_account_name()
+        )
         item = (item or "").strip()
     if record.digest:
         return item if item and record.digest == _fingerprint(item) else None

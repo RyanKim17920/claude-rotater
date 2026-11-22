@@ -1049,6 +1049,10 @@ class AutoSwitchEngine:
         self._login_entries: dict | None = None
         # The account a leave is moving off, re-checked under the state lock.
         self._leaving: str | None = None
+        # That leave is only because the key on duty serves none.
+        self._leaving_keyless = False
+        # That was seen once this tick: look again soon.
+        self._key_confirming = False
         # When the transcripts were last read for a provider refusal.
         self._refusal_scanned_at: float | None = None
 
@@ -1269,6 +1273,7 @@ class AutoSwitchEngine:
         self._sleep_until_ts = None
         self._blocked_wait_long = False
         self._idle_hold_slow = False
+        self._key_confirming = False
         settings = self.settings
         state = self._read_state()
         if not self.dry_run:
@@ -1344,6 +1349,21 @@ class AutoSwitchEngine:
             # Before every mode and strategy gate: no setting keeps a
             # profile on an account the user or the provider took away.
             return self._leave_held_out(current, held, entries, usage, headroom, quarantined)
+        unserved_s = self._key_unserved_s(current, state)
+        if unserved_s is not None:
+            if unserved_s >= MIN_TICK_S:
+                return self._leave_held_out(
+                    current, "serving no key", entries, usage, headroom, quarantined,
+                    keyless=True,
+                )
+            # One look can be a failed read, or the moment between storing
+            # and naming a key in a switch.
+            self._key_confirming = True
+            self._emit(NoSwitchEvent(
+                reason="key-not-served",
+                detail=f"API key #{current} is serving no key; rota leaves it if that lasts",
+            ))
+            return TickOutcome.NO_ACTION
 
         manual = settings.mode == "manual"
         if manual and not settings.manual_limit_guard:
@@ -1839,6 +1859,27 @@ class AutoSwitchEngine:
             return f"suspended by the provider ({block.reason})"
         return ""
 
+    def _key_unserved_s(self, current: str, state: dict) -> float | None:
+        """Seconds since the key on duty was first seen serving none; None
+        while it serves. Kept in the state file, so ``--once`` runs count
+        too. A dry run writes nothing and reports the move at once."""
+        mark = state.get("keyUnserved")
+        if not self.switcher.key_unserved_over_login(current):
+            if mark is not None and not self.dry_run:
+                self._mutate_state(lambda s: s.pop("keyUnserved", None))
+            return None
+        if self.dry_run:
+            return float("inf")
+        now = self.clock()
+        if isinstance(mark, dict) and mark.get("account") == current:
+            since = mark.get("since")
+            if isinstance(since, (int, float)) and since <= now:
+                return now - since
+        self._mutate_state(
+            lambda s: s.update(keyUnserved={"account": current, "since": now})
+        )
+        return 0.0
+
     def _check_provider_refusal(self, current: str, state: dict) -> None:
         """Read this profile's transcripts since ``current`` went on duty:
         a refused turn means the provider stopped serving it (block it,
@@ -1905,11 +1946,14 @@ class AutoSwitchEngine:
         usage: dict,
         headroom: dict,
         quarantined: set,
+        *,
+        keyless: bool = False,
     ) -> TickOutcome:
         """Switch off an account on duty that may not stay there, to the
         target the strategy would pick for a forced move: readable accounts
         with room by the strategy's ranking, then (staying being no option)
-        any other one in rotation that is not known dead."""
+        any other one in rotation that is not known dead. ``keyless``: only
+        while the key on duty still serves none."""
         candidates = [
             n for n in self.switcher.switchable_account_numbers()
             if n != current and n not in quarantined
@@ -1950,6 +1994,7 @@ class AutoSwitchEngine:
             ))
             return TickOutcome.BLOCKED
         self._leaving = current
+        self._leaving_keyless = keyless
         try:
             return self._freshen_and_switch(
                 ordered, LEAVE_TRIGGER, entries, (None, float("inf")),
@@ -1957,6 +2002,7 @@ class AutoSwitchEngine:
             )
         finally:
             self._leaving = None
+            self._leaving_keyless = False
 
     def _freshen_and_switch(
         self,
@@ -3326,6 +3372,14 @@ class AutoSwitchEngine:
                         detail=f"account {self._leaving} was already left",
                     ))
                     return TickOutcome.NO_ACTION
+                if self._leaving_keyless and not self.switcher.key_unserved_over_login(
+                    self._leaving
+                ):
+                    self._emit(NoSwitchEvent(
+                        reason="key-served-again",
+                        detail=f"API key #{self._leaving} no longer needs leaving",
+                    ))
+                    return TickOutcome.NO_ACTION
 
             result = self.switcher.switch_to(number, json_output=True)
             if not result or not result.get("switched"):
@@ -3759,6 +3813,8 @@ class AutoSwitchEngine:
                 return NO_RESET_FALLBACK_S
             # Blocked on something that can resolve with the next reading
             # (hysteresis, unreadable usage): wait for one.
+        elif outcome is TickOutcome.NO_ACTION and self._key_confirming:
+            return MIN_TICK_S
         elif outcome is TickOutcome.NO_ACTION and self._idle_hold_slow:
             # Idle-hold: Claude is idle on an expired token — nothing changes
             # until the user comes back, so crawl. Worst case protection

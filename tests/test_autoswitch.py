@@ -1952,6 +1952,20 @@ class TestAdaptiveScheduler:
 
 
 
+DUTY_KEY = "sk-ant-api03-" + "k" * 40
+
+
+def _serve_key(h, ago: float = 3600.0) -> None:
+    """Hand account 1's key to the sessions, as a switch to it does."""
+    from claude_rotater import api_key_mode
+
+    h.switcher._write_account_credentials("1", "key@token.local", DUTY_KEY)
+    assert api_key_mode.activate(
+        DUTY_KEY, h.switcher.backup_dir, h.temp_home / ".claude",
+        keychain=False, now=h.clock.now - ago,
+    ) is None
+
+
 class TestApiKeyAccounts:
     def _mark_api_key(self, harness, num: int) -> None:
         data = harness.switcher._get_sequence_data()
@@ -2001,6 +2015,7 @@ class TestApiKeyAccounts:
         h.seed(2, "b@example.com")
         h.make_live("key@token.local", 1)
         self._mark_api_key(h, 1)
+        _serve_key(h)
         outcome = h.tick_with_usage({"1": "api key", "2": _usage(10)})
         assert outcome is TickOutcome.NO_ACTION
         assert [e.reason for e in h.events if isinstance(e, NoSwitchEvent)] == [
@@ -2086,6 +2101,7 @@ class TestKeyOnDuty:
         h.seed(2, "b@example.com")
         h.make_live("key@token.local", 1)
         TestApiKeyAccounts._mark_api_key(None, h, 1)
+        _serve_key(h)
         self.sent: list = []
         h.engine._login_notifier.send = lambda title, body: self.sent.append(body)
         return h
@@ -2157,7 +2173,10 @@ class TestKeyOnDuty:
 
     def test_account_first_returns_after_the_dwell(self, temp_home):
         h = self._harness(temp_home)
-        h.engine._mutate_state(lambda state: state.update(lastSwitchAt=h.clock.now - 60))
+        from claude_rotater import api_key_mode
+
+        api_key_mode.forget_key(h.switcher.backup_dir)  # a key keeps its start
+        _serve_key(h, ago=60)
         assert h.tick_with_usage({"1": "api key", "2": _usage(10)}) is TickOutcome.NO_ACTION
         assert [e.reason for e in h.events if isinstance(e, NoSwitchEvent)] == ["key-dwell"]
         h.clock.advance(api_keys_dwell())
@@ -2181,6 +2200,275 @@ class TestKeyOnDuty:
         TestApiKeyAccounts._mark_api_key(None, h, 2)
         assert h.tick_with_usage({"1": _usage(10), "2": "api key"}) is TickOutcome.SWITCHED
         assert h.active_number() == 2
+
+
+class TestKeyOnDutyServesNone:
+    """api_key_mode fails closed: a key on duty that serves none, over a
+    login, is left by the forced-leave path once that is more than a moment."""
+
+    USAGE = {"1": "api key", "2": _usage(40)}
+    OTHER = "sk-ant-api03-" + "o" * 40
+
+    @pytest.fixture
+    def make(self, temp_home, monkeypatch):
+        from claude_rotater import api_key_mode
+
+        monkeypatch.setattr(api_key_mode, "_use_keychain", lambda: False)
+
+        def make(**settings) -> EngineHarness:
+            settings.setdefault("include_api_key_accounts", True)
+            h = EngineHarness(temp_home, **settings)
+            h.seed(1, "key@token.local")
+            h.seed(2, "b@example.com")
+            h.make_live("key@token.local", 1)
+            TestApiKeyAccounts._mark_api_key(None, h, 1)
+            _serve_key(h)
+            return h
+
+        return make
+
+    @staticmethod
+    def _revoke(h) -> None:
+        from claude_rotater import api_key_mode
+
+        api_key_mode.forget_key(h.switcher.backup_dir)
+
+    @staticmethod
+    def _reasons(h) -> list[str]:
+        return [e.reason for e in h.events if isinstance(e, NoSwitchEvent)]
+
+    @staticmethod
+    def _moves(h) -> list[SwitchEvent]:
+        return [e for e in h.events if isinstance(e, SwitchEvent)]
+
+    def _second_key(self, h) -> None:
+        h.seed(3, "third@token.local")
+        TestApiKeyAccounts._mark_api_key(None, h, 3)
+        h.switcher._write_account_credentials("3", "third@token.local", self.OTHER)
+
+    def _confirm(self, h, usage=None) -> TickOutcome:
+        from claude_rotater import autoswitch
+
+        h.clock.advance(autoswitch.MIN_TICK_S)
+        return h.tick_with_usage(usage or self.USAGE)
+
+    @pytest.mark.parametrize("broken", ["revoked", "no-copy", "other-copy", "no-helper"])
+    def test_leaves_by_the_forced_path(self, make, broken):
+        from claude_rotater import api_key_mode
+
+        h = make()
+        data = h.switcher.backup_dir
+        if broken == "revoked":
+            self._revoke(h)
+        elif broken == "no-copy":
+            (data / api_key_mode.KEY_FILENAME).unlink()
+        elif broken == "other-copy":
+            (data / api_key_mode.KEY_FILENAME).write_text(self.OTHER)
+        else:
+            (h.temp_home / ".claude" / "settings.json").write_text("{}")
+        assert h.tick_with_usage(self.USAGE) is TickOutcome.NO_ACTION
+        assert self._reasons(h) == ["key-not-served"]
+        assert self._confirm(h) is TickOutcome.SWITCHED
+        assert h.active_number() == 2
+        assert self._moves(h)[0].trigger == "leave"
+        assert "serving no key" in self._moves(h)[0].reason
+        assert h.switcher._read_account_credentials("1", "key@token.local") == DUTY_KEY
+
+    @pytest.mark.parametrize("settings", [
+        {"mode": "manual"},
+        {"mode": "manual", "manual_limit_guard": False},
+        {"include_api_key_accounts": False},
+    ], ids=["manual", "manual-no-guard", "keys-off"])
+    def test_no_setting_keeps_sessions_stuck_on_it(self, make, settings):
+        h = make(**settings)
+        self._revoke(h)
+        h.tick_with_usage(self.USAGE)
+        assert self._confirm(h) is TickOutcome.SWITCHED
+        assert h.active_number() == 2
+
+    def test_api_first_does_not_keep_it(self, make):
+        from claude_rotater.settings import set_setting
+
+        h = make()
+        set_setting(h.switcher.backup_dir, "accounts.order", "api-first")
+        self._revoke(h)
+        h.tick_with_usage(self.USAGE)
+        assert self._confirm(h) is TickOutcome.SWITCHED
+
+    def test_another_key_can_take_over(self, make):
+        h = make()
+        self._second_key(h)
+        self._revoke(h)
+        usage = {"1": "api key", "2": _usage(100), "3": "api key"}
+        h.tick_with_usage(usage)
+        assert self._confirm(h, usage) is TickOutcome.SWITCHED
+        assert h.active_number() == 3
+        assert h.switcher._handed_out_key() == self.OTHER
+
+    def test_a_disabled_one_is_still_left_at_once(self, make):
+        h = make()
+        self._revoke(h)
+        h.switcher.set_account_disabled("1", True)
+        assert h.tick_with_usage(self.USAGE) is TickOutcome.SWITCHED
+
+    def test_a_second_look_must_be_a_moment_later(self, make):
+        h = make()
+        self._revoke(h)
+        for _ in range(3):  # ticks woken back to back
+            assert h.tick_with_usage(self.USAGE) is TickOutcome.NO_ACTION
+        assert h.active_number() == 1
+        assert self._reasons(h) == ["key-not-served"] * 3
+
+    def test_the_second_look_comes_soon(self, make):
+        from claude_rotater import autoswitch
+
+        h = make()
+        self._revoke(h)
+        outcome = h.tick_with_usage(self.USAGE)
+        not_due = {
+            num: UsageEntry(sentinel="api key", next_poll_at=h.clock.now + 900)
+            for num in self.USAGE
+        }
+        with patch.object(h.switcher, "usage_entries_by_account", return_value=not_due):
+            assert h.engine._next_delay(outcome) == autoswitch.MIN_TICK_S
+
+    def test_separate_once_runs_confirm_it(self, make):
+        h = make()
+        self._revoke(h)
+        h.tick_with_usage(self.USAGE)
+        h.engine = h._make_engine()
+        assert self._confirm(h) is TickOutcome.SWITCHED
+
+    def test_a_clock_set_back_starts_the_count_over(self, make):
+        h = make()
+        self._revoke(h)
+        h.tick_with_usage(self.USAGE)
+        h.clock.advance(-3600)
+        assert h.tick_with_usage(self.USAGE) is TickOutcome.NO_ACTION
+        assert self._confirm(h) is TickOutcome.SWITCHED
+
+    @pytest.mark.parametrize("name", ["active-key", "api-key-mode.json"])
+    def test_a_single_failed_read_is_no_reason(self, make, monkeypatch, name):
+        from claude_rotater import api_key_mode
+
+        h = make(include_api_key_accounts=False)
+        real = api_key_mode.read_text_with_retry
+
+        def fail(path, **kwargs):
+            if path.name == name:
+                raise PermissionError("busy")
+            return real(path, **kwargs)
+
+        with monkeypatch.context() as m:
+            m.setattr(api_key_mode, "read_text_with_retry", fail)
+            assert h.tick_with_usage(self.USAGE) is TickOutcome.NO_ACTION
+        assert self._reasons(h) == ["key-not-served"]
+        self._confirm(h)
+        assert h.active_number() == 1 and not self._moves(h)
+
+    def test_being_served_again_starts_the_count_over(self, make):
+        h = make(include_api_key_accounts=False)
+        self._revoke(h)
+        h.tick_with_usage(self.USAGE)
+        _serve_key(h, ago=0)
+        self._confirm(h)
+        assert h.active_number() == 1
+        self._revoke(h)
+        assert self._confirm(h) is TickOutcome.NO_ACTION
+        assert self._reasons(h)[-1] == "key-not-served"
+        assert h.active_number() == 1
+
+    def test_served_again_before_the_switch_lands_stays(self, make, monkeypatch):
+        h = make()
+        self._revoke(h)
+        h.tick_with_usage(self.USAGE)
+
+        def freshen(number, email):
+            _serve_key(h, ago=0)
+            return "ok"
+
+        monkeypatch.setattr(h.engine, "_freshen_target", freshen)
+        assert self._confirm(h) is TickOutcome.NO_ACTION
+        assert h.active_number() == 1
+        assert self._reasons(h)[-1] == "key-served-again"
+
+    def test_the_gap_of_a_key_to_key_switch_is_no_reason(self, make, monkeypatch):
+        from claude_rotater import api_key_mode
+
+        h = make(include_api_key_accounts=False)
+        self._second_key(h)
+        usage = {**self.USAGE, "3": "api key"}
+        write_mode, seen = api_key_mode._write_mode, []
+
+        def tick_then_write(*args):
+            h.tick_with_usage(usage)  # the new key stored, the old still named
+            seen.extend(self._reasons(h))
+            write_mode(*args)
+
+        monkeypatch.setattr(api_key_mode, "_write_mode", tick_then_write)
+        h.switcher.platform = Platform.LINUX
+        h.switcher.switch_to("3", json_output=True)
+        assert seen == ["key-not-served"]
+        self._confirm(h, usage)
+        assert h.active_number() == 3 and not self._moves(h)
+
+    def test_a_keychain_that_cannot_be_read_is_no_reason(self, make, monkeypatch):
+        from claude_rotater import api_key_mode, macos_keychain
+
+        h = make(include_api_key_accounts=False)
+        (h.switcher.backup_dir / api_key_mode.KEY_FILENAME).unlink()
+        monkeypatch.setattr(api_key_mode, "_use_keychain", lambda: True)
+
+        def locked(*args):
+            raise macos_keychain.KeychainError("locked")
+
+        monkeypatch.setattr(macos_keychain, "get_password", locked)
+        h.tick_with_usage(self.USAGE)
+        self._confirm(h)
+        assert h.active_number() == 1
+        assert self._reasons(h) == ["active-api-key"] * 2
+
+    @pytest.mark.parametrize(
+        ("value", "degraded"),
+        [('{"claudeAiOauth": {"accessToken": "stale"}}', True), (None, False)],
+        ids=["keychain-denied", "read-failed"],
+    )
+    def test_a_login_that_cannot_be_read_is_no_reason(self, make, monkeypatch, value, degraded):
+        from claude_rotater.credentials import ActiveCredentials
+
+        h = make(include_api_key_accounts=False)
+        self._revoke(h)
+        unreadable = ActiveCredentials(value, False, degraded)
+        monkeypatch.setattr(h.switcher, "_read_active_credentials", lambda: unreadable)
+        h.tick_with_usage(self.USAGE)
+        self._confirm(h)
+        assert h.active_number() == 1
+        assert self._reasons(h) == ["active-api-key"] * 2
+
+    def test_nowhere_to_go_says_so(self, make):
+        h = make()
+        self._revoke(h)
+        usage = {"1": "api key", "2": _usage(100)}
+        h.tick_with_usage(usage)
+        assert self._confirm(h, usage) is TickOutcome.BLOCKED
+        assert h.active_number() == 1
+        assert self._reasons(h)[-1] == "held-out-no-target"
+
+    def test_the_hourly_switch_budget_holds_it(self, make):
+        h = make(max_switches_per_hour=1)
+        self._revoke(h)
+        h.tick_with_usage(self.USAGE)
+        h.engine._mutate_state(lambda state: state.update(autoSwitchTimes=[h.clock.now]))
+        self._confirm(h)
+        assert h.active_number() == 1 and not self._moves(h)
+
+    def test_a_dry_run_reports_the_move_and_writes_nothing(self, make):
+        h = make()
+        self._revoke(h)
+        h.engine = h._make_engine(dry_run=True)
+        assert h.tick_with_usage(self.USAGE) is TickOutcome.SWITCHED
+        assert h.active_number() == 1
+        assert h.state() == {}
 
 
 def api_keys_dwell() -> float:
