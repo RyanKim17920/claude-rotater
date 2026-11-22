@@ -2753,6 +2753,10 @@ class TestFeedInTheLoop:
         watchers: list = []
 
         class RecordingWatcher(feed_watch.FeedWatcher):
+            def __init__(self, *args):
+                # the polling backend's 5 s period equals the wait below
+                super().__init__(*args, poll_s=0.05)
+
             def start(self):
                 watchers.append(self)
                 return super().start()
