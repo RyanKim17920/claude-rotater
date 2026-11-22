@@ -17,8 +17,7 @@ uv tool install git+https://github.com/RyanKim17920/claude-rotater
 rota --version
 ```
 
-Upgrade with `uv tool upgrade claude-rotater`. While the repository is
-private, git needs GitHub access to it (for example via `gh auth login`).
+Upgrade with `uv tool upgrade claude-rotater`.
 
 Works on macOS, Linux and Windows. On macOS, stored logins live in the
 Keychain. On other systems they are files readable only by you (mode 0600).
