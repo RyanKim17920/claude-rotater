@@ -71,7 +71,7 @@ from contextlib import contextmanager
 from pathlib import Path
 
 from claude_rotater.exceptions import ClaudeCodeLockTimeout
-from claude_rotater.fsutil import is_transient_win_error
+from claude_rotater.fsutil import is_transient_win_error, rmdir_with_retry
 from claude_rotater.paths import get_claude_config_home, get_global_config_path
 
 # Claude Code's credential-refresh locks run ``stale: 60000, update: 5000``
@@ -218,7 +218,7 @@ def proper_lockfile(
         stop_touching.set()
         toucher.join(timeout=1.0)
         try:
-            os.rmdir(lock_dir)
+            rmdir_with_retry(lock_dir)
         except FileNotFoundError:
             _logger.warning(
                 "Lock %s vanished while held (taken over as stale?)", lock_dir

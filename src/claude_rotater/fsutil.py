@@ -100,3 +100,17 @@ def replace_with_retry(
     only after the attempt budget — a ~0.75 s delay in the worst case.
     """
     _retry_transient(lambda: os.replace(src, dst), attempts, initial_delay)
+
+
+def rmdir_with_retry(
+    path: os.PathLike | str,
+    *,
+    attempts: int = 10,
+    initial_delay: float = 0.002,
+) -> None:
+    """``os.rmdir``, retried past transient Windows sharing failures.
+
+    A lock release that gives up on the first refusal leaves the directory
+    behind, and every other writer waits until it goes stale (up to 60 s).
+    """
+    _retry_transient(lambda: os.rmdir(path), attempts, initial_delay)

@@ -519,3 +519,43 @@ class TestWindowsAcquireRace:
             with claude_credentials_lock(timeout=1.0):
                 pass
         assert not primary.exists()
+
+
+class TestWindowsReleaseRace:
+    @pytest.fixture
+    def warnings(self, monkeypatch):
+        seen = []
+        monkeypatch.setattr(
+            claude_locks._logger, "warning", lambda *args: seen.append(args)
+        )
+        return seen
+
+    @pytest.mark.parametrize("winerror", [5, 32, 33])
+    def test_refused_rmdir_is_retried(
+        self, lock_dir, monkeypatch, platform, warnings, winerror
+    ):
+        platform("win32")
+        error = _win_error(winerror)
+        with proper_lockfile(lock_dir):
+            calls = _fault(monkeypatch, "rmdir", lock_dir, error, error, error)
+        assert len(calls) == 4
+        assert not lock_dir.exists()
+        assert warnings == []
+
+    def test_persistent_refusal_warns_after_bounded_retries(
+        self, lock_dir, monkeypatch, platform, warnings
+    ):
+        platform("win32")
+        with proper_lockfile(lock_dir):
+            calls = _fault(monkeypatch, "rmdir", lock_dir, forever=_win_error(5))
+        assert len(calls) == 10
+        assert len(warnings) == 1
+
+    def test_posix_release_tries_once(
+        self, lock_dir, monkeypatch, platform, warnings
+    ):
+        platform("linux")
+        with proper_lockfile(lock_dir):
+            calls = _fault(monkeypatch, "rmdir", lock_dir, forever=_win_error(5))
+        assert len(calls) == 1
+        assert len(warnings) == 1
