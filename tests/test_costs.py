@@ -52,7 +52,7 @@ def entry(t: float, msg: str, *, model: str = "claude-opus-4-7", out: int = 1000
 
 def write(path: Path, *records: dict, raw: str = "") -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
-    with open(path, "a") as fh:
+    with open(path, "a", newline="\n") as fh:  # the CLI writes \n on Windows too
         for r in records:
             fh.write(json.dumps(r) + "\n")
         fh.write(raw)
@@ -134,6 +134,10 @@ class TestFindRunner:
 def fake_binary(tmp_path: Path, body: str) -> list[str]:
     script = tmp_path / "fake-ccusage"
     script.write_text(f"#!{sys.executable}\nimport json, os, sys\n{body}\n")
+    if sys.platform == "win32":  # no shebangs: a .cmd shim, as npm installs
+        shim = script.with_suffix(".cmd")
+        shim.write_text(f'@"{sys.executable}" "{script}" %*\n')
+        return [str(shim)]
     script.chmod(script.stat().st_mode | stat.S_IXUSR)
     return [str(script)]
 
