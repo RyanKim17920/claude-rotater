@@ -1997,6 +1997,23 @@ class TestMainPage:
             assert app.screen.query_one("#event-log").display
             assert "boom" in log_plain(app)
 
+    @pytest.mark.parametrize("size", [(60, 24), (80, 24), (120, 40)])
+    async def test_a_long_event_wraps_instead_of_being_cut(self, tmp_path, fake_engine, size):
+        from textual.widgets import RichLog
+
+        from claude_rotater.autoswitch import ErrorEvent
+
+        message = "staying would leave some of the week unused and the next one resets later, so END"
+        app = make_app(three_accounts(tmp_path))
+        async with app.run_test(size=size) as pilot:
+            await settle(pilot)
+            await emit(fake_engine.instances[0], ErrorEvent(message=message))
+            await settle(pilot)
+            log = app.screen.query_one("#event-log", RichLog)
+            assert log.max_scroll_x == 0  # no scrollbar taking one of the log's rows
+            shown = " ".join(log.render_line(y).text for y in range(log.size.height))
+            assert "END" in shown
+
     @pytest.mark.parametrize("size", [(80, 24), (60, 20)])
     async def test_narrow_terminal(self, tmp_path, size):
         fake = three_accounts(tmp_path)

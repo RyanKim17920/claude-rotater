@@ -1679,7 +1679,7 @@ class MainScreen(Screen):
             yield ListView(id="accounts")
             yield _Painted("detail_text", id="detail")
             # Hidden until the first event: an empty log would only be a blank band.
-            log = RichLog(id="event-log", highlight=False, markup=False, wrap=False, max_lines=50)
+            log = RichLog(id="event-log", highlight=False, markup=False, wrap=True, min_width=1, max_lines=50)
             log.display = False
             yield log
         config = ConfigView(self.app.switcher.backup_dir, id="config")
