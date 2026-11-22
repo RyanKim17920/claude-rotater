@@ -124,7 +124,8 @@ class Screen:
         raise SystemExit(f"a marked text is not on its screen: {text!r}")
 
 
-def read_screen(path: Path, size: list[int]) -> Screen:
+def read_screen(path: Path, size: list[int], hide=None) -> Screen:
+    """``hide(col, row, ch)`` true leaves that cell's glyph out (its colour stays)."""
     cols, rows = size
     image = Image.new("RGB", (cols * CELL_W, rows * CELL_H), SCREEN_BG)
     draw = ImageDraw.Draw(image)
@@ -151,6 +152,8 @@ def read_screen(path: Path, size: list[int]) -> Screen:
                     fg, bg = bg, fg
                 bold, under = bool(style.bold), bool(style.underline)
             draw.rectangle((x, y, x + CELL_W - 1, y + CELL_H - 1), fill=tuple(bg))
+            if hide is not None and hide(c, r, ch):
+                continue
             draw_cell(draw, x, y, ch, tuple(fg), bold)
             if under:
                 draw.rectangle((x, y + 41, x + CELL_W - 1, y + 42), fill=tuple(fg))
@@ -267,8 +270,9 @@ def write_mp4(shots: list[Shot], end: dict, out: Path) -> None:
         raise SystemExit("ffmpeg could not write the video")
 
 
-def write_gif(video: Path, out: Path) -> None:
-    for width, fps in ((GIF_W, GIF_FPS), (GIF_W, 6), (880, 5)):
+def write_gif(video: Path, out: Path, max_bytes: int = GIF_MAX_BYTES,
+              tries=((GIF_W, GIF_FPS), (GIF_W, 6), (880, 5))) -> None:
+    for width, fps in tries:
         scale = f"fps={fps},scale={width}:-2:flags=lanczos"
         palette = out.with_suffix(".palette.png")
         subprocess.run(ffmpeg("-i", str(video), "-vf", f"{scale},palettegen=max_colors=96:stats_mode=full",
@@ -277,10 +281,10 @@ def write_gif(video: Path, out: Path) -> None:
                               f"{scale}[v];[v][1:v]paletteuse=dither=none:diff_mode=rectangle",
                               "-loop", "0", str(out)), check=True)
         palette.unlink()
-        if out.stat().st_size < GIF_MAX_BYTES:
+        if out.stat().st_size < max_bytes:
             print(f"gif: {width}px at {fps} fps, {out.stat().st_size} bytes")
             return
-    raise SystemExit("the GIF does not fit in 10 MB")
+    raise SystemExit(f"the GIF does not fit in {max_bytes} bytes")
 
 
 def write_sheet(shots: list[Shot], end: dict, out: Path) -> None:
