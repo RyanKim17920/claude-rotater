@@ -2651,16 +2651,82 @@ def test_no_modal_screens_remain():
         assert ".notify(" not in inspect.getsource(module), info.name  # no toasts
 
 
+LOGIN_URL = "https://example.invalid/oauth/authorize?state=abc"
+
+
+class FakeSession:
+    """Stands in for login_pty.PtyLogin. ``script``: "ok" signs in at once
+    (the browser callback); "wait" shows the URL and waits for a code
+    ("good" signs in, anything else is refused) or a cancel."""
+
+    def __init__(self, on_progress, script, fail):
+        from claude_rotater.login_pty import LoginProgress
+
+        self.on_progress = on_progress
+        self.script = script
+        self.fail = fail
+        self.codes: list[str] = []
+        self.cancelled = threading.Event()
+        self._wake = threading.Event()
+        self.progress = LoginProgress()
+        self._problems = 0
+
+    def _publish(self, **kw):
+        from claude_rotater.login_pty import LoginProgress
+
+        self.progress = LoginProgress(**{"url": LOGIN_URL, "asks_for_code": True, **kw})
+        self.on_progress(self.progress)
+
+    def run(self):
+        from claude_rotater.exceptions import LoginCancelled
+
+        if self.fail is not None:
+            raise self.fail
+        self._publish()
+        if self.script == "wait":
+            seen = 0
+            while "good" not in self.codes:
+                if not self._wake.wait(10) or self.cancelled.is_set():
+                    raise LoginCancelled("Login cancelled; nothing was stored.")
+                self._wake.clear()
+                for _bad in self.codes[seen:]:  # the CLI answers on its own thread
+                    if _bad != "good":
+                        self._problems += 1
+                        self._publish(message="Invalid code.", messages=self._problems)
+                seen = len(self.codes)
+        self._publish(succeeded=True)
+
+    def send_code(self, code):
+        self.codes.append(code)
+        self._wake.set()
+        return True
+
+    def cancel(self):
+        self.cancelled.set()
+        self._wake.set()
+
+
 class FakeStage:
     """Stands in for login.StagedLogin; records the TUI's calls."""
 
     instances: list["FakeStage"] = []
 
-    def __init__(self, backup_dir, *, fail=None):
+    def __init__(self, backup_dir, *, fail=None, script="ok"):
         self.backup_dir = backup_dir
         self.fail = fail
+        self.script = script
+        self.session: FakeSession | None = None
         self.events: list = []
         FakeStage.instances.append(self)
+
+    def pty_login(self, *, on_progress, method="claudeai", email=None):
+        self.events.append(("authenticate", email))
+        self.session = FakeSession(on_progress, self.script, self.fail)
+        return self.session
+
+    def finish_pty(self, session):
+        session.run()
+        return {"loggedIn": True}
 
     def authenticate(self, *, method="claudeai", email=None):
         self.events.append(("authenticate", email))
@@ -2677,14 +2743,21 @@ class FakeStage:
         self.events.append(("cleanup",))
 
 
-def login_app(fake, monkeypatch, *, fail=None, suspend_ok=True):
+def login_app(fake, monkeypatch, *, fail=None, suspend_ok=True, pty=True, script="ok"):
+    """The app with a fake login. ``pty=False`` is a system without
+    pseudo-terminals: the login falls back to suspending the app."""
     import contextlib
 
+    from claude_rotater.tui import app as app_mod
     from claude_rotater.tui.app import RotaApp
     from textual.app import SuspendNotSupported
 
     FakeStage.instances = []
-    app = RotaApp(fake, login_factory=lambda d: FakeStage(d, fail=fail))
+    monkeypatch.setattr(app_mod, "pty_supported", lambda: pty)
+    opened: list[str] = []
+    monkeypatch.setattr(app_mod.webbrowser, "open", lambda url: opened.append(url) or True)
+    app = RotaApp(fake, login_factory=lambda d: FakeStage(d, fail=fail, script=script))
+    app.opened_urls = opened
     suspended: list[bool] = []
 
     @contextlib.contextmanager
@@ -2700,14 +2773,14 @@ def login_app(fake, monkeypatch, *, fail=None, suspend_ok=True):
 
 @pytest.mark.asyncio
 class TestLoginAction:
-    async def test_l_logs_in_suspended_then_imports_and_cleans(self, tmp_path, monkeypatch):
+    async def test_l_logs_in_inside_the_app_then_imports_and_cleans(self, tmp_path, monkeypatch):
         app, suspended = login_app(three_accounts(tmp_path), monkeypatch)
         async with app.run_test(size=(120, 40)) as pilot:
             await settle(pilot)
             await pilot.press("l")
             await settle(pilot)
             stage, = FakeStage.instances
-            assert suspended == [True]
+            assert suspended == []  # the terminal is never handed over
             assert stage.backup_dir == tmp_path
             # a healthy row: no address pre-filled
             assert stage.events == [("authenticate", None), ("import",), ("cleanup",)]
@@ -2742,8 +2815,18 @@ class TestLoginAction:
             await settle(pilot)
             assert FakeStage.instances and ("login_import",) in fake_calls(app)
 
-    async def test_l_says_it_is_logging_in_at_once(self, tmp_path, monkeypatch):
-        app, _ = login_app(three_accounts(tmp_path), monkeypatch, suspend_ok=False)
+    async def test_without_a_pty_it_falls_back_to_the_terminal(self, tmp_path, monkeypatch):
+        app, suspended = login_app(three_accounts(tmp_path), monkeypatch, pty=False)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await settle(pilot)
+            await pilot.press("l")
+            await settle(pilot)
+            stage, = FakeStage.instances
+            assert suspended == [True]
+            assert stage.events == [("authenticate", None), ("import",), ("cleanup",)]
+
+    async def test_fallback_says_it_is_logging_in_at_once(self, tmp_path, monkeypatch):
+        app, _ = login_app(three_accounts(tmp_path), monkeypatch, suspend_ok=False, pty=False)
         async with app.run_test(size=(120, 40)) as pilot:
             await settle(pilot)
             said: list[str] = []
@@ -2751,7 +2834,7 @@ class TestLoginAction:
             app.say = lambda text, role="info": (said.append(text), say(text, role))
             await pilot.press("l")
             await settle(pilot)
-            assert said and said[0] == "logging in an account…", said
+            assert said and said[0].startswith("logging in an account in the terminal"), said
             assert "real terminal" in prompt_plain(app)  # then why it could not
 
     @pytest.mark.parametrize("cancelled", [True, False], ids=["cancel", "failure"])
@@ -2771,7 +2854,7 @@ class TestLoginAction:
             assert not app.busy
 
     async def test_no_terminal_cleans_up(self, tmp_path, monkeypatch):
-        app, _ = login_app(three_accounts(tmp_path), monkeypatch, suspend_ok=False)
+        app, _ = login_app(three_accounts(tmp_path), monkeypatch, suspend_ok=False, pty=False)
         async with app.run_test(size=(120, 40)) as pilot:
             await settle(pilot)
             await pilot.press("l")
@@ -2849,7 +2932,7 @@ class TestLoginAction:
 
     async def test_no_terminal_is_logged(self, tmp_path, monkeypatch, caplog):
         caplog.set_level("INFO", logger="rota")
-        app, _ = login_app(three_accounts(tmp_path), monkeypatch, suspend_ok=False)
+        app, _ = login_app(three_accounts(tmp_path), monkeypatch, suspend_ok=False, pty=False)
         async with app.run_test(size=(120, 40)) as pilot:
             await settle(pilot)
             await pilot.press("l")
@@ -2877,6 +2960,130 @@ class TestLoginAction:
         assert "Login failed: ValidationError: <email> token <token> rejected" in lines
         assert "Action failed: Log in: <email> token <token> rejected" in lines
         assert "Login finished" not in lines
+
+    @staticmethod
+    async def _until(pilot, pred, tries=200):
+        for _ in range(tries):
+            if pred():
+                return True
+            await pilot.pause(0.02)
+        return False
+
+    async def test_the_prompt_line_shows_progress_and_takes_a_code(self, tmp_path, monkeypatch):
+        app, suspended = login_app(three_accounts(tmp_path), monkeypatch, script="wait")
+        async with app.run_test(size=(160, 40)) as pilot:
+            await settle(pilot)
+            await pilot.press("l")
+            assert await self._until(pilot, lambda: "finish in the browser" in prompt_plain(app))
+            assert prompt_plain(app).startswith("sign-in code:")
+            assert "^o open" in prompt_plain(app) and "^y copy link" in prompt_plain(app)
+            await pilot.press(*"bad", "enter")
+            assert await self._until(pilot, lambda: "Invalid code." in prompt_plain(app))
+            assert "bad" not in prompt_plain(app)
+            await pilot.press(*"bad2", "enter")  # the same refusal again still shows
+            assert await self._until(pilot, lambda: FakeStage.instances[0].session.codes == ["bad", "bad2"])
+            assert await self._until(pilot, lambda: "Invalid code." in prompt_plain(app))
+            await pilot.press(*"good", "enter")
+            await settle(pilot)
+            assert ("login_import",) in fake_calls(app)
+            assert FakeStage.instances[0].events[-1] == ("cleanup",)
+            assert not app.prompt.is_open and not app.busy and suspended == []
+            assert "Added Account 4" in prompt_plain(app)
+
+    async def test_ctrl_o_opens_and_ctrl_y_copies_the_link(self, tmp_path, monkeypatch):
+        from claude_rotater import clipboard
+
+        copied: list[str] = []
+        monkeypatch.setattr(clipboard, "system_copy", lambda text: copied.append(text) or True)
+        app, _ = login_app(three_accounts(tmp_path), monkeypatch, script="wait")
+        async with app.run_test(size=(160, 40)) as pilot:
+            await settle(pilot)
+            await pilot.press("l")
+            assert await self._until(pilot, lambda: "finish in the browser" in prompt_plain(app))
+            await pilot.press("ctrl+o")
+            assert app.opened_urls == [LOGIN_URL]
+            assert "opened the sign-in page" in prompt_plain(app)
+            await pilot.press("ctrl+y")
+            assert copied == [LOGIN_URL] and "copied the sign-in link" in prompt_plain(app)
+            assert app.prompt.is_open
+            await pilot.press("escape")
+            await settle(pilot)
+
+    async def test_esc_cancels_the_login_and_stores_nothing(self, tmp_path, monkeypatch):
+        from claude_rotater.tui.main import MainScreen
+
+        app, _ = login_app(three_accounts(tmp_path), monkeypatch, script="wait")
+        async with app.run_test(size=(160, 40)) as pilot:
+            await settle(pilot)
+            await pilot.press("l")
+            assert await self._until(pilot, lambda: "finish in the browser" in prompt_plain(app))
+            await pilot.press("escape")
+            await settle(pilot)
+            stage, = FakeStage.instances
+            assert stage.session.cancelled.is_set()
+            assert stage.events == [("authenticate", None), ("cleanup",)]
+            assert ("login_import",) not in fake_calls(app)
+            assert prompt_plain(app) == "log in cancelled; nothing was stored"
+            assert isinstance(app.screen, MainScreen) and not app.busy
+
+    async def test_quitting_mid_login_cancels_it(self, tmp_path, monkeypatch):
+        app, _ = login_app(three_accounts(tmp_path), monkeypatch, script="wait")
+        async with app.run_test(size=(160, 40)) as pilot:
+            await settle(pilot)
+            await pilot.press("l")
+            assert await self._until(pilot, lambda: "finish in the browser" in prompt_plain(app))
+            session = FakeStage.instances[0].session
+        assert session.cancelled.is_set()
+
+    async def test_a_login_error_is_said_after_the_entry_closes(self, tmp_path, monkeypatch):
+        from claude_rotater.exceptions import LoginError
+
+        app, _ = login_app(
+            three_accounts(tmp_path), monkeypatch, fail=LoginError("Login did not complete: boom")
+        )
+        async with app.run_test(size=(160, 40)) as pilot:
+            await settle(pilot)
+            await pilot.press("l")
+            await settle(pilot)
+            assert not app.prompt.is_open and not app.busy
+            assert prompt_plain(app) == "log in: Login did not complete: boom"
+
+    @pytest.mark.skipif(sys.platform == "win32", reason="no pseudo-terminals")
+    async def test_end_to_end_with_a_fake_cli_in_a_real_pty(self, tmp_path, monkeypatch):
+        """The real PtyLogin and StagedLogin, driving the fake CLI script:
+        the URL arrives, a pasted code reaches it, the stage is confirmed,
+        imported and removed, and the app never suspends."""
+        from claude_rotater.login import StagedLogin
+        from claude_rotater.tui.app import RotaApp
+
+        fake_cli = Path(__file__).parent / "fixtures" / "fake_login_cli.py"
+        script = tmp_path / "fake-cli"
+        script.write_text(
+            "#!/bin/sh\n"
+            'if [ "$2" = status ]; then echo \'{"loggedIn": true}\'; exit 0; fi\n'
+            f'FAKE_LOGIN_MODE=code exec "{sys.executable}" "{fake_cli}"\n'
+        )
+        script.chmod(0o755)
+        imported: list[str] = []
+
+        class Stage(StagedLogin):
+            def import_into(self, switcher, **_kw):
+                imported.append(self.config_dir)
+                print("Added Account 4")
+
+        fake = three_accounts(tmp_path)
+        app = RotaApp(fake, login_factory=lambda d: Stage(tmp_path / "backup", claude_bin=str(script)))
+        monkeypatch.setattr(app, "suspend", lambda: pytest.fail("the app suspended"))
+        async with app.run_test(size=(160, 40)) as pilot:
+            await settle(pilot)
+            await pilot.press("l")
+            assert await self._until(pilot, lambda: "finish in the browser" in prompt_plain(app), 500)
+            assert app._login_url.startswith("https://example.invalid/oauth/authorize")
+            await pilot.press(*"good-code", "enter")
+            await settle(pilot)
+            assert imported and not app.busy and not app.prompt.is_open
+            assert prompt_plain(app) == "Added Account 4"
+        assert list((tmp_path / "backup" / "logins").iterdir()) == []
 
     async def test_busy_app_does_not_start_a_login(self, tmp_path, monkeypatch):
         app, _ = login_app(three_accounts(tmp_path), monkeypatch)

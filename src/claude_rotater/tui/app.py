@@ -22,6 +22,7 @@ import json
 import logging
 import threading
 import time
+import webbrowser
 from dataclasses import replace
 from functools import partial
 from typing import Callable, Protocol
@@ -44,9 +45,10 @@ from claude_rotater.estimator import AccountEstimate
 from claude_rotater.forecast import fleet_estimates
 from claude_rotater import statusline_setup
 from claude_rotater.credentials import looks_like_api_key
-from claude_rotater.exceptions import ClaudeSwitchError, LoginError
+from claude_rotater.exceptions import ClaudeSwitchError, LoginCancelled, LoginError
 from claude_rotater.instance import EngineLock, warn_if_not_owner
 from claude_rotater.login import StagedLogin
+from claude_rotater.login_pty import LoginProgress, PtyLogin, pty_supported
 from claude_rotater.logging_config import redact
 from claude_rotater.token_refresh import RefreshEvent, TokenRefresher
 from claude_rotater.models import AccountsSnapshot
@@ -88,6 +90,19 @@ def _log_login_failure(e: BaseException) -> None:
     """Record why a login did not land: the exception's class and its
     message, with emails and tokens masked."""
     _logger.warning("Login failed: %s: %s", type(e).__name__, redact(e))
+
+
+def login_note(progress: LoginProgress) -> str:
+    """The prompt line's note for a login in progress: what to do next."""
+    if progress.succeeded:
+        return "signed in; saving the login…"
+    if progress.signing_in:
+        return "signing in…"
+    if progress.message:
+        return progress.message
+    if progress.url:
+        return "finish in the browser, or paste the code it shows · ^o open · ^y copy link"
+    return "starting the sign-in…"
 
 
 class EngineLike(Protocol):
@@ -198,6 +213,8 @@ class RotaApp(App):
         self._detected = detected  # terminal background sensed pre-driver, or None
         self._engine_factory = engine_factory or default_engine_factory
         self._login_factory = login_factory or StagedLogin
+        self._login_session: PtyLogin | None = None  # the login on the prompt line
+        self._login_url: str | None = None
         self._refresher_factory = refresher_factory or default_refresher_factory
         self.refresher: TokenRefresher | None = None
         self.engine_lock = EngineLock(switcher.backup_dir)
@@ -292,6 +309,9 @@ class RotaApp(App):
         self._tick()
 
     def on_unmount(self) -> None:
+        session, self._login_session = self._login_session, None
+        if session is not None:
+            session.cancel()  # never leave the CLI's login running behind us
         self._stop_engine()
         self.engine_lock.release()
         refresher, self.refresher = self.refresher, None
@@ -1012,21 +1032,125 @@ class RotaApp(App):
 
     LOGIN_BANNER = (
         "\nrota: logging in {who} in a separate profile.\n"
+        "This system has no pseudo-terminals, so the login runs here.\n"
         "Your active account is not touched. Ctrl+C cancels.\n"
     )
+    LOGIN_LABEL = "sign-in code:"
 
     def start_login(self, email: str | None = None) -> None:
         """Log an account in (or re-login a dead one) without touching the
-        active login. The interactive ``claude auth login`` runs with the app
-        suspended so its browser / paste-code flow owns the terminal; the
-        capture runs in a worker. The stage is removed on every path."""
+        active login and without leaving the app: the CLI's own ``claude
+        auth login`` runs in a pseudo-terminal of its own (login_pty) while
+        the prompt line shows its progress, takes a pasted code, opens or
+        copies the link, and esc cancels. The capture runs in the same
+        worker. The stage is removed on every path."""
         if self.busy:
             self.say("another action is still running", "warn")
             return
         _logger.info("Login started: %s", self._login_target(email))
-        # Seen at once, and still on screen when the app comes back.
-        self.say(f"logging in {email or 'an account'}…")
         stage = self._login_factory(self.switcher.backup_dir)
+        if not pty_supported():
+            self._login_in_terminal(stage, email)
+            return
+        try:
+            session = stage.pty_login(email=email, on_progress=self._login_progress_from_thread)
+        except LoginError as e:
+            stage.cleanup()
+            _log_login_failure(e)
+            self.say(f"log in: {e}", "warn")
+            return
+        self.busy = True
+        self._login_session, self._login_url = session, None
+        self._open_login_prompt(session, f"starting the sign-in for {email or 'an account'}…")
+        self.run_worker(
+            partial(self._login_blocking, stage, session),
+            thread=True,
+            group="action",
+            exit_on_error=False,
+            name="Log in",
+        )
+
+    def _open_login_prompt(self, session: PtyLogin, note: str) -> None:
+        self.prompt.read(
+            self.LOGIN_LABEL,
+            partial(self._on_login_code, session),
+            secret=True,
+            note=note,
+            keys={"ctrl+o": self._login_open_browser, "ctrl+y": self._login_copy_url},
+        )
+
+    def _login_progress_from_thread(self, progress: LoginProgress) -> None:
+        try:
+            self.call_from_thread(self._login_progress, progress)
+        except RuntimeError:
+            pass  # the app is gone; the session is being cancelled
+
+    def _login_progress(self, progress: LoginProgress) -> None:
+        if self._login_session is None:
+            return
+        self._login_url = progress.url or self._login_url
+        self.prompt.update(note=login_note(progress))
+
+    def _on_login_code(self, session: PtyLogin, code: str | None) -> None:
+        """The prompt line's answer: esc cancels, a code goes to the CLI."""
+        if self._login_session is not session:
+            return  # the login already ended and closed its own prompt
+        if code is None:
+            self._login_session = None
+            session.cancel()
+            self.say("log in cancelled; nothing was stored", "warn")
+            return
+        note = "checking the code…" if code and session.send_code(code) else login_note(session.progress)
+        self._open_login_prompt(session, note)
+
+    def _login_open_browser(self) -> None:
+        if self._login_url is None:
+            self.prompt.update(note="no sign-in link yet")
+            return
+        opened = webbrowser.open(self._login_url)
+        self.prompt.update(note="opened the sign-in page" if opened else "no browser here: ^y copies the link")
+
+    def _login_copy_url(self) -> None:
+        if self._login_url is None:
+            self.prompt.update(note="no sign-in link yet")
+            return
+        self.prompt.update(note=f"copied the sign-in link{self._copy(self._login_url)}")
+
+    def _login_blocking(self, stage: StagedLogin, session: PtyLogin) -> None:
+        """Worker thread: run the login to its end, then store it."""
+        try:
+            stage.finish_pty(session)
+        except BaseException as e:  # noqa: BLE001 -- reported on the prompt line
+            stage.cleanup()
+            _log_login_failure(e)
+            self.call_from_thread(self._login_failed, session, e)
+            return
+        self.call_from_thread(self._login_closed, session)
+        self._action_blocking("Log in", partial(self._import_login, stage), True)
+
+    def _login_closed(self, session: PtyLogin) -> None:
+        """The login ended by itself: take its entry off the prompt line."""
+        if self._login_session is session:
+            self._login_session = None
+            self.prompt.cancel()
+
+    def _login_failed(self, session: PtyLogin, e: BaseException) -> None:
+        was_open = self._login_session is session
+        self._login_closed(session)
+        self.busy = False
+        if isinstance(e, LoginCancelled):
+            if was_open:  # esc already said so
+                self.say(f"log in: {e}", "warn")
+        elif isinstance(e, LoginError):
+            self.say(f"log in: {e}", "warn")
+        else:
+            self.say(f"log in failed: {e}", "error")
+
+    def _login_in_terminal(self, stage: StagedLogin, email: str | None) -> None:
+        """Fallback where there are no pseudo-terminals: hand the terminal to
+        the CLI's login with the app suspended."""
+        # Seen at once, and still on screen when the app comes back.
+        self.say(f"logging in {email or 'an account'} in the terminal (no pseudo-terminal here)…")
         try:
             with self.suspend():
                 print(self.LOGIN_BANNER.format(who=email or "an account"), flush=True)
@@ -1257,11 +1381,14 @@ class RotaApp(App):
     def copy_text(self, text: str, what: str) -> None:
         """Put ``text`` on the clipboard: the system's clipboard command,
         else the terminal's OSC 52; confirm on the prompt line."""
+        self.say(f"copied {what}{self._copy(text)}", "ok")
+
+    def _copy(self, text: str) -> str:
+        """Copy ``text``; returns "" or " (via the terminal)" for OSC 52."""
         if clipboard.system_copy(text):
-            self.say(f"copied {what}", "ok")
-        else:
-            self.copy_to_clipboard(text)  # OSC 52: the terminal does the copy
-            self.say(f"copied {what} (via the terminal)", "ok")
+            return ""
+        self.copy_to_clipboard(text)  # OSC 52: the terminal does the copy
+        return " (via the terminal)"
 
     def toggle_mode(self) -> None:
         """``m``: flip between auto and manual, saved in this profile's
