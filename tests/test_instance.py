@@ -82,6 +82,8 @@ class TestHolder:
 
 @pytest.mark.parametrize("args,expected", [
     ("/u/.local/share/uv/tools/claude-rotater/bin/python /u/.local/bin/rota", True),
+    ("/u/.local/share/uv/tools/rota/bin/python /u/.local/bin/rota", True),
+    ("/u/.local/share/uv/tools/rota/bin/python /u/.local/bin/rota feed", False),
     ("/u/bin/python /u/.local/bin/rota --debug", True),
     ("/u/bin/python /u/.local/bin/rota auto", True),
     ("/u/bin/python /u/.local/bin/rota auto --once", False),
