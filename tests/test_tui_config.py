@@ -188,7 +188,7 @@ class TestLayout:
         app = Host(tmp_path)
         async with app.run_test(size=(120, 40)) as pilot:
             await pilot.pause()
-            line = next(l for l in plain(app).splitlines() if "Include API-key" in l)
+            line = next(ln for ln in plain(app).splitlines() if "Include API-key" in ln)
             assert "● on" in line
 
     async def test_defaults_and_custom_markers(self, tmp_path):
@@ -197,11 +197,11 @@ class TestLayout:
         async with app.run_test(size=(120, 40)) as pilot:
             await pilot.pause()
             lines = plain(app).splitlines()
-            thr = next(l for l in lines if "Threshold" in l)
-            cool = next(l for l in lines if "Cooldown" in l)
+            thr = next(ln for ln in lines if "Threshold" in ln)
+            cool = next(ln for ln in lines if "Cooldown" in ln)
             assert "80%" in thr and "custom" in thr and "300s" in cool
             assert "custom" not in cool and "default" not in cool  # a default row is quiet
-            assert sum("custom" in l for l in lines) == 1
+            assert sum("custom" in ln for ln in lines) == 1
 
     @pytest.mark.parametrize("size", [(80, 24), (60, 20)])
     async def test_narrow_terminal_footer_wraps_full_help(self, tmp_path, size):
@@ -212,7 +212,7 @@ class TestLayout:
             full = spec_detail(lst(app).spec)
             assert detail.size.height >= 2  # wrapped, not cut
             assert footer(app) == full
-            assert all(len(l) <= size[0] for l in plain(app).splitlines())
+            assert all(len(ln) <= size[0] for ln in plain(app).splitlines())
             hint = screen_lines(app)[-1]
             assert hint.rstrip().endswith("esc back") and "…" not in hint  # whole, not cut
             # no mid-sentence cut help in the rows: the footer carries it
@@ -568,21 +568,36 @@ class TestResetAndNotify:
             assert app.changes == ["autoswitch.threshold"]
 
     async def test_notifications_are_debounced_per_key(self, tmp_path):
-        # The delay must outlast a stall between key presses on a loaded
-        # machine (xdist), or the burst fires early and the test flakes.
-        app = Host(tmp_path, delay=1.0)
+        # Deterministic: the delay is far longer than any test run, so no
+        # timer can fire mid-burst however slow the machine is. What the
+        # debounce owes is one live timer per key, restarted by each step.
+        app = Host(tmp_path, delay=3600.0)
         async with app.run_test(size=(120, 40)) as pilot:
             await pilot.pause()
             await go_to(pilot, app, "autoswitch.threshold")
             await pilot.press(*["right"] * 12)
             assert section(tmp_path, "autoswitch") == {"threshold": 99.9}  # written at once
+            view = app.query_one(ConfigView)
             assert app.changes == []
-            for _ in range(50):
-                await pilot.pause(0.1)
+            assert list(view._pending) == ["autoswitch.threshold"]
+            view.flush()
+            await pilot.pause()
+            assert app.changes == ["autoswitch.threshold"]
+            assert view._pending == {}
+
+    async def test_a_debounced_notification_fires_after_the_delay(self, tmp_path):
+        # One step, so a stall can only delay the message, never split it.
+        app = Host(tmp_path, delay=0.05)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            await go_to(pilot, app, "autoswitch.threshold")
+            await pilot.press("right")
+            for _ in range(100):
+                await pilot.pause(0.05)
                 if app.changes:
                     break
-            await pilot.pause(0.3)  # no second notification trails the first
             assert app.changes == ["autoswitch.threshold"]
+            assert app.query_one(ConfigView)._pending == {}
 
     async def test_closing_flushes_pending_notifications(self, tmp_path):
         app = Host(tmp_path, delay=10.0)
