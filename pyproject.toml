@@ -1,5 +1,5 @@
 [project]
-name = "claude-rotater"
+name = "rota"
 version = "0.1.0"
 description = "rota: multi-account rotation for Claude Code"
 readme = "README.md"
@@ -27,7 +27,7 @@ classifiers = [
 ]
 
 [project.urls]
-Repository = "https://github.com/RyanKim17920/claude-rotater"
+Repository = "https://github.com/RyanKim17920/rota"
 
 [project.scripts]
 rota = "claude_rotater.entry:main"
