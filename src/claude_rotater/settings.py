@@ -298,7 +298,7 @@ SETTING_SPECS: dict[str, SettingSpec] = {
         SettingSpec(
             "autoswitch", "includeApiKeyAccounts", "include_api_key_accounts", "bool",
             help="Let auto-switch use API-key accounts (billed per token); "
-            "when is the API keys setting",
+            "the API keys setting decides when",
             group="autoswitch", label="Include API-key accounts",
         ),
         SettingSpec(

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import argparse
 import json
 import os
 import subprocess
@@ -717,6 +718,23 @@ class TestTuiDispatch:
         out = " ".join(capsys.readouterr().out.split())
         assert "runs this same engine live" in out
         assert "--dry-run" in out and "--once" in out
+
+    def test_api_key_flag_help_matches_the_setting_default(self, capsys):
+        """The flag's help states the default the engine really uses: the
+        setting, which is on (keys take a turn, ranked by accounts.order)."""
+        from claude_rotater.settings import AutoSwitchSettings, merged_with_cli
+
+        with patch.object(sys, "argv", ["rota", "auto", "--help"]):
+            with pytest.raises(SystemExit):
+                cli.main()
+        out = " ".join(capsys.readouterr().out.split())
+        assert "default: excluded" not in out
+        assert "autoswitch.includeApiKeyAccounts setting, on" in out
+        assert AutoSwitchSettings().include_api_key_accounts is True
+        no_flag = argparse.Namespace(include_api_key_accounts=None)
+        assert merged_with_cli(AutoSwitchSettings(), no_flag).include_api_key_accounts is True
+        off = argparse.Namespace(include_api_key_accounts=False)
+        assert merged_with_cli(AutoSwitchSettings(), off).include_api_key_accounts is False
 
 
 def test_importing_the_module_allocates_no_temp_dir(tmp_path, tmp_path_factory):
