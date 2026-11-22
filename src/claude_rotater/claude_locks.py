@@ -207,7 +207,9 @@ def proper_lockfile(
         while not stop_touching.wait(TOUCH_INTERVAL_S):
             try:
                 os.utime(lock_dir)
-            except OSError:
+            except OSError as e:
+                if is_transient_win_error(e):
+                    continue  # still ours; stopping would let it go stale
                 return  # lock stolen/removed; nothing left to keep alive
 
     toucher = threading.Thread(target=_touch, daemon=True)

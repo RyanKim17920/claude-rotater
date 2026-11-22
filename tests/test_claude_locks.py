@@ -559,3 +559,38 @@ class TestWindowsReleaseRace:
             calls = _fault(monkeypatch, "rmdir", lock_dir, forever=_win_error(5))
         assert len(calls) == 1
         assert len(warnings) == 1
+
+
+class TestWindowsTouchRace:
+    @pytest.fixture(autouse=True)
+    def _fast_touch(self, monkeypatch):
+        monkeypatch.setattr(claude_locks, "TOUCH_INTERVAL_S", 0.01)
+
+    @staticmethod
+    def _wait_for(condition) -> bool:
+        deadline = time.monotonic() + 10
+        while not condition() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        return condition()
+
+    def test_refused_touch_keeps_touching(self, lock_dir, monkeypatch, platform):
+        """Giving up would let a live hold go stale and be stolen."""
+        platform("win32")
+        error = _win_error(5)
+        calls = _fault(monkeypatch, "utime", lock_dir, error, error)
+        with proper_lockfile(lock_dir):
+            assert self._wait_for(lambda: len(calls) >= 4)
+
+    @pytest.mark.parametrize(
+        ("name", "error"),
+        [("linux", _win_error(5)), ("win32", FileNotFoundError())],
+    )
+    def test_real_failure_stops_touching(
+        self, lock_dir, monkeypatch, platform, name, error
+    ):
+        platform(name)
+        calls = _fault(monkeypatch, "utime", lock_dir, forever=error)
+        with proper_lockfile(lock_dir):
+            assert self._wait_for(lambda: len(calls) >= 1)
+            time.sleep(0.2)
+            assert len(calls) == 1
