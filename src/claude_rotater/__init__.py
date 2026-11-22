@@ -18,9 +18,13 @@ __all__ = ["ClaudeAccountSwitcher", "__version__"]
 
 def __getattr__(name: str):
     if name == "__version__":
-        from importlib.metadata import version
+        from importlib.metadata import PackageNotFoundError, version
 
-        value = version("claude-rotater")
+        try:
+            value = version("rota")
+        except PackageNotFoundError:
+            # An editable install made before the rename keeps its old metadata.
+            value = version("claude-rotater")
     elif name == "ClaudeAccountSwitcher":
         from claude_rotater.switcher import ClaudeAccountSwitcher as value
     else:

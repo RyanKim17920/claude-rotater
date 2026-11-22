@@ -8,11 +8,13 @@ import os
 import subprocess
 import sys
 import threading
+from importlib.metadata import PackageNotFoundError
 from pathlib import Path
 from unittest.mock import patch
 
 import pytest
 
+import claude_rotater
 from claude_rotater import __version__
 from claude_rotater import cli
 
@@ -61,6 +63,32 @@ def _subprocess_env(**extra: str) -> dict[str, str]:
         if var not in extra:
             env.pop(var, None)
     return env
+
+
+@pytest.mark.parametrize(
+    "installed, expected",
+    [
+        ({"rota": "2"}, "2"),
+        # An editable install made before the rename, running renamed source.
+        ({"claude-rotater": "1"}, "1"),
+        ({"rota": "2", "claude-rotater": "1"}, "2"),
+        ({}, None),
+    ],
+)
+def test_version_reads_new_or_pre_rename_metadata(monkeypatch, installed, expected):
+    def version(name):
+        if name in installed:
+            return installed[name]
+        raise PackageNotFoundError(name)
+
+    monkeypatch.setattr("importlib.metadata.version", version)
+    # The attribute caches itself in the module; undo that after the test.
+    monkeypatch.setitem(vars(claude_rotater), "__version__", None)
+    if expected is None:
+        with pytest.raises(PackageNotFoundError):
+            claude_rotater.__getattr__("__version__")
+    else:
+        assert claude_rotater.__getattr__("__version__") == expected
 
 
 class TestCLI:
