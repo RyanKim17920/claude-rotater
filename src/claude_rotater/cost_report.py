@@ -284,6 +284,11 @@ class ModelLine:
     cache_read: int
     trend: float | None  # last 7 days vs the 7 before, as a fraction; None: no base
 
+    @property
+    def unpriced(self) -> bool:
+        """Tokens with no cost at all: no rate, not free."""
+        return self.cost == 0 and any((self.input, self.output, self.cache_write, self.cache_read))
+
 
 @dataclass(frozen=True)
 class AccountLine:
@@ -320,6 +325,8 @@ class CostReport:
     unattributed: float  # spend no duty span covers
     built_at: float
     took_s: float
+    # models with tokens ccusage had no rate for: the dollars leave them out
+    unpriced: tuple[str, ...] = ()
 
 
 def _change(now: float, prev: float) -> float | None:
@@ -383,10 +390,11 @@ def build_report(
         if r.slot >= today_start:
             today += r.cost
     month = sum(m[0] for m in per_model.values())
+    unpriced = {model_name(r.model) for r in rows if r.unpriced}
     models = tuple(sorted(
         (ModelLine(name, m[0], m[0] / month if month else 0.0, int(m[1]), int(m[2]),
                    int(m[3]), int(m[4]), _change(m[5], m[6]))
-         for name, m in per_model.items() if m[0] >= 0.005),
+         for name, m in per_model.items() if m[0] >= 0.005 or name in unpriced),
         key=lambda line: -line.cost,
     ))
     accounts = []
@@ -431,6 +439,7 @@ def build_report(
         unattributed=max(0.0, per_account.get(UNATTRIBUTED, 0.0)),
         built_at=cache.built_at,
         took_s=cache.took_s,
+        unpriced=tuple(sorted(unpriced)),
     )
 
 
@@ -549,9 +558,10 @@ class CostSource:
         now = self.clock()
         sources = self._sources()
         cache = costs.load_cache(self.backup_dir)
-        if not force and costs.is_current(cache, sources, now):
-            return CostResult(self._report(cache, sources, identities, now))
         runner = self.find_runner()
+        if (not force and costs.is_current(cache, sources, now)
+                and not (runner and costs.needs_pricing(cache, runner))):
+            return CostResult(self._report(cache, sources, identities, now))
         if runner is None:
             report = self._report(cache, sources, identities, now) if cache else None
             return CostResult(report, costs.MISSING_HINT)

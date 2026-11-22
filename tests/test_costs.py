@@ -471,6 +471,106 @@ class TestRefresh:
             costs.refresh(None, source(home), ["x"], now, run=broken)
 
 
+NEW_MODEL = "claude-fable-9-9"  # one an older price table has never heard of
+
+
+def knows_no_new_model(calls: list | None = None):
+    """:func:`fake_ccusage` with a price table older than :data:`NEW_MODEL`:
+    its tokens are counted at $0, as ccusage does for a model it cannot price."""
+    priced = fake_ccusage(calls)
+
+    def run(runner, config_dir: Path) -> dict:
+        out = priced(runner, config_dir)
+        for session in out["sessions"]:
+            for b in session["modelBreakdowns"]:
+                if b["modelName"] == NEW_MODEL:
+                    b["cost"] = 0.0
+        return out
+
+    return run
+
+
+class TestUnpriced:
+    OLD, NEW = ["/bin/bunx", "ccusage@1.0.0"], ["/bin/bunx", "ccusage@2.0.0"]
+
+    def test_a_newer_ccusage_prices_the_kept_slots_it_had_no_rate_for(self, home, now):
+        write(home / "projects" / "p" / "a.jsonl", entry(now - 5 * 86400, "o"),
+              entry(now - 3 * 86400, "n1", model=NEW_MODEL, out=2000),
+              entry(now - 600, "n2", model=NEW_MODEL, out=3000))
+        first = costs.refresh(None, source(home), self.OLD, now, run=knows_no_new_model())
+        assert sum(r.cost for r in first.rows) == pytest.approx(1.0)
+        assert costs.needs_pricing(first, self.NEW)
+        second = costs.refresh(first, source(home), self.NEW, now, run=fake_ccusage())
+        assert second.rows == costs.refresh(None, source(home), self.NEW, now,
+                                            run=fake_ccusage()).rows
+        assert not costs.needs_pricing(second, self.NEW)
+        assert costs.is_current(second, source(home), now)
+
+    def test_repricing_keeps_rows_whose_transcripts_are_gone(self, home, now):
+        gone = write(home / "projects" / "p" / "gone.jsonl",
+                     entry(now - 4 * 86400, "lost", model=NEW_MODEL),
+                     entry(now - 2 * 86400, "lost-priced", out=7000))
+        write(home / "projects" / "p" / "a.jsonl",
+              entry(now - 3 * 86400, "here", model=NEW_MODEL, out=2000))
+        first = costs.refresh(None, source(home), self.OLD, now, run=knows_no_new_model())
+        gone.unlink()
+        second = costs.refresh(first, source(home), self.NEW, now, run=fake_ccusage())
+        assert sorted((r.model, r.cost, r.output) for r in second.rows) == sorted([
+            (NEW_MODEL, 0.0, 1000), (NEW_MODEL, 2.0, 2000), ("claude-opus-4-7", 7.0, 7000)])
+
+    def test_the_same_ccusage_is_not_asked_about_the_kept_slots_again(self, tmp_path, home, now):
+        f = write(home / "projects" / "p" / "a.jsonl",
+                  entry(now - 3 * 86400, "n1", model=NEW_MODEL))
+        touch(f, now - 3 * 86400)
+        calls: list = []
+        first = costs.refresh(None, source(home), self.OLD, now, run=knows_no_new_model(calls))
+        costs.save_cache(tmp_path, first)
+        first = costs.load_cache(tmp_path)
+        assert not costs.needs_pricing(first, self.OLD)
+        costs.refresh(first, source(home), self.OLD, now, run=knows_no_new_model(calls))
+        assert len(calls) == 1
+
+    def test_a_cache_from_before_the_pricer_was_kept_is_retried_once(self, now):
+        unpriced = costs.Row("s0", int(costs.day_start(now, 2)), NEW_MODEL, 0.0, 5, 5, 5, 5)
+        assert costs.needs_pricing(make_cache([unpriced], now), self.OLD)
+        priced = costs.Row("s0", unpriced.slot, NEW_MODEL, 1.0, 5, 5, 5, 5)
+        empty = costs.Row("s0", unpriced.slot, NEW_MODEL, 0.0, 0, 0, 0, 0)
+        assert not costs.needs_pricing(make_cache([priced, empty], now), self.NEW)
+
+    def test_a_sub_microdollar_cost_still_reads_as_priced_after_a_reload(self):
+        row = costs.Row("s0", 900, "claude-haiku-5-5", 4e-7, 4, 0, 0, 0)
+        assert not costs.Row.from_json(row.to_json()).unpriced
+
+    def test_an_upgraded_installed_ccusage_is_another_pricer(self, tmp_path):
+        binary = tmp_path / "ccusage"
+        binary.write_text("1")
+        before = costs.pricer_id([str(binary)])
+        newer = tmp_path / "newer"
+        newer.write_text("22")
+        newer.replace(binary)  # an upgrade lays down another file
+        assert costs.pricer_id([str(binary)]) != before
+        assert costs.pricer_id(self.OLD) != costs.pricer_id(self.NEW)
+
+    def test_opening_the_view_reprices_a_current_cache_once_the_pin_moves(
+            self, tmp_path, home, now):
+        f = write(home / "projects" / "p" / "a.jsonl",
+                  entry(now - 3 * 86400, "n1", model=NEW_MODEL, out=2000))
+        touch(f, now - 3 * 86400)
+
+        def make(runner, run):
+            return cr.CostSource(tmp_path / ".rota", FakeHistory({}), [home],
+                                 find_runner=lambda: runner, run=run, clock=lambda: now,
+                                 other_profiles=lambda: [],
+                                 store_path=tmp_path / dpp.STORE_FILENAME)
+
+        first = make(self.OLD, knows_no_new_model()).refresh({}).report
+        assert first.month == 0 and first.unpriced == ("Fable 9.9",)
+        assert [m.name for m in first.models] == ["Fable 9.9"]
+        second = make(self.NEW, fake_ccusage()).refresh({})
+        assert second.ran and second.report.month == pytest.approx(2.0)
+        assert second.report.unpriced == ()
+
+
 # -- attribution ---------------------------------------------------------------------------
 
 

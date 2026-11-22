@@ -22,7 +22,9 @@ for the costs view's whole-history chart) plus, for every transcript written sin
 of the day it was built, the byte offset where that day begins. Transcripts
 are append-only, so a refresh rereads only the lines from that offset on and
 reprices only the slots from that day on; a reopen with no transcript
-changed since (same sizes) prices nothing at all.
+changed since (same sizes) prices nothing at all. The exception: slots holding
+tokens a ccusage had no rate for (:attr:`Row.unpriced`) are priced again
+when another ccusage runs (:func:`needs_pricing`).
 """
 
 from __future__ import annotations
@@ -85,6 +87,19 @@ def find_runner(which: Callable[[str], str | None] = shutil.which) -> list[str] 
     if path := which("npx"):
         return [path, "-y", f"ccusage@{CCUSAGE_VERSION}"]
     return None
+
+
+def pricer_id(runner: list[str]) -> str:
+    """Which price table ``runner`` brings: the pinned package, else the
+    installed binary as it is on disk now (an upgrade replaces it)."""
+    if len(runner) > 1:
+        return runner[-1]
+    try:
+        real = os.path.realpath(runner[0])
+        st = os.stat(real)
+    except OSError:
+        return runner[0]
+    return f"{real}:{st.st_ino}:{st.st_ctime_ns}"
 
 
 def run_ccusage(runner: list[str], config_dir: Path, *, timeout: float = RUNNER_TIMEOUT_S) -> dict:
@@ -150,8 +165,14 @@ class Row:
         """The four counts in :data:`TOKEN_KINDS` order."""
         return (self.input, self.cache_write, self.cache_read, self.output)
 
+    @property
+    def unpriced(self) -> bool:
+        """Tokens at $0: ccusage counts them so for a model it has no rate for."""
+        return self.cost == 0 and sum(self.tokens) > 0
+
     def to_json(self) -> list:
-        return [self.source, self.slot, self.model, round(self.cost, 6),
+        # nine places: one token of the cheapest kind must not round to $0
+        return [self.source, self.slot, self.model, round(self.cost, 9),
                 self.input, self.output, self.cache_write, self.cache_read]
 
     @classmethod
@@ -441,6 +462,7 @@ class CostCache:
     # the same days' token counts per model (Tokens), kept apart so an older
     # rota that rewrites the cache keeps the dollars it knows
     archive_tokens: dict[float, dict[str, Tokens]] = field(default_factory=dict)
+    pricer: str = ""  # :func:`pricer_id` of the last ccusage that priced it
 
     def to_json(self) -> dict:
         return {
@@ -449,6 +471,7 @@ class CostCache:
             "sources": self.sources,
             "builtAt": self.built_at,
             "tookS": round(self.took_s, 3),
+            "pricer": self.pricer,
             "offsets": self.offsets,
             "rows": [row.to_json() for row in self.rows],
             "archive": {str(int(day)): {m: round(usd, 4) for m, usd in models.items()}
@@ -476,6 +499,7 @@ class CostCache:
             },
             built_at=float(built),
             took_s=float(raw.get("tookS") or 0.0) if _num(raw.get("tookS")) else 0.0,
+            pricer=str(raw.get("pricer") or ""),
             archive=_archive_from_json(raw.get("archive")),
             archive_tokens=_archive_tokens_from_json(raw.get("archiveTokens")),
         )
@@ -574,6 +598,13 @@ def is_current(cache: CostCache | None, sources: list[Source], now: float) -> bo
     return True
 
 
+def needs_pricing(cache: CostCache | None, runner: list[str]) -> bool:
+    """Whether ``cache`` holds tokens without a price and ``runner`` is not
+    the ccusage that failed to price them (so it is worth asking once)."""
+    return (cache is not None and cache.pricer != pricer_id(runner)
+            and any(r.unpriced for r in cache.rows))
+
+
 def refresh(
     cache: CostCache | None,
     sources: list[Source],
@@ -585,7 +616,10 @@ def refresh(
     """Reprice what changed since ``cache`` was built (everything without one).
 
     Slots before the cache's boundary are kept as priced; the ones after are
-    rebuilt from the transcripts' stored offsets on. Slots older than
+    rebuilt from the transcripts' stored offsets on. When another ccusage
+    may have the rate a kept slot lacks, the transcripts are read again from
+    that day on and only such slots take the new price: one whose
+    transcript is gone keeps its tokens. Slots older than
     :data:`RANGE_DAYS` days are folded into the per-day archive, which
     bounds the cache.
     """
@@ -596,17 +630,24 @@ def refresh(
     archive = fold(cache.archive, aged) if cache else {}
     archive_tokens = fold_tokens(cache.archive_tokens, aged) if cache else {}
     if cache is None or cache.sources != paths or cache.boundary < lo:
-        since, offsets, kept = lo, {}, []
+        rebuilt_from, offsets, kept = lo, {}, []
     else:
-        since, offsets = cache.boundary, cache.offsets
-        kept = [r for r in cache.rows if lo <= r.slot < since]
+        rebuilt_from, offsets = cache.boundary, cache.offsets
+        kept = [r for r in cache.rows if lo <= r.slot < rebuilt_from]
+    since = rebuilt_from
+    if kept and needs_pricing(cache, runner):
+        if stale := [r.slot for r in kept if r.unpriced]:
+            since, offsets = day_start(min(stale)), {}
     boundary = day_start(now)
     with tempfile.TemporaryDirectory(prefix="rota-costs-") as tmp:
         dst = Path(tmp)
         (dst / "projects").mkdir()
         sliced = slice_transcripts(sources, since, boundary, dst, offsets)
         fresh = parse_sessions(run(runner, dst), [s.key for s in sources]) if sliced.records else []
-    rows = kept + [r for r in fresh if r.slot >= since]
+    priced = {(r.source, r.slot, r.model): r
+              for r in fresh if r.slot < rebuilt_from and not r.unpriced}
+    rows = [priced.get((r.source, r.slot, r.model), r) if r.unpriced else r for r in kept]
+    rows += [r for r in fresh if r.slot >= rebuilt_from]
     return CostCache(
         boundary=boundary,
         sources=paths,
@@ -616,4 +657,5 @@ def refresh(
         took_s=time.monotonic() - started,
         archive=archive,
         archive_tokens=archive_tokens,
+        pricer=pricer_id(runner),
     )
