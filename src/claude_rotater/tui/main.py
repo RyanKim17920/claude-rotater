@@ -452,7 +452,7 @@ _MAX_TAG_W = 16  # "login ends 5h03m"
 _MIN_NAME_W = 8
 _MAX_NAME_W = 32
 _FORECAST_W = 22  # "elsewhere ~7d in 2d23h", "~Fable limit in 15h"
-_FORECAST_SHORT_W = 10  # "~7d in 15h"
+_FORECAST_SHORT_W = 12  # "~7d in 2d23h"
 
 
 @dataclass(frozen=True)

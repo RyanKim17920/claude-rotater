@@ -4730,6 +4730,17 @@ class TestCopy:
             assert copied == []
 
 
+@pytest.mark.parametrize("short", ["~7d in 2d23h", "~5h in 55m", "~7d in 3d4h"])
+def test_a_forecast_in_days_fits_the_short_cell_whole(short):
+    from claude_rotater.tui.main import LEVELS, Forecast, RowLayout, forecast_text
+
+    level = next(lv for lv in LEVELS if lv.forecast and not lv.long_forecast)
+    layout = RowLayout(80, ("5h", "7d"), 10, 0, level)
+    cell = forecast_text(Forecast(short, short, "crit", True), layout.forecast_w,
+                         long=False, palette=Palette.DARK).plain
+    assert cell.strip() == short
+
+
 def test_elsewhere_forecast_words():
     from claude_rotater.tui.main import Forecast, elsewhere_forecast
 
