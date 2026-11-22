@@ -54,6 +54,8 @@ class TestParsePayload:
         "data",
         [b"", b"not json", b"[]", b"42", b'"x"', b"{}", b'{"rate_limits": null}',
          b'{"rate_limits": {}}', b"\xff\xfe", b"[" * 100000],
+        # pytest puts the id in the environment, capped at 32767 chars on Windows
+        ids=lambda data: f"{len(data)}:{data[:24]!r}",
     )
     def test_garbage_and_missing_limits_give_none(self, data):
         assert feed.parse_payload(data, NOW, environ={}) is None
