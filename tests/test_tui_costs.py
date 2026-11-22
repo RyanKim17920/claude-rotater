@@ -297,6 +297,21 @@ def test_the_page_lists_every_model_with_spend_when_there_is_room():
 # -- the money views ------------------------------------------------------------------
 
 
+def test_a_model_without_a_price_says_so_rather_than_zero_dollars():
+    rep = dataclasses.replace(report(), unpriced=("Fable 9.9",))
+    line = ModelLine("Fable 9.9", 0.0, 0.0, 4000, 900_000, 2_000_000, 80_000_000, None)
+    assert line.unpriced and not rep.models[0].unpriced
+    row = next(t.plain for t in view.model_lines([*rep.models, line], 118, 12, P, {})
+               if "Fable 9.9" in t.plain)
+    assert "no rate" in row and "$0" not in row and "0%" not in row and "new" not in row
+    assert "80M" in row  # its tokens are still counted
+    for width in (60, 80, 120):
+        summary = view.summary_text(rep, P)
+        summary.truncate(width, overflow="ellipsis")
+        assert "no rate: Fable 9.9" in summary.plain
+    assert "no rate" not in view.summary_text(report(), P).plain
+
+
 def test_group_sums_runs_aligned_to_the_end():
     series = [(float(i), {"a": 1.0, "b": float(i)}) for i in range(7)]
     assert view.group(series, 3) == [

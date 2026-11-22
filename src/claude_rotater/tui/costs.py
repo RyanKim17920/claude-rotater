@@ -348,7 +348,8 @@ def hint_keys(view: str, unit: str = DOLLARS) -> tuple[tuple[str, str], ...]:
 
 
 def summary_text(report: CostReport, palette: Palette, *, status: str = "") -> Text:
-    """``today $35 · 7d $1,392 · 30d $5,757   ↑ 18% vs last week``."""
+    """``today $35 · 7d $1,392 · 30d $5,757   ↑ 18% vs last week``; models
+    ccusage had no rate for are named before the trend, as left out."""
     text = Text(no_wrap=True, overflow="ellipsis")
     for i, (label, usd) in enumerate((("today", report.today), ("7d", report.week),
                                       ("30d", report.month))):
@@ -356,6 +357,8 @@ def summary_text(report: CostReport, palette: Palette, *, status: str = "") -> T
             text.append(" · ", style=palette.muted)
         text.append(f"{label} ", style=palette.muted)
         text.append(money(usd), style=f"bold {palette.foreground}")
+    if report.unpriced:
+        text.append(f"   no rate: {', '.join(report.unpriced)}", style=palette.sev_warn)
     if words := trend_words(report.week_change):
         text.append(f"   {words} vs last week", style=palette.foreground)
     if status:
@@ -973,13 +976,15 @@ def model_columns(name_w: int, width: int, trend: bool) -> list[tuple[str, int]]
 def _model_cells(m: ModelLine, cols: Sequence[tuple[str, int]], palette: Palette,
                  strong: str) -> list[tuple[str, int, str]]:
     values = {
-        "cost": (money(m.cost), f"bold {strong}"),
-        "share": (f"{m.share * 100:.0f}%", palette.foreground),
+        "cost": (("no rate", palette.sev_warn) if m.unpriced
+                 else (money(m.cost), f"bold {strong}")),
+        "share": ("–" if m.unpriced else f"{m.share * 100:.0f}%", palette.foreground),
         "input": (tokens(m.input), palette.muted),
         "cache w": (tokens(m.cache_write), palette.muted),
         "cache r": (tokens(m.cache_read), palette.muted),
         "output": (tokens(m.output), palette.muted),
-        "7d": ("" if m.name.endswith(" other") else (trend_words(m.trend) or arrow(m.trend)),
+        "7d": ("" if m.unpriced or m.name.endswith(" other")
+               else (trend_words(m.trend) or arrow(m.trend)),
                palette.foreground),
     }
     return [(values[h][0], w, values[h][1]) for h, w in cols]
