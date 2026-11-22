@@ -1426,3 +1426,31 @@ class TestARemovedKeyIsNeverServed:
         s.add_account_from_token(API_KEY, email=self.EMAIL, slot=5)
         assert "2" not in s._get_sequence_data()["accounts"]
         assert self._served(s) == API_KEY
+
+    @pytest.mark.parametrize("slot", [None, 2, 5], ids=["in-place", "same-slot", "moved"])
+    def test_a_replaced_key_on_duty_hands_out_the_new_one(self, s, slot):
+        s.switch_to("2", json_output=True)
+        s.add_account_from_token(PERSONAL_KEY, email=self.EMAIL, slot=slot)
+        assert self._served(s) == PERSONAL_KEY
+        assert s.current_account_number() == str(slot or 2)
+
+    def test_replacing_a_key_off_duty_hands_out_nothing(self, s):
+        s.add_account_from_token(PERSONAL_KEY, email=self.EMAIL)
+        assert self._served(s) is None
+        s.switch_to("3", json_output=True)
+        s.add_account_from_token(API_KEY, email=self.EMAIL)
+        assert self._served(s) == OTHER_KEY
+
+    def test_a_replaced_key_is_revoked_under_another_identity(self, s):
+        s._write_credentials(API_KEY)
+        s.add_account_from_token(PERSONAL_KEY, email=self.EMAIL)
+        assert self._served(s) is None
+
+    def test_a_replacement_that_cannot_go_in_still_revokes_the_old(self, s, monkeypatch):
+        from claude_rotater import api_key_mode
+
+        s.switch_to("2", json_output=True)
+        monkeypatch.setattr(api_key_mode, "activate", lambda *a, **k: "no room on disk")
+        with pytest.raises(CredentialWriteError):
+            s.add_account_from_token(PERSONAL_KEY, email=self.EMAIL)
+        assert self._served(s) is None

@@ -963,6 +963,23 @@ class ClaudeAccountSwitcher:
                 f"still be handed to sessions: {e}"
             ) from e
 
+    def _follow_replaced_key(self, account_num: str, old: str, new: str) -> None:
+        """``account_num``'s key went from ``old`` to ``new``: on duty, its
+        sessions get the new one; wherever it was served, the old one stops."""
+        if old == new:
+            return
+        with claude_storage_write_lock():
+            if not self._key_in_service(account_num, old):
+                return
+            if self.current_account_number() != account_num:
+                self._revoke_active_key(account_num)
+                return
+            try:
+                self._write_credentials(new)
+            except Exception:
+                self._revoke_active_key(account_num)
+                raise
+
     def _read_account_config(self, account_num: str, email: str) -> str:
         """Read account config from backup."""
         config_file = self.configs_dir / f".claude-config-{account_num}-{email}.json"
@@ -3398,6 +3415,11 @@ class ClaudeAccountSwitcher:
         # identity is matched on (email, org) only, so an api-key and an OAuth
         # account sharing an email would be indistinguishable at switch time.
         self._reject_cross_kind_collision(email, is_api_key)
+        replaced: str | None = None  # the key this account held until now
+        if is_api_key:
+            held_in = self._find_account_slot(self._get_sequence_data() or {}, email, "")
+            if held_in is not None:
+                replaced = self._read_account_credentials(held_in, email)
 
         # Build the credential payload by kind: a managed key is stored raw; an
         # OAuth setup-token is wrapped in Claude Code's credential JSON. The
@@ -3439,6 +3461,8 @@ class ClaudeAccountSwitcher:
             )
             seq["lastUpdated"] = get_timestamp()
             self._write_json(self.sequence_file, seq)
+            if replaced is not None:
+                self._follow_replaced_key(account_num, replaced, credentials)
             kind_label = "API key" if is_api_key else "token"
             self._logger.info(f"Updated {kind_label} for account {account_num}: {email}")
             print(
@@ -3536,6 +3560,8 @@ class ClaudeAccountSwitcher:
         data["lastUpdated"] = get_timestamp()
 
         self._write_json(self.sequence_file, data)
+        if replaced is not None:
+            self._follow_replaced_key(account_num, replaced, credentials)
         source_label = "API key" if is_api_key else "token"
         self._logger.info(f"Added account {account_num} from {source_label}: {email}")
         if migrate_from:
