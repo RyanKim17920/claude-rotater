@@ -108,6 +108,7 @@ def test_callback_errors_do_not_kill_the_thread(tmp_path):
     directory = str(tmp_path / "f")
     watcher = FeedWatcher(directory, feed.FEED_FILENAME, flaky, backend="poll", poll_s=0.05)
     watcher.start()
+    assert watcher.ready.wait(3.0)  # a write before arming is the baseline, not a change
     path = os.path.join(directory, feed.FEED_FILENAME)
     append(path)
     deadline = time.monotonic() + 3
