@@ -10,7 +10,11 @@ from __future__ import annotations
 import os
 import sys
 import time
+from collections.abc import Callable
 from pathlib import Path
+from typing import TypeVar
+
+_T = TypeVar("_T")
 
 # Windows error codes that usually mean "someone else has the file open right
 # now": ERROR_ACCESS_DENIED, ERROR_SHARING_VIOLATION and ERROR_LOCK_VIOLATION.
@@ -18,6 +22,31 @@ from pathlib import Path
 # also be a persistent condition (ACLs, read-only attribute), which still
 # surfaces once the bounded retries are exhausted.
 _TRANSIENT_WIN_ERRORS = frozenset({5, 32, 33})
+
+
+def is_transient_win_error(error: OSError) -> bool:
+    """Whether ``error`` is Windows contention; always False elsewhere."""
+    return (
+        sys.platform == "win32"
+        and getattr(error, "winerror", None) in _TRANSIENT_WIN_ERRORS
+    )
+
+
+def _retry_transient(
+    operation: Callable[[], _T], attempts: int, initial_delay: float
+) -> _T:
+    if attempts < 1:
+        raise ValueError("attempts must be >= 1")
+    delay = initial_delay
+    for attempt in range(attempts):
+        try:
+            return operation()
+        except OSError as e:
+            if not is_transient_win_error(e) or attempt == attempts - 1:
+                raise
+            time.sleep(delay)
+            delay = min(delay * 2, 0.25)
+    raise AssertionError("unreachable")  # pragma: no cover - loop always exits
 
 
 def read_text_with_retry(
@@ -44,22 +73,9 @@ def read_text_with_retry(
     genuine, persistent permission problem that must surface at once rather
     than after a ~0.75 s stall.
     """
-    if attempts < 1:
-        raise ValueError("attempts must be >= 1")
-    delay = initial_delay
-    for attempt in range(attempts):
-        try:
-            return Path(path).read_text(encoding="utf-8")
-        except OSError as e:
-            transient = (
-                sys.platform == "win32"
-                and getattr(e, "winerror", None) in _TRANSIENT_WIN_ERRORS
-            )
-            if not transient or attempt == attempts - 1:
-                raise
-            time.sleep(delay)
-            delay = min(delay * 2, 0.25)
-    raise AssertionError("unreachable")  # pragma: no cover - loop always exits
+    return _retry_transient(
+        lambda: Path(path).read_text(encoding="utf-8"), attempts, initial_delay
+    )
 
 
 def replace_with_retry(
@@ -83,19 +99,4 @@ def replace_with_retry(
     denial (ACLs, read-only target) matches the retried codes and so raises
     only after the attempt budget — a ~0.75 s delay in the worst case.
     """
-    if attempts < 1:
-        raise ValueError("attempts must be >= 1")
-    delay = initial_delay
-    for attempt in range(attempts):
-        try:
-            os.replace(src, dst)
-            return
-        except OSError as e:
-            transient = (
-                sys.platform == "win32"
-                and getattr(e, "winerror", None) in _TRANSIENT_WIN_ERRORS
-            )
-            if not transient or attempt == attempts - 1:
-                raise
-            time.sleep(delay)
-            delay = min(delay * 2, 0.25)
+    _retry_transient(lambda: os.replace(src, dst), attempts, initial_delay)
