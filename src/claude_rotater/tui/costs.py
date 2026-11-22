@@ -280,15 +280,23 @@ def account_label(key: str, names: dict[str, str]) -> str:
 Bucket = tuple[float, dict[str, float]]  # (start, {model: usd})
 
 
+def _runs(n: int, size: int) -> list[range]:
+    """The index runs of ``size`` that end with a series of ``n``, after a
+    short first one when they don't divide it: dropping that would leave
+    the oldest days out of "all"."""
+    short = n % size
+    starts = ([0] if short else []) + list(range(short, n, size))
+    return [range(a, b) for a, b in zip(starts, [*starts[1:], n])]
+
+
 def group(series: Sequence[Bucket], size: int) -> list[Bucket]:
     """Consecutive runs of ``size`` buckets summed, aligned so the last run
-    ends with the series (a short first run is dropped when there are more)."""
+    ends with the series (:func:`_runs`)."""
     if size <= 1:
         return list(series)
-    skip = len(series) % size if len(series) > size else 0
     out: list[Bucket] = []
-    for i in range(skip, len(series), size):
-        chunk = series[i:i + size]
+    for run in _runs(len(series), size):
+        chunk = series[run.start:run.stop]
         merged: dict[str, float] = {}
         for _, models in chunk:
             for name, usd in models.items():
@@ -301,10 +309,9 @@ def group_duty(duty: Sequence[str | None], size: int) -> list[str | None]:
     """Who was on duty most of each run :func:`group` makes."""
     if size <= 1:
         return list(duty)
-    skip = len(duty) % size if len(duty) > size else 0
     out: list[str | None] = []
-    for i in range(skip, len(duty), size):
-        seen = Counter(d for d in duty[i:i + size] if d is not None)
+    for run in _runs(len(duty), size):
+        seen = Counter(d for d in duty[run.start:run.stop] if d is not None)
         out.append(seen.most_common(1)[0][0] if seen else None)
     return out
 

@@ -299,11 +299,24 @@ def test_the_page_lists_every_model_with_spend_when_there_is_room():
 
 def test_group_sums_runs_aligned_to_the_end():
     series = [(float(i), {"a": 1.0, "b": float(i)}) for i in range(7)]
-    assert view.group(series, 3) == [(1.0, {"a": 3.0, "b": 6.0}), (4.0, {"a": 3.0, "b": 15.0})]
+    assert view.group(series, 3) == [
+        (0.0, {"a": 1.0, "b": 0.0}),  # a short first run is kept, never dropped
+        (1.0, {"a": 3.0, "b": 6.0}), (4.0, {"a": 3.0, "b": 15.0}),
+    ]
     assert view.group(series, 1) == series
     assert view.group(series[:2], 3) == [(0.0, {"a": 2.0, "b": 1.0})]  # one short run stays
-    assert view.group_duty(["1", "1", "2", None, "2", "2", "3"], 3) == ["1", "2"]
+    assert view.group_duty(["1", "1", "2", None, "2", "2", "3"], 3) == ["1", "1", "2"]
     assert view.group_duty([None] * 3, 3) == [None]
+
+
+@pytest.mark.parametrize("archive_days", [0, 3, 25, 400])
+@pytest.mark.parametrize("width", [40, 80, 120, 200])
+def test_the_total_view_counts_every_known_day_whatever_its_bars_are(archive_days, width):
+    rep = report(archive_days=archive_days)
+    every = sum(sum(day.values()) for _, day in rep.history)
+    buckets, _, _ = view.money_series(rep, "total", width)
+    assert sum(sum(b.values()) for _, b in buckets) == pytest.approx(every)
+    assert sum(m.cost for m in view.model_table(rep, "total", width)) == pytest.approx(every)
 
 
 def test_fill_days_puts_empty_days_in_the_gaps():
