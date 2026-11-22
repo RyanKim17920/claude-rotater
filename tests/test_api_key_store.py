@@ -569,3 +569,23 @@ class TestThroughTheSwitcher:
         kc.failing = frozenset()
         assert switcher.current_account_number() == "2"
         assert _served(cfg) == B
+
+    def _lose_key(self, switcher, dirs) -> None:
+        switcher.switch_to("1", json_output=True)
+        akm.forget_key(switcher.backup_dir)
+        assert _served(dirs[0]) is None
+
+    def test_a_key_slot_never_takes_the_login_under_it(self, switcher, dirs):
+        self._lose_key(switcher, dirs)
+        assert switcher.switch_to("2", json_output=True)["switched"]
+        assert switcher._read_account_credentials("1", "api-key-1@token.local") == A
+        switcher.switch_to("1", json_output=True)
+        assert _served(dirs[0]) == A
+
+    def test_a_key_slot_never_takes_another_key(self, switcher, dirs):
+        cfg, data = dirs
+        switcher.switch_to("1", json_output=True)
+        # A crash between handing B out and recording the switch to it.
+        akm.activate(B, switcher.backup_dir, cfg, keychain=True)
+        assert switcher.switch_to("2", json_output=True)["switched"]
+        assert switcher._read_account_credentials("1", "api-key-1@token.local") == A

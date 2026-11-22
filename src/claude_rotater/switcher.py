@@ -6221,7 +6221,9 @@ class ClaudeAccountSwitcher:
           email + organization) that matches no managed slot (unmanaged
           login, recycled email wearing a managed address, or an email+org
           match without uuid confirmation). Preserved in a safety copy.
-        - ``"known-foreign"``  — the switch-time oracle failed, but a
+        - ``"known-foreign"``  — a login found live under an API-key slot
+          (its key was not being served), never that slot's. Also: the
+          switch-time oracle failed, but a
           collect-pass probe in this process already condemned this exact
           lineage (a cached definitive verdict, revalidated against the
           slot's current identity). Routed like ``"alien"``: preserved,
@@ -6240,6 +6242,12 @@ class ClaudeAccountSwitcher:
           endpoint state must never change switch behavior beyond skipping
           the extra safety.
         """
+        if self._api_key_from_data(data, current_account):
+            # A key never rotates, so nothing live is its successor: another
+            # key is in its own slot, a login is the one underneath.
+            if looks_like_api_key(original_creds):
+                return ("own-bytes", None)
+            return ("known-foreign", None)
         backup = self._read_account_credentials(current_account, current_email)
         if backup and backup == original_creds:
             return ("own-bytes", None)
