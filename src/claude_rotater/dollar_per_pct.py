@@ -18,7 +18,10 @@ story:
   around it happened on another machine or on claude.ai, where ccusage
   cannot see it. That share of the climb is ``elsewhere``; above
   :data:`ELSEWHERE_LOW` the sample is unsure, above :data:`ELSEWHERE_OUT`
-  it is left out (its ratio would read far too low).
+  it is left out (its ratio would read far too low). A climb made
+  elsewhere while an idle local session spends a trickle passes that test
+  rise by rise, so a climb local spend pays under :data:`TYPICAL_SHARE` of
+  at the account's typical rate is used elsewhere too (:func:`screen`).
 - **lagging.** A reading lower than an earlier one of the same window is a
   stale copy (a long turn's statusline, a slow poll), never a climb; it is
   skipped, and readings of another window never mix in.
@@ -37,7 +40,7 @@ import logging
 import math
 import statistics
 from collections.abc import Callable, Iterable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Protocol
 
@@ -55,6 +58,7 @@ SEGMENT_PCT = {"5h": 4.0, "7d": 6.0}  # the climb one sample spans
 LOCAL_PER_PCT = 0.10  # under $0.10 of local spend per 1% risen: not risen here
 ELSEWHERE_LOW = 0.10
 ELSEWHERE_OUT = 0.50
+TYPICAL_SHARE = 0.25  # paid under a quarter at the typical $ per 1%: used elsewhere
 MATCH_S = 120.0  # a reading's reset within this of a window's is that window
 
 RECENT_S = 14 * DAY_S  # the current figure comes from samples this recent
@@ -351,11 +355,30 @@ def _ratio(found: Iterable[Sample]) -> float:
     return sum(s.usd for s in found) / pct if pct else 0.0
 
 
+def screen(found: Iterable[Sample], now: float) -> list[Sample]:
+    """``found``, every climb that local spend pays under
+    :data:`TYPICAL_SHARE` of at the account's typical $ per 1% (the climb
+    weighted median of its sure samples over the trend span, else of those
+    not left out) marked used elsewhere by the share it leaves unpaid, so it
+    is left out. A trickle of local spend beside a climb made on another
+    machine passes the per-rise test of :func:`samples`, and would read as a
+    limit cut to a tenth. Real spread stays well inside a quarter."""
+    found = list(found)
+    span = [s for s in found if s.t >= now - TREND_S and s.grade != "out"]
+    typical_of = [s for s in span if s.grade == "sure"] or span
+    if not typical_of:
+        return found
+    typical = weighted_median((s.ratio, s.pct) for s in typical_of)
+    return [replace(s, elsewhere=max(s.elsewhere, 1 - s.ratio / typical))
+            if s.grade != "out" and s.ratio < TYPICAL_SHARE * typical else s
+            for s in found]
+
+
 def summarize(found: Iterable[Sample], label: str, now: float) -> PerPct | None:
     """The figure to show: recent sure samples if they climb far enough,
     else every recent sample not left out (marked unsure); None without
-    any."""
-    usable = sorted((s for s in found if s.grade != "out"), key=lambda s: s.t)
+    any. Climbs made elsewhere are screened out first (:func:`screen`)."""
+    usable = sorted((s for s in screen(found, now) if s.grade != "out"), key=lambda s: s.t)
     recent = [s for s in usable if s.t >= now - RECENT_S]
     if not recent:
         return None

@@ -188,6 +188,19 @@ class TestSummarize:
         assert got.points == ((NOW - 3 * DAY, pytest.approx(2.0), True),
                               (NOW - 2 * DAY, pytest.approx(1.0), False))
 
+    def test_a_climb_made_elsewhere_beside_a_trickle_of_local_spend_is_left_out(self):
+        # An idle local session spends a little through every rise, so each
+        # rise passes the per-rise test, yet the climb cost a tenth of the
+        # account's usual rate: it was made on another machine.
+        found = [sample(d + h / 24, 20.0) for d in range(20, 0, -1) for h in range(3)]
+        trickle = [sample(d + 0.3, 1.5) for d in (12, 8, 3)]
+        got = dpp.summarize(found + trickle, "7d", NOW)
+        assert all(v == pytest.approx(20.0) for _, v, _ in got.points)
+        assert got.dollars == pytest.approx(20.0) and got.fit.at(NOW) == pytest.approx(20.0)
+        # half the usual rate is ordinary spread, not use elsewhere
+        noisy = dpp.summarize(found + [sample(5.3, 10.0)], "7d", NOW)
+        assert (NOW - 5.3 * DAY, pytest.approx(10.0), True) in noisy.points
+
     def test_a_trend_needs_three_days_over_two_weeks(self):
         assert dpp.summarize([sample(13, 5.0), sample(7, 4.0), sample(1, 3.0)], "5h", NOW).trend is None
         assert dpp.summarize([sample(15, 5.0), sample(8, 4.0), sample(1, 3.0)], "5h", NOW).trend < 0
