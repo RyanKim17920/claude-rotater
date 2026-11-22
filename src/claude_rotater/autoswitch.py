@@ -1299,7 +1299,7 @@ class AutoSwitchEngine:
                 self._emit(
                     NoSwitchEvent(
                         reason="no-active-account",
-                        detail="log in first: open rota and press l",
+                        detail="add an account first: open rota and press a",
                     )
                 )
             return TickOutcome.NO_ACTION

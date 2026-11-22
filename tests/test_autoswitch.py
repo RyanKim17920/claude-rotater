@@ -324,9 +324,11 @@ class TestDecisionTable:
     def test_no_active_account(self, temp_home):
         h = EngineHarness(temp_home)
         assert h.engine.tick() is TickOutcome.NO_ACTION
-        assert [e.reason for e in h.events if isinstance(e, NoSwitchEvent)] == [
-            "no-active-account"
-        ]
+        events = [e for e in h.events if isinstance(e, NoSwitchEvent)]
+        assert [e.reason for e in events] == ["no-active-account"]
+        # The same key the TUI's empty list names ("Press a to add one"):
+        # a adds, l only logs an existing account in again.
+        assert events[0].detail.endswith("press a")
 
     def test_hysteresis_margin_blocks_marginal_candidates(self, harness):
         # threshold 90, hysteresis 10 → a candidate must beat the active
