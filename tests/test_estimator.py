@@ -529,6 +529,81 @@ def test_params_constants_match_spec():
     assert math.isclose(est.MIN_SPAN_S, 240.0)
 
 
+class TestWeekBehindTheFiveHourGate:
+    """A 5h window lets only so many weekly points through (here about 16),
+    so the week cannot keep a pace that has the 5h limit half an hour away."""
+
+    RESET_7D = NOW + 5 * 86400
+
+    def series(self, *, five=60.0, week=20.0, rate5=80.0, ratio=0.16, left5_h=4.0,
+               minutes=45) -> dict[str, list[Point]]:
+        out: dict[str, list[Point]] = {"5h": [], "7d": []}
+        for back in range(minutes, -1, -3):
+            t, rose = NOW - back * 60, rate5 * back / 60
+            out["5h"].append(Point(t, float(round(five - rose)), NOW + left5_h * 3600))
+            out["7d"].append(Point(t, float(round(week - rose * ratio)), self.RESET_7D))
+        return out
+
+    def weekly(self, series, **kw):
+        acc = estimate_account(series, models=(), threshold=90.0, now=NOW, **kw)
+        alone = estimate_window(series["7d"], window="7d", now=NOW, on_duty=kw.get("on_duty"))
+        return acc.windows["7d"], alone, acc
+
+    def test_the_week_waits_for_the_five_hour_windows_it_needs(self):
+        week, alone, acc = self.weekly(self.series())
+        assert alone.eta_s(100.0, NOW) < 8 * 3600  # what the bare slope says
+        # 80 points at 16-19 a window: this one, three whole ones, some of a fifth
+        assert 18 * 3600 < week.eta_s(100.0, NOW) < 26 * 3600
+        assert acc.binding.window == "5h"
+        assert acc.windows["5h"] == estimate_window(self.series()["5h"], window="5h", now=NOW)
+
+    def test_the_forecast_holds_while_the_window_fills(self):
+        etas = [self.weekly(self.series(five=f, week=14 + 0.16 * f))[0].eta_s(100.0, NOW)
+                for f in (60.0, 75.0, 90.0)]
+        # whole points move it by a window at most, never back to a few hours
+        assert min(etas) > 15 * 3600 and max(etas) - min(etas) < 6 * 3600
+
+    def test_a_spent_window_means_nothing_until_it_resets(self):
+        week, _, _ = self.weekly(self.series(five=100.0, week=96.0, left5_h=3.0))
+        assert week.eta_s(100.0, NOW) >= 3 * 3600
+
+    def test_a_week_that_ends_inside_this_window_keeps_its_slope(self):
+        week, alone, _ = self.weekly(self.series(five=60.0, week=97.0))
+        assert week == alone
+
+    def test_a_pace_the_windows_allow_is_left_alone(self):
+        week, alone, _ = self.weekly(self.series(five=30.0, rate5=14.0, minutes=90, left5_h=2.0))
+        assert week.rate_pct_per_h == pytest.approx(alone.rate_pct_per_h)
+
+    def test_a_plan_without_a_five_hour_limit_is_left_alone(self):
+        week, alone, _ = self.weekly({"7d": self.series()["7d"]})
+        assert week == alone
+
+    def test_a_five_hour_window_that_is_over_gates_nothing(self):
+        week, alone, _ = self.weekly(self.series(left5_h=-0.01))
+        assert week == alone
+
+    def test_too_small_a_climb_to_read_a_ratio_gates_nothing(self):
+        week, alone, _ = self.weekly(self.series(five=20.0, rate5=8.0, ratio=1.0, minutes=60))
+        assert week == alone
+
+    def test_a_fresh_window_reads_the_ratio_from_the_one_before(self):
+        before = [Point(NOW - 3000 + i * 480, 10.0 + 15 * i, NOW - 480) for i in range(6)]
+        week7 = [Point(p.t, float(round(8 + 0.16 * (p.pct - 10))), self.RESET_7D) for p in before]
+        fresh = self.series(five=6.0, week=21.0, rate5=80.0, ratio=1.0, minutes=3)
+        more = [Point(NOW - 420, 0.0, NOW + 4 * 3600)]
+        series = {"5h": before + more + fresh["5h"],
+                  "7d": week7 + [Point(NOW - 420, 19.0, self.RESET_7D)] + fresh["7d"]}
+        week, alone, _ = self.weekly(series)
+        per_full = est.week_per_session(series["5h"], series["7d"], now=NOW)
+        assert per_full == pytest.approx((12 + 1) / 75 * 100)  # the last window's climb
+        assert week.rate_pct_per_h < alone.rate_pct_per_h
+
+    def test_an_account_used_elsewhere_is_gated_too(self):
+        week, alone, _ = self.weekly(self.series(), on_duty=False)
+        assert week.eta_s(100.0, NOW) > 2 * alone.eta_s(100.0, NOW)
+
+
 class TestRealReplays:
     def test_long_turn_back_dated_reading_keeps_the_whole_duty(self):
         """Work profile, Oct 22: an account on duty from 16:29 climbed ~48%

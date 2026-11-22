@@ -40,7 +40,7 @@ from __future__ import annotations
 
 import math
 from collections.abc import Iterable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Literal
 
 from claude_rotater import oauth
@@ -75,6 +75,9 @@ MAX_RATE_PCT_PER_H = 200.0
 MIN_FALLBACK_ELAPSED_S = 600.0  # window-average burn needs this much window behind it
 MIN_ETA_RATE_PCT_PER_H = 0.05  # slower than this never crosses anything useful
 HIGH_RMS_PCT = 2.0
+# The least 5h climb that says how many weekly points a full 5h window lets
+# through (:func:`week_per_session`): below it integer readings are the ratio.
+GATE_MIN_RISE_PCT = 10.0
 
 Confidence = Literal["none", "low", "medium", "high"]
 
@@ -347,6 +350,65 @@ def first_crossing(
     return best
 
 
+def week_per_session(
+    five: Sequence[Point], week: Sequence[Point], *, now: float
+) -> float | None:
+    """The most weekly points one full 5h window lets through: the last
+    day's largest climb of a 5h window against the week's over the same
+    readings, plus the point an integer reading can hide. None without a
+    climb of ``GATE_MIN_RISE_PCT`` to read it from."""
+    week_at = {p.t: p.pct for p in current_window(week)}
+    lo = now - PARAMS_WEEK.lookback_s
+    best: tuple[float, float] | None = None  # (5h rise, weekly rise)
+    for seg in window_segments(five):
+        both = [p for p in seg if lo <= p.t <= now and p.t in week_at]
+        if not both:
+            continue
+        first, last = both[0], both[-1]
+        rise = last.pct - first.pct
+        if rise >= GATE_MIN_RISE_PCT and (best is None or rise >= best[0]):
+            best = rise, max(0.0, week_at[last.t] - week_at[first.t])
+    if best is None:
+        return None
+    return (best[1] + 1.0) / best[0] * 100.0
+
+
+def behind_session_gate(
+    week: WindowEstimate,
+    five: WindowEstimate | None,
+    five_points: Sequence[Point],
+    week_points: Sequence[Point],
+    *,
+    now: float,
+) -> WindowEstimate:
+    """``week`` as the 5h limit lets it fill. The weekly slope is what is
+    burned while working, and a 5h window that runs out stops that until it
+    resets: this one gives what it has left, each later one a full window's
+    worth. The rate becomes the average that reaches 100 when those do, so
+    every reader of the straight line gets that time. Unchanged without a
+    live 5h window, a ratio to read, or a pace the windows hold up."""
+    rate = week.rate_pct_per_h
+    if (five is None or five.resets_at is None or five.resets_at <= now
+            or rate is None or rate <= MIN_ETA_RATE_PCT_PER_H):
+        return week
+    per_full = week_per_session(five_points, week_points, now=now)
+    if per_full is None:
+        return week
+    left = 100.0 - week.last_pct
+    to_reset_h = max(0.0, five.resets_at - week.last_t) / 3600.0
+    this_one = min(rate * to_reset_h, per_full * max(0.0, 100.0 - five.last_pct) / 100.0)
+    if left <= this_one:
+        return week
+    session_h = WINDOW_LEN_S["5h"] / 3600.0
+    each = min(rate * session_h, per_full)
+    need = left - this_one
+    whole = math.ceil(need / each) - 1
+    hours = to_reset_h + whole * session_h + (need - whole * each) / rate
+    if hours <= left / rate + 1e-6:
+        return week
+    return replace(week, rate_pct_per_h=left / hours)
+
+
 def estimate_account(
     series: dict[str, list[Point]],
     *,
@@ -358,7 +420,8 @@ def estimate_account(
     carried: dict[str, WindowEstimate] | None = None,
 ) -> AccountEstimate:
     """Every relevant window's estimate; ``since`` is the last account
-    switch, ``on_duty`` and ``carried`` as in :func:`estimate_window`."""
+    switch, ``on_duty`` and ``carried`` as in :func:`estimate_window`; the
+    week no faster than the 5h limit lets it (:func:`behind_session_gate`)."""
     windows: dict[str, WindowEstimate] = {}
     for label, points in series.items():
         if not is_relevant_window(label, models):
@@ -371,6 +434,10 @@ def estimate_account(
             windows[label] = est
     if not windows:
         return EMPTY_ACCOUNT_ESTIMATE
+    if "5h" in windows and "7d" in windows:
+        windows["7d"] = behind_session_gate(
+            windows["7d"], windows["5h"], series["5h"], series["7d"], now=now,
+        )
 
     def level(est: WindowEstimate) -> float:
         projected = est.projected_pct(now)
