@@ -6,11 +6,12 @@ run their own engine. That is how a pre-fix process kept writing switches
 into the wrong Keychain item for hours next to a fixed one.
 
 So the engine is owned through ``engine.lock`` in the data dir: an exclusive
-``flock`` (released by the kernel when the holder exits, so a crash never
-leaves it stale) whose file records the holder's pid, code version, commit
-and start time. Whoever holds it runs the engine; every other rota on the
-same data dir is view-only and says who runs it, flagged "older code" when
-the holder started before the installed source last changed.
+``flock`` (a byte-range lock on Windows; the OS releases either when the
+holder exits, so a crash never leaves it stale) whose file records the
+holder's pid, code version, commit and start time. Whoever holds it runs the
+engine; every other rota on the same data dir is view-only and says who runs
+it, flagged "older code" when the holder started before the installed source
+last changed.
 
 Processes from before this lock existed hold nothing, so they are found by
 their open handle on the data dir's ``rota.log`` (best effort, macOS/Linux
@@ -33,6 +34,9 @@ _logger = logging.getLogger("rota")
 
 LOCK_FILENAME = "engine.lock"
 LOG_FILENAME = "rota.log"
+# Windows locks are mandatory, so the locked byte sits past the record for
+# the others to still read who holds it.
+_WINDOWS_LOCK_OFFSET = 1 << 20
 _PKG_DIR = Path(__file__).resolve().parent
 
 
@@ -124,14 +128,10 @@ class EngineLock:
         legacy = legacy_holder(self.path.parent)
         if legacy is not None:
             return legacy
-        if sys.platform == "win32":  # no flock: single-engine is best effort
-            return None
-        import fcntl
-
         self.path.parent.mkdir(parents=True, exist_ok=True)
         fd = os.open(self.path, os.O_RDWR | os.O_CREAT, 0o600)
         try:
-            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            _lock(fd)
         except OSError:
             holder = _read_holder(fd)
             os.close(fd)
@@ -143,7 +143,8 @@ class EngineLock:
             "startedAt": _process_start(),
         }
         os.ftruncate(fd, 0)
-        os.pwrite(fd, json.dumps(record).encode(), 0)
+        os.lseek(fd, 0, os.SEEK_SET)  # no pwrite on Windows
+        os.write(fd, json.dumps(record).encode())
         self._fd = fd
         return None
 
@@ -153,9 +154,33 @@ class EngineLock:
             return
         try:
             os.ftruncate(fd, 0)
+            _unlock(fd)
         except OSError:
             pass
-        os.close(fd)  # closing drops the flock
+        os.close(fd)
+
+
+def _lock(fd: int) -> None:
+    """Take the exclusive lock without waiting. OSError: someone has it."""
+    if sys.platform == "win32":
+        import msvcrt
+
+        os.lseek(fd, _WINDOWS_LOCK_OFFSET, os.SEEK_SET)
+        msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+    else:
+        import fcntl
+
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+
+def _unlock(fd: int) -> None:
+    if sys.platform == "win32":
+        import msvcrt
+
+        # closing alone would free it only when Windows gets round to it
+        os.lseek(fd, _WINDOWS_LOCK_OFFSET, os.SEEK_SET)
+        msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+    # else closing drops the flock
 
 
 def _process_start() -> float:
@@ -168,7 +193,8 @@ def _process_start() -> float:
 
 def _read_holder(fd: int) -> Holder:
     try:
-        raw = os.pread(fd, 4096, 0).decode("utf-8", "replace")
+        os.lseek(fd, 0, os.SEEK_SET)  # no pread on Windows
+        raw = os.read(fd, 4096).decode("utf-8", "replace")
         data = json.loads(raw) if raw.strip() else {}
     except (OSError, ValueError):
         data = {}
