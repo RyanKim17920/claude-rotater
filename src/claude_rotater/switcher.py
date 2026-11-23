@@ -2763,21 +2763,29 @@ class ClaudeAccountSwitcher:
                 "instead: press t in rota."
             )
 
-    def _reject_cross_kind_collision(self, email: str, is_api_key: bool) -> None:
-        """Reject registering a token whose (email, personal-org) already exists as
+    def _reject_cross_kind_collision(
+        self,
+        email: str,
+        is_api_key: bool,
+        organization_uuid: str = "",
+        remedy: str = "Pass a distinct --email.",
+    ) -> None:
+        """Reject registering a credential whose (email, org) already exists as
         the *other* kind.
 
         Identity is matched on ``(email, organizationUuid)`` only, so two slots
         sharing an email across kinds (one OAuth, one API key) could not be told
         apart at switch time. Rather than thread ``kind`` through the whole identity
         system, refuse the collision and point the user at a distinct ``--email``.
-        The default ``…@token.local`` labels never collide; this only guards a forced
-        ``--email``.
+        The default ``…@token.local`` labels never collide; this guards a forced
+        ``--email`` and a login whose identity is such a key's (``add_account``:
+        it would land in the key's slot, the slot keeping its kind and a key on
+        duty staying served over the login).
         """
         data = self._get_sequence_data()
         if not data:
             return
-        slot = self._find_account_slot(data, email, "")
+        slot = self._find_account_slot(data, email, organization_uuid)
         if slot is None:
             return
         existing_kind = self._account_kind(slot)
@@ -2788,7 +2796,7 @@ class ClaudeAccountSwitcher:
             raise ValidationError(
                 f"'{email}' already exists as an {existing_label} account "
                 f"(slot {slot}); cannot add it as an {new_label} account. "
-                f"Pass a distinct --email."
+                f"{remedy}"
             )
 
     @staticmethod
@@ -3126,6 +3134,13 @@ class ClaudeAccountSwitcher:
                 )
             raise ConfigError("No active Claude account found. Please log in first.")
         current_email, current_org_uuid, current_account_uuid = identity
+        self._reject_cross_kind_collision(
+            current_email, False, current_org_uuid,
+            remedy=(
+                "Remove that account and add its key again under another "
+                "email, then log in."
+            ),
+        )
         relogin_active = source_dir is not None and self._live_identity_matches(
             current_email, current_org_uuid
         )

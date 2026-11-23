@@ -548,3 +548,58 @@ class TestRedact:
         from claude_rotater.logging_config import redact
 
         assert redact("slot 3 failed: timed out") == "slot 3 failed: timed out"
+
+
+class TestLoginOverAnApiKeySlot:
+    """A login whose (email, org) is an API-key slot's must not land in it:
+    the slot would keep its kind with a login inside, and a key on duty
+    would stay served over the login just saved."""
+
+    KEY = "sk-ant-api03-" + "q" * 40
+
+    def _key_slot(self, switcher) -> str:
+        num = switcher.add_account_from_token(
+            self.KEY, email="key@example.com", assume_yes=True
+        )
+        assert switcher._account_kind(num) == "api_key"
+        return num
+
+    def test_is_refused_and_leaves_the_key_slot_alone(self, switcher):
+        num = self._key_slot(switcher)
+        fake = FakeClaude(email="key@example.com", org="", creds=_creds("fresh"))
+        with pytest.raises(ValidationError, match="API-key account"):
+            login_account(switcher, runner=fake)
+        assert switcher._account_kind(num) == "api_key"
+        assert switcher._read_account_credentials(num, "key@example.com") == self.KEY
+        assert _stages(switcher) == []
+
+    def test_into_the_key_slots_number_is_refused_too(self, switcher):
+        num = self._key_slot(switcher)
+        fake = FakeClaude(email="key@example.com", org="", creds=_creds("fresh"))
+        with StagedLogin(switcher.backup_dir, runner=fake) as stage:
+            stage.authenticate(method="claudeai", email=None)
+            with pytest.raises(ValidationError, match="API-key account"):
+                stage.import_into(switcher, slot=int(num))
+        assert switcher._account_kind(num) == "api_key"
+        assert switcher._read_account_credentials(num, "key@example.com") == self.KEY
+
+    def test_a_key_on_duty_stays_served_only_by_choice(self, switcher):
+        num = self._key_slot(switcher)
+        switcher._write_credentials(_creds("live"))  # slot 1's live login
+        switcher.switch_to(num, json_output=True)
+        assert switcher._handed_out_key() == self.KEY
+        fake = FakeClaude(email="key@example.com", org="", creds=_creds("fresh"))
+        with pytest.raises(ValidationError):
+            login_account(switcher, runner=fake)
+        assert switcher._handed_out_key() == self.KEY
+        assert switcher.current_account_number() == num
+
+    def test_the_same_email_in_another_org_is_its_own_account(self, switcher):
+        num = self._key_slot(switcher)
+        fake = FakeClaude(email="key@example.com", org="org-9", creds=_creds("fresh"))
+        login_account(switcher, runner=fake)
+        assert switcher._account_kind(num) == "api_key"
+        assert switcher._read_account_credentials(num, "key@example.com") == self.KEY
+        data = switcher._get_sequence_data()
+        added = [n for n, a in data["accounts"].items() if a.get("organizationUuid") == "org-9"]
+        assert len(added) == 1 and switcher._account_kind(added[0]) == "oauth"
