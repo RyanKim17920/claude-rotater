@@ -251,6 +251,12 @@ can't break your statusline.
 - **rota isn't switching.** Check the header: `manual` mode, a second rota
   that is only viewing, or the hourly switch limit. The bottom line says why
   rota is staying.
+- **`Keychain locked: unlock it to switch`.** A locked Mac (for example,
+  over SSH after a reboot, before anyone logs in at the screen) can't
+  rotate. Claude Code reads the Keychain first, and rota can't replace or
+  clear the old login there, so it leaves the current account in place
+  and tries again every minute. Unlock it with `security unlock-keychain`
+  or by logging in at the Mac.
 - **Logs** are in `~/.rota/rota.log` (or `$ROTA_HOME/rota.log`). Start with
   `--debug` for more detail.
 - **Coming from claude-swap.** On first run, if `~/.rota` doesn't exist yet,
