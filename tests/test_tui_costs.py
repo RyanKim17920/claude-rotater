@@ -601,6 +601,21 @@ def test_token_kinds_take_the_token_ramp():
         theme.TOKEN_HUES_LIGHT)
 
 
+def test_a_removed_account_never_takes_a_live_accounts_color():
+    # a removed account's kept index can wrap onto a live one's hue (index 5
+    # of 5 hues is #1's), so it is muted, like spend no one is credited with
+    base = report()
+    accounts = (AccountLine("1", 3.0, None, None), AccountLine("2", 2.0, None, None),
+                AccountLine("x:old@x|o", 1.0, None, None))
+    rep = CostReport(**{**base.__dict__, "accounts": accounts})
+    n = len(P.accounts)
+    for indices in (None, {"1": 0, "2": 1, "x:old@x|o": n}, {"1": 0, "2": 1}):
+        colors = view.account_colors(rep, P, indices)
+        assert colors["x:old@x|o"] == P.muted
+        assert colors["x:old@x|o"] not in (colors["1"], colors["2"])
+        assert colors["1"] != colors["2"] and P.muted not in (colors["1"], colors["2"])
+
+
 def test_by_account_bars_take_the_account_colors():
     rep = report(n_models=3)
     kept = {"1": P.account(3), "2": P.account(0), "": P.muted}  # kept by identity, not order

@@ -278,12 +278,16 @@ def token_colors(palette: Palette) -> dict[str, str]:
 
 def account_colors(report: CostReport, palette: Palette,
                    indices: dict[str, int] | None = None) -> dict[str, str]:
-    """Each account's hue: its kept color ``indices`` (by account key, see
-    :mod:`claude_rotater.account_colors`), else one by table order;
-    unattributed spend is muted."""
+    """Each live account's hue: its kept color ``indices`` (by account key,
+    see :mod:`claude_rotater.account_colors`; muted without one), else one
+    by table order. A removed account and unattributed spend are muted: a
+    removed one's kept index can wrap onto a live account's hue."""
     out = {UNATTRIBUTED: palette.muted}
-    for i, a in enumerate(report.accounts):
-        out[a.number] = palette.account(indices.get(a.number, i) if indices else i)
+    live = [a.number for a in report.accounts if not a.number.startswith("x:")]
+    for a in report.accounts:
+        out[a.number] = palette.muted
+    for i, number in enumerate(live):
+        out[number] = palette.account(indices.get(number) if indices is not None else i)
     return out
 
 
@@ -1277,18 +1281,13 @@ class CostsView(Widget, can_focus=True):
 
     def colors(self, report: CostReport, palette: Palette) -> dict[str, str]:
         """Each account key's hue, kept by identity (the rows' colors); a
-        removed account's from the identity its key names."""
-        from claude_rotater.attribution import key_identity
-
+        removed account's muted (:func:`account_colors`)."""
         ids = self.identities()
         color_index = getattr(self.app, "color_index", None)
         if color_index is None:
             return account_colors(report, palette)
-        out = {UNATTRIBUTED: palette.muted}
-        for acc in report.accounts:
-            identity = ids.get(acc.number) or key_identity(acc.number)
-            out[acc.number] = palette.account(color_index(identity) if identity else None)
-        return out
+        return account_colors(report, palette, {
+            acc.number: color_index(ids[acc.number]) for acc in report.accounts if acc.number in ids})
 
     def open(self) -> None:
         """Take the keyboard; show the cached report, then refresh it."""
