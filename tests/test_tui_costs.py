@@ -895,6 +895,23 @@ def test_a_trend_view_with_nothing_to_plot_says_so_in_one_line():
     assert view.chart_rows(rep, view.TREND, 78, 10) == 3  # the title and a line per window
 
 
+def test_no_5h_limit_says_nothing_about_5h():
+    # plans without a 5h limit: no "no 5h climb priced locally yet" line
+    base = trend_report(**{"1": trend_fig(21.0)})
+    accounts = tuple(AccountLine(n, 10.0, None, trend_fig(21.0), {"5h": base.now - 86400.0})
+                     for n in ("1", "2"))
+    rep = CostReport(**{**base.__dict__, "accounts": accounts})
+    assert view.trend_chart(rep, "5h", 78, 10, {}, P) == []
+    lines = [line.plain for line in view.chart_lines(rep, view.TREND, 78, 10, {}, P)]
+    assert not any("5h" in line for line in lines)
+    assert len(lines) == view.chart_rows(rep, view.TREND, 78, 10)
+    # one of them alone, picked, likewise; another with a 5h limit still says so
+    assert view.trend_chart(rep, "5h", 78, 10, {}, P, pick="2") == []
+    mixed = CostReport(**{**rep.__dict__, "accounts": (*accounts, AccountLine("3", 1.0, None, None))})
+    assert "no 5h climb" in view.trend_chart(mixed, "5h", 78, 10, {}, P)[0].plain
+    assert view.trend_chart(mixed, "5h", 78, 10, {}, P, pick="1") == []
+
+
 @pytest.mark.parametrize("width", [40, 60, 78, 158])
 def test_trend_view_fits_narrow_widths(width):
     rep = trend_report(**{"1": trend_fig(5.0, change=-0.3, steady=False),

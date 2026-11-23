@@ -684,6 +684,16 @@ def trend_accounts(report: CostReport, label: str, pick: str = ALL_ACCOUNTS):
     return out
 
 
+def trend_empty_note(report: CostReport, label: str, pick: str = ALL_ACCOUNTS) -> str:
+    """What a trend panel with nothing to plot says: nothing at all when
+    no account ``pick`` covers has a ``label`` limit (a plan without a 5h
+    one), else that no climb of it was priced yet."""
+    scope = [a for a in report.accounts if pick in (ALL_ACCOUNTS, a.number)]
+    if scope and all(label in a.no_limit for a in scope):
+        return ""
+    return f"no {label} climb priced locally yet"
+
+
 def trend_numbers(report: CostReport) -> list[str]:
     """The accounts with something to plot in either window, table order."""
     return [a.number for a in report.accounts
@@ -715,8 +725,8 @@ def trend_chart(report: CostReport, label: str, width: int, height: int,
     verdict. One account alone (``pick``) gets the scale to itself."""
     shown = trend_accounts(report, label, pick)
     if not shown:
-        return [Text(f"no {label} climb priced locally yet",
-                     style=palette.muted, no_wrap=True, overflow="ellipsis")]
+        note = trend_empty_note(report, label, pick)
+        return [Text(note, style=palette.muted, no_wrap=True, overflow="ellipsis")] if note else []
     colors = colors or account_colors(report, palette)
     t_hi = report.now
     t_lo = min(t for _, p in shown for t, _, _ in p.points)
@@ -928,7 +938,8 @@ def chart_rows(report: CostReport, view: str, width: int, height: int,
     pick = resolve_pick(report, view, width, pick)
     if view == TREND:
         return 1 + sum(height + 1 + len(shown) if (shown := trend_accounts(report, label, pick))
-                       else 1 for label in TREND_WINDOWS)
+                       else int(bool(trend_empty_note(report, label, pick)))
+                       for label in TREND_WINDOWS)
     _, duty, _ = money_series(report, view, width)
     under = int(duty is not None and any(d is not None for d in duty))
     return 1 + height + under + 1
