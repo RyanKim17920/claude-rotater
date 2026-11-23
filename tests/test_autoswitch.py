@@ -523,7 +523,7 @@ class TestDecisionTable:
         assert "login is dead" in switch.reason
         assert harness.active_number() == 2
         assert any(
-            "Auto-switch (failover): account 1 -> 2" in r.getMessage()
+            "Auto-switch (failover): #1 → #2" in r.getMessage()
             and r.levelname == "WARNING"
             for r in caplog.records
         )
@@ -2740,9 +2740,9 @@ class TestEventsShape:
             reason="pre-empt: ~100.0% by next reading in ~3m (burn +5.9%/h, turn 2%)",
         )
         assert event.human() == (
-            "Switched Account-4 -> Account-1 (a@example.com) "
+            "Switched #4 → #1 "
             "(pre-empt: ~100.0% by next reading in ~3m (burn +5.9%/h, turn 2%))"
-        )
+        )  # the numbers the rows show, and no email in the log
         plain = replace(event, trigger="pace", reason="switch → #1: needs 2.0×")
         assert plain.human().endswith("(pace: switch → #1: needs 2.0×)")
         assert replace(event, reason="").human().endswith("(pre-empt)")

@@ -3352,7 +3352,7 @@ class TestEngineHosting:
                 )
             )
             await settle(pilot)
-            assert "Switched Account-2 -> Account-1" in log_plain(app)
+            assert "Switched #2 → #1" in log_plain(app)
             assert app.auto_status.last_switch == "2 → 1" and app.auto_status.last_reason == ""
             assert "switched" not in painted(app, "#status")  # the log says it once
             assert len(app.switcher.fetch_sets) > before

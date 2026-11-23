@@ -459,18 +459,14 @@ class SwitchEvent(AutoSwitchEvent):
         return fields
 
     def human(self) -> str:
-        src = (
-            f"Account-{self.from_ref.get('number')}" if self.from_ref else "(none)"
-        )
-        dst = (
-            f"Account-{self.to_ref.get('number')} ({self.to_ref.get('email')})"
-            if self.to_ref
-            else "?"
-        )
+        """``Switched #8 → #7 (pace: ...)``: the numbers the rows show; the
+        email stays out of a line the log keeps."""
+        src = f"#{self.from_ref.get('number')}" if self.from_ref else "(none)"
+        dst = f"#{self.to_ref.get('number')}" if self.to_ref else "?"
         prefix = "[dry-run] would switch" if self.dry_run else "Switched"
         detail = reason_detail(self.trigger, self.reason)
         tail = f": {detail}" if detail else ""
-        return f"{prefix} {src} -> {dst} ({self.trigger}{tail})"
+        return f"{prefix} {src} → {dst} ({self.trigger}{tail})"
 
 
 @dataclass(frozen=True)
@@ -3417,9 +3413,9 @@ class AutoSwitchEngine:
 
         _logger.log(
             logging.WARNING if trigger in _LIMIT_TRIGGERS else logging.INFO,
-            "Auto-switch (%s): account %s -> %s; %s",
+            "Auto-switch (%s): %s → #%s; %s",
             trigger,
-            state["lastSwitchFrom"],
+            "(none)" if state["lastSwitchFrom"] is None else f"#{state['lastSwitchFrom']}",
             number,
             reason_detail(trigger, reason) or trigger,
         )
