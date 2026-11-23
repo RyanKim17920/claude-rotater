@@ -4745,13 +4745,26 @@ def test_elsewhere_forecast_words():
     from claude_rotater.tui.main import Forecast, elsewhere_forecast
 
     crit = Forecast("~7d limit in 15h", "~7d in 15h", "crit", True)
-    assert elsewhere_forecast(crit) == Forecast("elsewhere ~7d in 15h", "~7d in 15h", "crit", True)
+    # the narrow cell has no room for both: the word stays, the colour warns
+    assert elsewhere_forecast(crit) == Forecast("elsewhere ~7d in 15h", "elsewhere", "crit", True)
     days = Forecast("~7d limit in 2d23h", "~7d in 2d23h", "crit", True)
     assert elsewhere_forecast(days).text == "elsewhere ~7d in 2d23h"
     wide = Forecast("~Fable limit in 15h", "~Fable in 15h", "crit", True)
-    assert elsewhere_forecast(wide).text == "~Fable limit in 15h"  # would not fit
+    assert elsewhere_forecast(wide).text == "used elsewhere"  # both would not fit
     assert elsewhere_forecast(Forecast("ok", "ok", "ok", False)).text == "used elsewhere"
     assert elsewhere_forecast(None).short == "elsewhere"
+
+
+@pytest.mark.parametrize("long", [True, False])
+@pytest.mark.parametrize("short", ["~7d in 15h", "~7d in 2d23h", "~Fable in 15h", "~7d limit", "ok"])
+def test_every_forecast_cell_keeps_the_word_elsewhere(long, short):
+    from claude_rotater.tui.main import LEVELS, Forecast, RowLayout, elsewhere_forecast, forecast_text
+
+    level = next(lv for lv in LEVELS if lv.forecast and lv.long_forecast == long)
+    layout = RowLayout(80, ("5h", "7d"), 10, 0, level)
+    fc = elsewhere_forecast(Forecast(short.replace(" in ", " limit in "), short, "crit", True))
+    cell = forecast_text(fc, layout.forecast_w, long=long, palette=Palette.DARK).plain
+    assert "elsewhere" in cell and "…" not in cell
 
 
 class TestOfflineIsNotADeadLogin:

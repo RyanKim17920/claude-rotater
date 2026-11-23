@@ -994,13 +994,15 @@ def used_elsewhere(acc: AccountSnapshot, est: AccountEstimate | None) -> bool:
 def elsewhere_forecast(fc: Forecast | None) -> Forecast:
     """The forecast of an account rising while another is on duty here, so
     its projection plainly is not this machine's doing:
-    ``elsewhere ~7d in 15h`` (the short form when the long one would not
-    fit the cell), ``used elsewhere`` when it stays under."""
+    ``elsewhere ~7d in 15h``, ``used elsewhere`` when it stays under. A
+    cell too narrow for both keeps the word and drops the time (its colour
+    still warns): without the word the rise reads as a bug."""
     if fc is None or fc.text == "ok":
         role = fc.role if fc is not None else "muted"
         return Forecast(ELSEWHERE, "elsewhere", role, True)
     text = f"elsewhere {fc.short}"
-    return dataclasses.replace(fc, text=text if len(text) <= _FORECAST_W else fc.text)
+    return dataclasses.replace(fc, text=text if len(text) <= _FORECAST_W else ELSEWHERE,
+                               short=text if len(text) <= _FORECAST_SHORT_W else "elsewhere")
 
 
 def forecast_text(fc: Forecast | None, width: int, *, long: bool, palette: Palette) -> Text:
