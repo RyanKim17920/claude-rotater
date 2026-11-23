@@ -73,7 +73,8 @@ from claude_rotater.estimator import (
     last_rise,
     typical_burn,
 )
-from claude_rotater.exceptions import ClaudeSwitchError
+from claude_rotater.credentials import KEYCHAIN_RECHECK_COOLDOWN_S
+from claude_rotater.exceptions import ClaudeSwitchError, KeychainLockedError
 from claude_rotater.forecast import elsewhere, external_burns
 from claude_rotater.json_output import (
     SCHEMA_VERSION,
@@ -593,8 +594,14 @@ NO_HEADROOM_REASON = "no-headroom"
 # Manual mode (``autoswitch.mode``): the user picks the account; the detail
 # is a full "stay: ..." line saying what, if anything, rota still guards.
 MANUAL_REASON = "manual"
+# A switch was refused because the macOS Keychain is locked and still holds
+# the old login: nothing changed, and switching waits for an unlock.
+KEYCHAIN_LOCKED_REASON = "keychain-locked"
 # Reasons a UI should surface loudly (header note, prompt line).
-ALERT_REASONS = (RELOGIN_REASON, REPAIR_FAILED_REASON, PAUSED_REASON, NO_HEADROOM_REASON)
+ALERT_REASONS = (
+    RELOGIN_REASON, REPAIR_FAILED_REASON, PAUSED_REASON, NO_HEADROOM_REASON,
+    KEYCHAIN_LOCKED_REASON,
+)
 # NoSwitchEvent reasons whose ``detail`` is already a full "stay: ..." line.
 _SELF_EXPLAINED = (STAY_REASON, "manual-hold", MANUAL_REASON, *ALERT_REASONS)
 
@@ -1051,6 +1058,10 @@ class AutoSwitchEngine:
         self._key_confirming = False
         # When the transcripts were last read for a provider refusal.
         self._refusal_scanned_at: float | None = None
+        # A switch refused by a locked Keychain: (why, when to try again).
+        # Until then no switch is attempted, so a locked Mac is not retried
+        # every tick.
+        self._keychain_locked: tuple[str, float] | None = None
 
     # -- state file ---------------------------------------------------------
 
@@ -2009,6 +2020,9 @@ class AutoSwitchEngine:
         reason: str = "",
     ) -> TickOutcome:
         """Freshen the first viable target in ``ordered`` and switch to it."""
+        held = self._keychain_locked_hold()
+        if held is not None:
+            return held
         transient_failure = False
         systemic = ""
         for num in ordered:
@@ -3377,7 +3391,10 @@ class AutoSwitchEngine:
                     ))
                     return TickOutcome.NO_ACTION
 
-            result = self.switcher.switch_to(number, json_output=True)
+            try:
+                result = self.switcher.switch_to(number, json_output=True)
+            except KeychainLockedError as e:
+                return self._hold_for_keychain(e)
             if not result or not result.get("switched"):
                 self._emit(
                     NoSwitchEvent(
@@ -3469,6 +3486,9 @@ class AutoSwitchEngine:
                 dry_run=True,
             ))
             return TickOutcome.SWITCHED
+        held = self._keychain_locked_hold()
+        if held is not None:
+            return held
         with self._state_lock():
             state = self._read_state()
             paused_until = self._paused_until(state)
@@ -3476,6 +3496,8 @@ class AutoSwitchEngine:
                 return self._emit_paused(state, paused_until)
             try:
                 result = self.switcher.restore_own_login(current)
+            except KeychainLockedError as e:
+                return self._hold_for_keychain(e)
             except Exception as e:  # a failed stash or write: stop, never move
                 return self._halt(
                     REPAIR_FAILED_REASON,
@@ -3615,6 +3637,26 @@ class AutoSwitchEngine:
             )
         self._emit(NoSwitchEvent(reason=PAUSED_REASON, detail=detail))
         return TickOutcome.BLOCKED
+
+    def _hold_for_keychain(self, error: KeychainLockedError) -> TickOutcome:
+        """A switch was refused by a locked Keychain: hold switching until the
+        Keychain is worth asking again, and say so."""
+        detail = (
+            f"stay: {error}; nothing changed, rota tries again in "
+            f"{KEYCHAIN_RECHECK_COOLDOWN_S:.0f}s"
+        )
+        self._keychain_locked = (detail, self.clock() + KEYCHAIN_RECHECK_COOLDOWN_S)
+        return self._halt(KEYCHAIN_LOCKED_REASON, detail)
+
+    def _keychain_locked_hold(self) -> TickOutcome | None:
+        """The held outcome while a locked-Keychain refusal is recent, else None."""
+        if self._keychain_locked is None or self.dry_run:
+            return None
+        detail, retry_at = self._keychain_locked
+        if self.clock() >= retry_at:
+            self._keychain_locked = None
+            return None
+        return self._halt(KEYCHAIN_LOCKED_REASON, detail)
 
     def _halt(self, reason: str, detail: str) -> TickOutcome:
         """Hold every automatic action and say why; logged once per cause."""

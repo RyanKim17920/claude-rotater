@@ -7946,3 +7946,68 @@ def test_alternating_in_use_order_logs_model_limits_once(caplog):
     lines = [r for r in caplog.records if "Model limits that bind" in r.getMessage()]
     assert len(lines) == 1
     assert fake._models == ("fable", "opus")
+
+
+class TestTheEngineWaitsForAnUnlock:
+    @pytest.fixture
+    def h(self, temp_home, monkeypatch):
+        h = EngineHarness(temp_home)
+        h.seed(1, "a@example.com")
+        h.seed(2, "b@example.com")
+        h.make_live("a@example.com", 1)
+        self.calls = 0
+
+        def switch_to(*_a, **_kw):
+            self.calls += 1
+            from claude_rotater.exceptions import KeychainLockedError
+
+            raise KeychainLockedError()
+
+        monkeypatch.setattr(h.switcher, "switch_to", switch_to)
+        monkeypatch.setattr(h.engine, "_freshen_target", lambda num, email: "ok")
+        return h
+
+    USAGE = {"1": _usage(100), "2": _usage(10)}
+
+    def _reasons(self, h) -> list[str]:
+        from claude_rotater.autoswitch import NoSwitchEvent
+
+        return [e.reason for e in h.events if isinstance(e, NoSwitchEvent)]
+
+    def test_says_why_and_holds(self, h):
+        from claude_rotater.autoswitch import (
+            ALERT_REASONS,
+            KEYCHAIN_LOCKED_REASON,
+            NoSwitchEvent,
+            TickOutcome,
+        )
+
+        assert h.tick_with_usage(self.USAGE) is TickOutcome.BLOCKED
+        assert h.active_number() == 1
+        assert self._reasons(h) == [KEYCHAIN_LOCKED_REASON]
+        event = [e for e in h.events if isinstance(e, NoSwitchEvent)][-1]
+        assert "Keychain locked: unlock it to switch" in event.human()
+        assert KEYCHAIN_LOCKED_REASON in ALERT_REASONS, "the header shows it"
+
+    def test_does_not_retry_in_a_hot_loop(self, h):
+        from claude_rotater import autoswitch
+        from claude_rotater.credentials import KEYCHAIN_RECHECK_COOLDOWN_S
+
+        h.tick_with_usage(self.USAGE)
+        for _ in range(3):
+            h.clock.advance(autoswitch.MIN_TICK_S)
+            assert h.tick_with_usage(self.USAGE) is autoswitch.TickOutcome.BLOCKED
+        assert self.calls == 1
+        assert self._reasons(h) == [autoswitch.KEYCHAIN_LOCKED_REASON] * 4
+        h.clock.advance(KEYCHAIN_RECHECK_COOLDOWN_S)
+        h.tick_with_usage(self.USAGE)
+        assert self.calls == 2
+
+    def test_logs_it_once(self, h, caplog):
+        from claude_rotater import autoswitch
+
+        with caplog.at_level("ERROR", logger=autoswitch._logger.name):
+            h.tick_with_usage(self.USAGE)
+            h.clock.advance(autoswitch.MIN_TICK_S)
+            h.tick_with_usage(self.USAGE)
+        assert sum("Keychain locked" in r.getMessage() for r in caplog.records) == 1
