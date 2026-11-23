@@ -210,7 +210,15 @@ class SwitchTransaction:
         for step in reversed(self.completed_steps):
             try:
                 if step == "credentials_written":
-                    switcher._write_credentials(self.original_credentials)
+                    if self.original_credentials:
+                        switcher._write_credentials(self.original_credentials)
+                    else:
+                        # A key-only profile whose key served none: there
+                        # was nothing live, and writing "" would install an
+                        # empty login.
+                        switcher._logger.warning(
+                            "Rollback: no previous live credential to restore"
+                        )
                 elif step == "config_written":
                     self.config_path.write_text(
                         self.original_config, encoding="utf-8"

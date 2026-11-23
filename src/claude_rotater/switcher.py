@@ -1371,15 +1371,29 @@ class ClaudeAccountSwitcher:
         return data.get("accounts", {}).get(str(account_num), {}).get("email", "")
 
     def key_unserved_over_login(self, account_num: str) -> bool:
-        """Whether API-key slot ``account_num`` hands sessions no key while a
-        login lies beneath it. False when either cannot be read, and without
-        a login: a switch cannot leave such a profile."""
+        """Whether API-key slot ``account_num`` hands sessions no key, with a
+        login beneath it or nothing at all (a key-only profile). False when
+        either cannot be read: an empty read of a store that did not answer
+        proves nothing, and a switch refuses it."""
         if self._account_kind(account_num) != "api_key":
             return False
         if not api_key_mode.key_missing(self.backup_dir, get_claude_config_home()):
             return False
         beneath = self._read_active_credentials()
-        return bool(beneath.value) and not beneath.degraded
+        return beneath.value is not None and not (
+            beneath.degraded or beneath.keychain_unavailable
+        )
+
+    def _key_slot_serves_nothing(self, data: dict, account_num: str) -> bool:
+        """Whether API-key slot ``account_num`` is on duty with nothing live:
+        no key served and no login beneath, read from a store that answered.
+        The one empty live read a switch may leave."""
+        if not self._api_key_from_data(data, account_num):
+            return False
+        if self._handed_out_key():
+            return False
+        live = self._read_active_credentials()
+        return live.value == "" and not (live.degraded or live.keychain_unavailable)
 
     def current_account_number(self) -> str | None:
         """Slot of the live login; ``None`` when there is none or it's unmanaged.
@@ -6242,7 +6256,10 @@ class ClaudeAccountSwitcher:
         except Exception:
             return True
         if not live:
-            return True
+            # An API-key slot with nothing live serves no key: re-picking it
+            # must hand the key out again, not short-circuit.
+            data = self._get_sequence_data() or {}
+            return not self._key_slot_serves_nothing(data, slot)
         backup = self._read_account_credentials(slot, email)
         if not backup:
             return False
@@ -6404,8 +6421,10 @@ class ClaudeAccountSwitcher:
         """
         if self._api_key_from_data(data, current_account):
             # A key never rotates, so nothing live is its successor: another
-            # key is in its own slot, a login is the one underneath.
-            if looks_like_api_key(original_creds):
+            # key is in its own slot, a login is the one underneath. Nothing
+            # live at all (a key-only profile whose key is not served) leaves
+            # the slot's stored key as it is.
+            if looks_like_api_key(original_creds) or not original_creds:
                 return ("own-bytes", None)
             return ("known-foreign", None)
         handed_out = self._handed_out_key()
@@ -6957,12 +6976,17 @@ class ClaudeAccountSwitcher:
                 original_creds = self._read_credentials()
                 if original_creds is None:
                     raise CredentialReadError("Failed to read current credentials")
-                if not original_creds:
+                if not original_creds and not self._key_slot_serves_nothing(
+                    data, current_account
+                ):
                     # An empty read (e.g. a macOS Keychain `security` timeout,
                     # which returns "" rather than raising) must NOT be written
                     # over the departing account's backup — that would destroy
                     # its stored credential. Fail the switch; the backup stays
                     # intact and the caller can retry once the Keychain settles.
+                    # The one empty read that is no such accident: an API-key
+                    # slot whose key is not served, over no login, in a store
+                    # that answered (classified "own-bytes" below).
                     raise CredentialReadError(
                         "Current account credential is empty (Keychain unreadable?); "
                         "refusing to overwrite its backup"

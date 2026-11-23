@@ -2428,6 +2428,69 @@ class TestKeyOnDutyServesNone:
         assert h.active_number() == 1
         assert self._reasons(h) == ["active-api-key"] * 2
 
+    @staticmethod
+    def _key_only(h) -> None:
+        """No login beneath the key: the profile only ever had the key."""
+        (h.temp_home / ".claude" / ".credentials.json").unlink()
+
+    def test_a_key_only_profile_leaves_too(self, make):
+        h = make()
+        self._key_only(h)
+        self._revoke(h)
+        assert h.tick_with_usage(self.USAGE) is TickOutcome.NO_ACTION
+        assert self._reasons(h) == ["key-not-served"]
+        assert self._confirm(h) is TickOutcome.SWITCHED
+        assert h.active_number() == 2
+        assert h.switcher._read_account_credentials("1", "key@token.local") == DUTY_KEY
+
+    def test_a_key_only_profile_whose_store_cannot_be_read_stays(self, make, monkeypatch):
+        from claude_rotater.credentials import ActiveCredentials
+        from claude_rotater.exceptions import CredentialReadError
+
+        h = make(include_api_key_accounts=False)
+        self._key_only(h)
+        self._revoke(h)
+        unreadable = ActiveCredentials("", True, True)
+        monkeypatch.setattr(h.switcher, "_read_active_credentials", lambda: unreadable)
+        h.tick_with_usage(self.USAGE)
+        self._confirm(h)
+        assert h.active_number() == 1
+        assert self._reasons(h) == ["active-api-key"] * 2
+        with pytest.raises(CredentialReadError):
+            h.switcher.switch_to("2", json_output=True)
+        assert h.active_number() == 1
+
+    def test_a_failed_switch_off_a_key_only_profile_installs_no_empty_login(
+        self, make, monkeypatch
+    ):
+        from claude_rotater.exceptions import SwitchError
+
+        h = make()
+        self._key_only(h)
+        self._revoke(h)
+        real_write_json = h.switcher._write_json
+
+        def write_json(path, payload):
+            if path.name == ".claude.json":
+                raise OSError("disk full")
+            real_write_json(path, payload)
+
+        monkeypatch.setattr(h.switcher, "_write_json", write_json)
+        with pytest.raises(SwitchError, match="rolled back"):
+            h.switcher.switch_to("2", json_output=True)
+        assert h.active_number() == 1
+        assert h.switcher._read_credentials() != ""
+
+    def test_re_picking_the_unserved_key_serves_it_again(self, make):
+        h = make()
+        self._key_only(h)
+        self._revoke(h)
+        assert h.switcher._handed_out_key() is None
+        result = h.switcher.switch_to("1", json_output=True)
+        assert h.switcher._handed_out_key() == DUTY_KEY
+        assert result["to"]["number"] == 1
+        assert h.active_number() == 1
+
     @pytest.mark.parametrize(
         ("value", "degraded"),
         [('{"claudeAiOauth": {"accessToken": "stale"}}', True), (None, False)],
