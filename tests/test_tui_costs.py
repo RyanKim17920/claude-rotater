@@ -13,6 +13,7 @@ import threading
 import time
 
 import pytest
+from rich.text import Text
 
 from claude_rotater import costs
 from claude_rotater.cost_report import (
@@ -327,6 +328,18 @@ def test_the_page_lists_every_model_with_spend_when_there_is_room():
 
 
 # -- the money views ------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("share, shown", [(0.0, "0%"), (0.001, "<1%"), (0.0049, "<1%"),
+                                          (0.006, "1%"), (0.42, "42%"), (1.0, "100%")])
+def test_a_small_nonzero_share_reads_under_one_percent(share, shown):
+    assert view.share_text(share) == shown
+    line = ModelLine("Haiku", 0.5, share, 10, 10, 10, 10, None)
+    row = next(t.plain for t in view.model_lines([line], 118, 12, P, {}) if "Haiku" in t.plain)
+    assert row.split()[3] == shown
+    title = Text()
+    view._share(title, share * 200.0, 200.0, P)
+    assert title.plain.endswith(f"({shown})")
 
 
 def test_a_model_without_a_price_says_so_rather_than_zero_dollars():

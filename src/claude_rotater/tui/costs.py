@@ -809,11 +809,17 @@ def _named(key: str, names: dict[str, str], colors: dict[str, str], palette: Pal
     return text
 
 
+def share_text(share: float) -> str:
+    """``42%``; ``<1%`` for a share that is not nothing but rounds to it."""
+    pct = share * 100
+    return "<1%" if pct > 0 and round(pct) == 0 else f"{pct:.0f}%"
+
+
 def _share(text: Text, part: float, whole: float, palette: Palette, unit: str = DOLLARS) -> None:
     text.append(" · ", style=palette.muted)
     amount = f"{tokens(part)} tokens" if unit == TOKENS else money(part)
     text.append(amount, style=f"bold {palette.foreground}")
-    text.append(f" ({part / whole * 100 if whole else 0:.0f}%)", style=palette.muted)
+    text.append(f" ({share_text(part / whole if whole else 0.0)})", style=palette.muted)
 
 
 def pick_title(report: CostReport, view: str, width: int, pick: str,
@@ -1004,7 +1010,7 @@ def _model_cells(m: ModelLine, cols: Sequence[tuple[str, int]], palette: Palette
     values = {
         "cost": (("no rate", palette.sev_warn) if m.unpriced
                  else (money(m.cost), f"bold {strong}")),
-        "share": ("–" if m.unpriced else f"{m.share * 100:.0f}%", palette.foreground),
+        "share": ("–" if m.unpriced else share_text(m.share), palette.foreground),
         "input": (tokens(m.input), palette.muted),
         "cache w": (tokens(m.cache_write), palette.muted),
         "cache r": (tokens(m.cache_read), palette.muted),
