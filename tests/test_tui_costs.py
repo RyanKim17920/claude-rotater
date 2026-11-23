@@ -233,6 +233,17 @@ def test_bar_gridlines_are_evenly_spaced_and_a_bar_at_one_tops_out_on_its_row(pe
         assert column[row] == "█" and set(column[row + 1:]) <= {" ", "╌"}, (v, column)
 
 
+@pytest.mark.parametrize("unit", [view.DOLLARS, view.TOKENS])
+@pytest.mark.parametrize("v", ["weekly", "monthly"])
+@pytest.mark.parametrize("height", [2, 3, 4, 5, 6, 7, 8])
+def test_short_charts_space_gridlines_evenly_in_either_unit(unit, v, height):
+    lines = view.money_chart(report(n_models=3), v, 98, height, P, unit=unit)[:height]
+    rows = [r for r, line in enumerate(reversed(lines)) if "╌" in line.plain]  # row 0 first
+    assert rows and len({b - a for a, b in zip([-1, *rows], rows)}) == 1, [x.plain for x in lines]
+    labels = [line.plain.split()[0] for line in lines if "╌" in line.plain]
+    assert all(label.startswith("$") for label in labels) == (unit == view.DOLLARS)
+
+
 @pytest.mark.parametrize("height", [6, 9, 10, 11, 13])
 def test_trend_gridlines_are_evenly_spaced_and_a_value_at_one_draws_on_it(height):
     now = time.time()
