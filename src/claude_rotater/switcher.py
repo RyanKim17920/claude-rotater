@@ -771,8 +771,10 @@ class ClaudeAccountSwitcher:
         key = (self._read_json(get_global_config_path()) or {}).get("primaryApiKey")
         return key if isinstance(key, str) else ""
 
-    def _write_credentials(self, credentials: str) -> None:
-        self._store._write_credentials(credentials)
+    def _write_credentials(
+        self, credentials: str, *, same_login: bool = False
+    ) -> None:
+        self._store._write_credentials(credentials, same_login=same_login)
 
     def _prepare_credentials_for_activation(
         self, target_credentials: str, live_credentials: str | None
@@ -4331,7 +4333,8 @@ class ClaudeAccountSwitcher:
                             with claude_config_lock(), claude_storage_write_lock():
                                 fresh = self._read_credentials()
                                 self._write_credentials(  # active store — CC reads this
-                                    _with_live_shared_fields(working, fresh)
+                                    _with_live_shared_fields(working, fresh),
+                                    same_login=True,
                                 )
 
                         _with_write_retries(_write_live)

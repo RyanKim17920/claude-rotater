@@ -395,7 +395,10 @@ class TestOurOwnFileModeIsNotAKeychainFailure:
         )
 
         # One active-credential write falls back to the file and pins.
-        store._write_oauth_credentials('{"claudeAiOauth": {"accessToken": "sk-fb"}}')
+        # (a refresh of the live login: a switch would refuse instead)
+        store._write_oauth_credentials(
+            '{"claudeAiOauth": {"accessToken": "sk-fb"}}', same_login=True
+        )
         assert store._file_mode_is_ours is True, "premise: the write pinned"
 
         _value, unreadable = store._read_account_credentials_ex("3", "c@e.com")
@@ -437,7 +440,10 @@ class TestOurOwnFileModeIsNotAKeychainFailure:
             monkeypatch.setattr(_kc, fn, locked)
 
         assert store._read_active_credentials().degraded is True, "premise"
-        store._write_oauth_credentials('{"claudeAiOauth": {"accessToken": "x"}}')
+        # (a refresh of the live login: a switch would refuse instead)
+        store._write_oauth_credentials(
+            '{"claudeAiOauth": {"accessToken": "x"}}', same_login=True
+        )
         assert store._file_mode_is_ours is True, "premise: the write pinned"
 
         assert store._read_active_credentials().degraded is True, (

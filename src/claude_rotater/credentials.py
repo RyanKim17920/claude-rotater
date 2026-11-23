@@ -32,6 +32,7 @@ from claude_rotater.claude_locks import claude_storage_write_lock
 from claude_rotater.exceptions import (
     CredentialReadError,
     CredentialWriteError,
+    KeychainLockedError,
 )
 from claude_rotater.fsutil import replace_with_retry
 from claude_rotater.models import Platform
@@ -336,6 +337,10 @@ class CredentialStore:
         # superseded generation. A fact about THIS item, which is why neither
         # flag above can stand in for it.
         self._residual_verdict: bool | None = None
+        # Whether a delete of the managed-key Keychain item ("Claude Code")
+        # returned this process: nothing can shadow a login with that key
+        # since, so a later failed delete need not refuse a switch.
+        self._managed_key_cleared: bool = False
         self._last_active_credentials_backend: str | None = None
 
     def _kc_call(self, fn, *args):
@@ -805,7 +810,9 @@ class CredentialStore:
             return False  # best-effort; a down Keychain can't be cleaned now
         return True
 
-    def _write_credentials(self, credentials: str) -> None:
+    def _write_credentials(
+        self, credentials: str, *, same_login: bool = False
+    ) -> None:
         """Write Claude Code's active credential, enforcing a single auth axis.
 
         Detects the kind from the payload (raw ``sk-ant-…`` key vs OAuth JSON).
@@ -817,6 +824,11 @@ class CredentialStore:
         - **API key** → rota's ``apiKeyHelper`` only (see ``_activate_api_key``);
           the OAuth credential and Claude Code's own key login stay untouched.
 
+        ``same_login`` says the write is a refreshed token for the login
+        already live (not a switch): a Keychain item that cannot be cleared
+        then holds that login's own older generation, so the file fallback
+        is kept rather than refused (see ``_write_oauth_credentials``).
+
         Runs under claude's secure-storage write lock (re-entrant: the switch
         paths already hold it across their read of the live store), so a
         claude writing the same item waits for this write instead of
@@ -824,6 +836,8 @@ class CredentialStore:
 
         Raises:
             CredentialWriteError: If writing credentials fails.
+            KeychainLockedError: the old login or key could not be cleared
+                from a Keychain that refused the write; nothing was written.
             ClaudeCodeLockTimeout: claude held the write lock throughout;
                 nothing was written.
         """
@@ -831,7 +845,14 @@ class CredentialStore:
             if looks_like_api_key(credentials):
                 self._activate_api_key(credentials.strip())
             else:
-                self._write_oauth_credentials(credentials)
+                if not same_login and not self._delete_managed_keychain_item():
+                    # The key outranks the login, so it must be gone first;
+                    # a failed delete removed nothing, so refusing changes
+                    # nothing.
+                    raise KeychainLockedError(
+                        "the old API key could not be removed from it"
+                    )
+                self._write_oauth_credentials(credentials, same_login=same_login)
                 self._clear_managed_key()
                 api_key_mode.deactivate(self._data_dir(), get_claude_config_home())
 
@@ -856,6 +877,28 @@ class CredentialStore:
         if why is not None:
             raise CredentialWriteError(f"API key not switched in: {why}")
 
+    def _delete_managed_keychain_item(self) -> bool:
+        """Delete the managed-key Keychain item ("Claude Code"), reporting
+        whether none can be left to outrank a login.
+
+        True off macOS and under a custom profile (the item is the default
+        profile's, never touched from another), when the delete returned
+        (rc 0 or rc 44, already absent), and when a delete returned earlier
+        this process. False only when the delete failed and none ever
+        returned, so the old key may still be there.
+        """
+        if self._host.platform != Platform.MACOS or not _active_profile_is_default():
+            return True
+        try:
+            macos_keychain.delete_password(
+                CLAUDE_CODE_MANAGED_KEYCHAIN_SERVICE,
+                macos_keychain.keychain_account_name(),
+            )
+        except Exception:
+            return self._managed_key_cleared  # a down Keychain can't be cleaned now
+        self._managed_key_cleared = True
+        return True
+
     def _clear_managed_key(self) -> None:
         """Clear any active managed API key (Claude Code ``removeApiKey`` semantics).
 
@@ -876,15 +919,7 @@ class CredentialStore:
         per token while it lies, and a caller/log reader must be able to
         tell "nothing to clear" from "could not check".
         """
-        if self._host.platform == Platform.MACOS and _active_profile_is_default():
-            # Never under a custom profile: the item is the default profile's.
-            try:
-                macos_keychain.delete_password(
-                    CLAUDE_CODE_MANAGED_KEYCHAIN_SERVICE,
-                    macos_keychain.keychain_account_name(),
-                )
-            except Exception:
-                pass  # best-effort; a down Keychain can't be cleaned now
+        self._delete_managed_keychain_item()
         cfg = self._read_global_config()
         if cfg is None and get_global_config_path().exists():
             self._host._logger.warning(
@@ -902,7 +937,9 @@ class CredentialStore:
             except Exception as e:
                 self._host._logger.warning(f"Failed to clear primaryApiKey: {e}")
 
-    def _write_oauth_credentials(self, credentials: str) -> None:
+    def _write_oauth_credentials(
+        self, credentials: str, *, same_login: bool = False
+    ) -> None:
         """Write Claude Code's active OAuth credentials.
 
         macOS writes the Keychain when usable (recording backend ``"keychain"``). On
@@ -919,7 +956,16 @@ class CredentialStore:
         the plaintext file and best-effort clears any stale Keychain entry (#30337),
         recording backend ``"file"``. Linux/WSL/Windows always write the file.
 
+        The file fallback is taken only when nothing can shadow it: the old
+        Keychain item is cleared first, and when that delete fails (and no
+        clear was verified earlier this process) the write is refused with
+        nothing changed. Claude Code reads the Keychain first, so the file
+        would switch nothing once the Keychain unlocks. ``same_login`` (a
+        refreshed token for the login already live) keeps the old fallback:
+        the residual there is its own older generation.
+
         Raises:
+            KeychainLockedError: The old Keychain item could not be cleared.
             CredentialWriteError: If writing credentials fails.
         """
         if self._use_keychain():
@@ -944,14 +990,18 @@ class CredentialStore:
                 return
 
         # File mode: non-macOS, macOS Keychain known unusable, or a Keychain write
-        # that just failed. Write the plaintext file and (macOS) best-effort clear
-        # any stale Keychain entry so Claude Code's keychain-first read can't shadow
-        # it (#30337).
+        # that just failed. Clear any stale Keychain entry so Claude Code's
+        # keychain-first read can't shadow the file (#30337), then write it.
+        # The clear comes first so a refusal has changed nothing.
+        cleared = (
+            self._delete_active_keychain_entry() or self._residual_verdict is True
+        )
+        if not cleared and not same_login:
+            raise KeychainLockedError("the old login could not be cleared from it")
         try:
             self._write_active_credentials_file(credentials)
         except Exception as e:
             raise CredentialWriteError(f"Failed to write credentials: {e}")
-        cleared = self._delete_active_keychain_entry()
         if self._host.platform == Platform.MACOS:
             # The delete above is best-effort; a stale Keychain item may remain.
             # Pin file mode so a later read-timeout cooldown can't re-probe onto

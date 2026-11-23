@@ -1886,7 +1886,7 @@ class TestActiveAccountRefresh:
         assert locks_held_during_post == {
             "primary": True, "legacy": True, "config": False,
         }
-        write_live.assert_called_once_with(self._REFRESHED)
+        write_live.assert_called_once_with(self._REFRESHED, same_login=True)
         write_backup.assert_called_once_with("1", "test@example.com", self._REFRESHED)
 
     def test_persist_keeps_a_shared_field_claude_wrote_during_the_post(
@@ -1910,7 +1910,7 @@ class TestActiveAccountRefresh:
             live["value"] = json.dumps(during)  # claude's write lands mid-POST
             return oauth.RefreshOutcome(self._REFRESHED, None)
 
-        def write_live(credentials):
+        def write_live(credentials, **_kw):
             seen["lock_at_write"] = storage_write_lock_dir().is_dir()
             live["value"] = credentials
 
@@ -1955,7 +1955,7 @@ class TestActiveAccountRefresh:
             result = switcher._fetch_active_usage("1", "test@example.com", self._EXPIRED)
 
         assert result.sentinel is None
-        write_live.assert_called_once_with(self._REFRESHED)
+        write_live.assert_called_once_with(self._REFRESHED, same_login=True)
 
     def test_a_running_claude_blocks_the_expired_refresh(
         self, temp_home: Path, mock_claude_config: Path, sample_sequence_data: dict,
@@ -2125,7 +2125,7 @@ class TestActiveAccountRefresh:
             result = switcher._fetch_active_usage("1", "test@example.com", self._EXPIRED)
 
         assert result.sentinel is None
-        write_live.assert_called_once_with(self._REFRESHED)
+        write_live.assert_called_once_with(self._REFRESHED, same_login=True)
 
     def test_a_held_consume_lock_defers_the_active_refresh(
         self, temp_home: Path, mock_claude_config: Path, sample_sequence_data: dict
@@ -2225,7 +2225,7 @@ class TestActiveAccountRefresh:
 
         assert result.sentinel is None
         assert consumed == [slot_backup]  # backup's grant, never the live one
-        write_live.assert_called_once_with(self._REFRESHED)
+        write_live.assert_called_once_with(self._REFRESHED, same_login=True)
 
     def test_unattributed_live_with_unusable_backup_never_consumes(
         self, temp_home: Path, mock_claude_config: Path, sample_sequence_data: dict
@@ -2304,7 +2304,7 @@ class TestActiveAccountRefresh:
 
         assert result.sentinel is None
         mock_refresh.assert_not_called()          # restore, not a refresh
-        write_live.assert_called_once_with(successor)
+        write_live.assert_called_once_with(successor, same_login=True)
         write_backup.assert_not_called()          # backup already holds it
         assert mock_fetch.call_args[0][2] == successor
 
@@ -2381,7 +2381,7 @@ class TestActiveAccountRefresh:
 
         assert result.sentinel is None
         assert result.usage == {"five_hour": {"pct": 5}}
-        write_live.assert_called_once_with(self._REFRESHED)
+        write_live.assert_called_once_with(self._REFRESHED, same_login=True)
         assert fetch_calls == [valid_but_revoked, self._REFRESHED]
 
     def test_server_rejected_token_with_no_recovery_surfaces_the_401(
@@ -2591,7 +2591,7 @@ class TestActiveAccountRefresh:
         switcher = self._switcher(sample_sequence_data)
         live_writes = []
 
-        def flaky_live(creds):
+        def flaky_live(creds, **_kw):
             live_writes.append(creds)
             if len(live_writes) == 1:
                 raise OSError("keychain locked")
@@ -3033,7 +3033,7 @@ class TestActiveAccountRefresh:
         write_backup.assert_called_once_with(
             "1", "test@example.com", self._REFRESHED
         )
-        write_live.assert_called_once_with(self._REFRESHED)
+        write_live.assert_called_once_with(self._REFRESHED, same_login=True)
         assert mock_fetch.call_args[0][2] == self._REFRESHED
 
     def test_expiry_after_tolerated_backup_write_failure_consumes_live(
@@ -3124,7 +3124,7 @@ class TestActiveAccountRefresh:
 
         assert result.sentinel is None
         mock_refresh.assert_not_called()
-        write_live.assert_called_once_with(successor)
+        write_live.assert_called_once_with(successor, same_login=True)
 
     def test_no_token_returns_no_credentials(
         self, temp_home: Path, mock_claude_config: Path, sample_sequence_data: dict
@@ -3243,7 +3243,7 @@ class TestActiveAccountRefresh:
                    return_value=oauth.UsageOutcome({"five_hour": {"pct": 4}})):
             result = switcher._fetch_active_usage("1", "test@example.com", self._EXPIRED)
 
-        write_live.assert_called_once_with(self._REFRESHED)  # successor survives
+        write_live.assert_called_once_with(self._REFRESHED, same_login=True)  # successor survives
         assert result.usage == {"five_hour": {"pct": 4}}     # and serves usage
 
     def test_dead_lineage_surfaces_invalid_grant_not_a_silent_sentinel(
@@ -6205,7 +6205,11 @@ class TestMacosKeychainFallback:
         monkeypatch.setattr(macos_keychain, "set_password", _raise_locked)
         monkeypatch.setattr(macos_keychain, "delete_password", _raise_locked)
         monkeypatch.setattr(store, "_write_active_credentials_file", lambda creds: None)
-        store._write_oauth_credentials('{"claudeAiOauth": {"accessToken": "x"}}')
+        # Only a refresh of the live login falls back past an uncleared item;
+        # a switch refuses (tests/test_keychain_locked_switch.py).
+        store._write_oauth_credentials(
+            '{"claudeAiOauth": {"accessToken": "x"}}', same_login=True
+        )
         assert store._last_active_credentials_backend == "file"
         assert s._keychain_disabled_until == 0.0   # no re-probe scheduled
         assert s._use_keychain() is False          # pinned, stays file mode
@@ -6220,7 +6224,11 @@ class TestMacosKeychainFallback:
         s._keychain_disabled_until = time.monotonic() + 100  # pending read re-probe
         monkeypatch.setattr(macos_keychain, "delete_password", _raise_locked)
         monkeypatch.setattr(store, "_write_active_credentials_file", lambda creds: None)
-        store._write_oauth_credentials('{"claudeAiOauth": {"accessToken": "x"}}')
+        # Only a refresh of the live login falls back past an uncleared item;
+        # a switch refuses (tests/test_keychain_locked_switch.py).
+        store._write_oauth_credentials(
+            '{"claudeAiOauth": {"accessToken": "x"}}', same_login=True
+        )
         assert store._last_active_credentials_backend == "file"
         assert s._keychain_disabled_until == 0.0   # pending re-probe cleared
         assert s._use_keychain() is False
@@ -7847,7 +7855,7 @@ class TestActiveRefreshProvenance:
             result = switcher._fetch_active_usage("1", "test@example.com", self._LIVE)
 
         assert result.usage == {"five_hour": {"pct": 10}}
-        write_live.assert_called_once_with(refreshed)
+        write_live.assert_called_once_with(refreshed, same_login=True)
         write_backup.assert_called_once_with("1", "test@example.com", refreshed)
 
 

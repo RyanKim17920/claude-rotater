@@ -25,6 +25,19 @@ class CredentialWriteError(CredentialError):
     pass
 
 
+class KeychainLockedError(CredentialWriteError):
+    """The macOS Keychain refused a write and still holds the old login.
+
+    Claude Code reads the Keychain before the plaintext file, so a file
+    fallback would switch nothing once the Keychain unlocks. Nothing was
+    changed; retry after unlocking it.
+    """
+
+    def __init__(self, detail: str = ""):
+        message = "Keychain locked: unlock it to switch"
+        super().__init__(f"{message} ({detail})" if detail else message)
+
+
 class ConfigError(ClaudeSwitchError):
     """Error related to configuration operations."""
 

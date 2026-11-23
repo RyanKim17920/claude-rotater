@@ -282,9 +282,9 @@ class TestLoginSuccess:
         real_write = switcher._store._write_credentials
         calls: list[str] = []
 
-        def write_then_fail(creds):
+        def write_then_fail(creds, **kw):
             calls.append(creds)
-            real_write(creds)
+            real_write(creds, **kw)
             if len(calls) == 1:  # the install lands, then its tail fails
                 raise CredentialWriteError("clear managed key failed")
 
