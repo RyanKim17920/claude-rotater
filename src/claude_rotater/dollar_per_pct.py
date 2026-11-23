@@ -156,9 +156,12 @@ def _window_points(
     """``[(t, pct, restart)]`` of one window, read before ``end``, oldest
     first.
 
-    Exact readings when there are any; else the hourly peaks of the
-    long-term history, each dated at its hour's end (the peak was reached
-    by then) and only for hours wholly inside the window. A reading well
+    Exact readings where there are any, the hourly peaks of the long-term
+    history before them (the older readings fold into those), each dated
+    at its hour's end (the peak was reached by then) and only for hours
+    wholly inside the window and before the first exact reading. Exact
+    readings alone would read the climb up to the first of them as one
+    sample spanning days. A reading well
     below the window's peak is a lagging copy and is left out, unless the
     window started over early (``estimator.window_segments``): that reading
     then starts a new climb (``restart``).
@@ -166,8 +169,9 @@ def _window_points(
     exact = [Reading(p.t, p.pct, resets_at) for p in full
              if start <= p.t < end
              and (p.resets_at is None or abs(p.resets_at - resets_at) <= MATCH_S)]
-    points = exact or [Reading(p.t + HOUR_S, p.pct, resets_at)
-                       for p in hourly if p.t >= start and p.t + HOUR_S <= end]
+    first = exact[0].t if exact else end
+    points = [Reading(p.t + HOUR_S, p.pct, resets_at)
+              for p in hourly if p.t >= start and p.t + HOUR_S <= first] + exact
     out: list[tuple[float, float, bool]] = []
     for n, seg in enumerate(window_segments(points)):
         out.extend((p.t, p.pct, n > 0 and i == 0) for i, p in enumerate(seg))

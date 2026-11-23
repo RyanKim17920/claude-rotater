@@ -159,6 +159,22 @@ class TestSamples:
         assert got[0].usd == pytest.approx((first_hour + HOUR - start) / HOUR * 10.0)
 
 
+    def test_hourly_peaks_fill_in_before_the_first_exact_reading(self):
+        # The window's early readings were folded into hourly peaks; only its
+        # last hours are still exact. Read from the exact ones alone, the
+        # climb to the first of them became one big sample spanning days of
+        # spend (and any use elsewhere in them), which tilted the trend.
+        start = NOW - 6 * DAY
+        reset = start + 7 * DAY
+        hourly = [Point(start + i * HOUR, pct, None) for i, pct in enumerate([6, 12, 18, 24])]
+        exact = readings(start + 4 * HOUR, HOUR, [30, 36], reset)
+        spend = steady_spend(start, NOW, 6.0)
+        _, got = cut(spend, exact, [reset], segment=6.0, duration=7 * DAY, hourly=hourly,
+                     lo=start)
+        assert [s.pct for s in got] == [6] * 6
+        assert all(s.ratio == pytest.approx(1.0) for s in got)
+
+
 # -- the figure and its trend ---------------------------------------------------------
 
 
