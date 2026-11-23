@@ -193,12 +193,13 @@ def arrow(change: float | None, *, flat: float = 0.10) -> str:
 
 
 def trend_words(change: float | None) -> str:
-    """``↑ 18%``; ``→`` within ±10%; empty without a week to compare."""
+    """``↑ 18%``; ``→ +4%`` within ±10%; empty without a week to compare."""
     if change is None:
         return ""
     a = arrow(change)
     if a == "→":
-        return a
+        pct = round(change * 100)
+        return f"{a} {pct:+d}%" if pct else f"{a} 0%"
     return f"{a} {change + 1:.0f}x" if change >= 9 else f"{a} {abs(change) * 100:.0f}%"
 
 

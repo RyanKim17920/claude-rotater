@@ -250,7 +250,10 @@ def test_trend_gridlines_are_evenly_spaced_and_a_value_at_one_draws_on_it(height
 def test_trend_words():
     assert view.trend_words(0.18) == "↑ 18%"
     assert view.trend_words(-0.4) == "↓ 40%"
-    assert view.trend_words(0.05) == "→"
+    assert view.trend_words(0.05) == "→ +5%"  # flat, but the number still shows
+    assert view.trend_words(-0.1) == "→ -10%"
+    assert view.trend_words(0.0) == "→ 0%"
+    assert view.trend_words(-0.004) == "→ 0%"
     assert view.trend_words(None) == ""
     assert view.arrow(None) == "new"
 
