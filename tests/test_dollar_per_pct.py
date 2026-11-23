@@ -158,7 +158,6 @@ class TestSamples:
         # the first is dated at its hour's end: spend from the window start to then
         assert got[0].usd == pytest.approx((first_hour + HOUR - start) / HOUR * 10.0)
 
-
     def test_hourly_peaks_fill_in_before_the_first_exact_reading(self):
         # The window's early readings were folded into hourly peaks; only its
         # last hours are still exact. Read from the exact ones alone, the
@@ -241,7 +240,10 @@ class TestSummarize:
 
     def test_a_trend_needs_three_days_over_two_weeks(self):
         assert dpp.summarize([sample(13, 5.0), sample(7, 4.0), sample(1, 3.0)], "5h", NOW).trend is None
-        assert dpp.summarize([sample(15, 5.0), sample(8, 4.0), sample(1, 3.0)], "5h", NOW).trend < 0
+        three = dpp.summarize([sample(15, 5.0), sample(8, 4.0), sample(1, 3.0)], "5h", NOW)
+        assert three.trend == 0.0  # a trend, but three days in order are within noise
+        four = [sample(15, 5.0), sample(10, 4.5), sample(5, 4.0), sample(1, 3.0)]
+        assert dpp.summarize(four, "5h", NOW).trend < 0
 
 
 def daily(days: range, ratio, per_day: int = 1):
@@ -270,6 +272,23 @@ class TestFit:
         found += [sample(d - 0.5, 50.0) for d in range(3, 0, -1)]  # a few 10x outliers lately
         f = dpp.fit(found, NOW)
         assert f.steady and f.at(NOW) == pytest.approx(5.0)
+
+    def test_a_dip_between_level_ends_is_not_a_climb(self):
+        # Busy days hold steady at $10 at both ends; between them, days of
+        # one short climb each read low. Their pairs with the later busy
+        # days sloped the line up (+171% per 4 weeks), and two standard
+        # errors around that line called it significant.
+        found = [sample(d, r, pct=40.0) for d, r in ((21, 10.0), (4, 10.0), (3, 10.0),
+                                                       (2, 11.0), (1, 10.0))]
+        found += [sample(d, r, pct=6.0) for d, r in ((16, 6.0), (15, 6.0), (13, 7.0),
+                                                      (11, 6.0), (10, 7.0))]
+        f = dpp.fit(found, NOW)
+        assert f.steady and f.at(NOW) == pytest.approx(10.0)
+
+    def test_a_noisy_but_steady_climb_still_reads_its_change(self):
+        found = daily(range(16, 0, -1), lambda d: 5.0 * 1.02 ** (16 - d) * (1.1 if d % 2 else 0.9))
+        f = dpp.fit(found, NOW)
+        assert not f.steady and f.change > 0.3
 
     def test_a_tiny_but_clean_drift_still_reads_steady(self):
         # 1% per 4 weeks with no noise at all: real, but too small to call

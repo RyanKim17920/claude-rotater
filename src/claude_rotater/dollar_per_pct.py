@@ -237,9 +237,11 @@ class Fit:
 
     The samples are pooled into one value per :data:`BIN_S` (the climb
     weighted median), and the line through those is a Theil-Sen fit, so a
-    few wild samples cannot tilt it. ``steady`` when the slope is within
-    two standard errors of none (or under :data:`FLAT_CHANGE` per 4 weeks):
-    the line is then flat at the median, a noisy slope read as no change.
+    few wild samples cannot tilt it. ``steady`` when the days do not rise
+    (or fall) in order more than noise would (Mann-Kendall: Kendall's S
+    within two standard deviations of none), or the change is under
+    :data:`FLAT_CHANGE` per 4 weeks: the line is then flat at the median,
+    a noisy slope read as no change.
     ``provisional`` when it rests on too little (under :data:`TREND_MIN_N`
     days or :data:`TREND_MIN_SPAN_S`) or on samples partly used elsewhere.
     """
@@ -315,11 +317,13 @@ def fit(found: Iterable[Sample], now: float) -> Fit | None:
     slope = statistics.median((y[j] - y[i]) / (x[j] - x[i])
                               for i in range(n) for j in range(i + 1, n) if x[j] > x[i])
     level = weighted_median((yi - slope * (xi - xm), vi) for xi, yi, vi in zip(x, y, v))
-    sxx = sum(vi * (xi - xm) ** 2 for vi, xi in zip(v, x))
-    resid = sum(vi * (yi - level - slope * (xi - xm)) ** 2 for vi, xi, yi in zip(v, x, y))
-    se = math.sqrt(resid / (n - 2) / sxx) if n > 2 and sxx > 0 else math.inf
+    # Kendall's S, the test that goes with a Theil-Sen slope: how many day
+    # pairs rise past how many fall. Noise orders them at random, and a
+    # dip of a few days between level ends cannot pass for a climb.
+    rank = sum((y[j] > y[i]) - (y[j] < y[i]) for i in range(n) for j in range(i + 1, n))
+    noise = math.sqrt(n * (n - 1) * (2 * n + 5) / 18)
     change = math.exp(slope * TREND_HORIZON_S / DAY_S) - 1
-    steady = abs(slope) <= 2 * se or abs(change) < FLAT_CHANGE
+    steady = abs(rank) <= 2 * noise or abs(change) < FLAT_CHANGE
     span = (x[-1] - x[0]) * DAY_S
     return Fit(
         t0=xm * DAY_S,
