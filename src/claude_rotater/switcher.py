@@ -3137,8 +3137,8 @@ class ClaudeAccountSwitcher:
         self._reject_cross_kind_collision(
             current_email, False, current_org_uuid,
             remedy=(
-                "Remove that account and add its key again under another "
-                "email, then log in."
+                "Remove that account, or add its key again under another "
+                "email, first."
             ),
         )
         relogin_active = source_dir is not None and self._live_identity_matches(
