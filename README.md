@@ -4,7 +4,9 @@ Keep several Claude Code accounts logged in and let rota switch between them,
 so you use every account's weekly quota before it resets and never stall at a
 limit.
 
-![rota's main screen: four accounts with 5h, 7d and per-model usage, and the selected account's 5h and 7d forecast](docs/screenshot.png)
+![rota forecasting a 5h limit, switching accounts before it hits, planning the week and totalling spend](docs/rota-ad.gif)
+
+[Watch the 27-second video](docs/rota-ad.mp4) · real usage, names replaced
 
 ## Install
 
@@ -55,6 +57,8 @@ Everything else (logins, removing accounts, settings) is done in the TUI.
 Questions and text entry show on the bottom line. `esc` cancels.
 
 ## How rotation works
+
+![rota's main screen: five accounts (one disabled) with 5h and 7d usage, and the selected account's 5h, 7d and per-model forecasts](docs/screenshot.png)
 
 The default strategy is `pace`:
 
@@ -128,7 +132,7 @@ rota captures the mouse. To select text, hold Option (macOS) or Shift
 
 ## Costs
 
-![The costs view: daily spend by model over 30 days, spend and dollars per 1% for each account, and a per-model token table](docs/costs.png)
+![The costs view: daily spend by account over 30 days, spend and dollars per 1% for each account, and a per-model token table](docs/costs.png)
 
 Press `$` for what your chats cost: today, 7 days and 30 days, a chart by
 model, each account's spend and its approximate dollars per 1% of its 5h and
