@@ -30,11 +30,12 @@ class KeychainLockedError(CredentialWriteError):
 
     Claude Code reads the Keychain before the plaintext file, so a file
     fallback would switch nothing once the Keychain unlocks. Nothing was
-    changed; retry after unlocking it.
+    changed; retry after unlocking it. ``action`` names what waits for the
+    unlock ("switch", or a refresh of the live login).
     """
 
-    def __init__(self, detail: str = ""):
-        message = "Keychain locked: unlock it to switch"
+    def __init__(self, detail: str = "", *, action: str = "switch"):
+        message = f"Keychain locked: unlock it to {action}"
         super().__init__(f"{message} ({detail})" if detail else message)
 
 
