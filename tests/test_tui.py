@@ -3552,6 +3552,28 @@ class TestEngineHosting:
             await settle(pilot)
             assert "re-login needed" in painted(app, "#status")
 
+    async def test_a_refresh_held_for_the_keychain_alerts_like_a_switch(
+        self, tmp_path, fake_engine
+    ):
+        """The engine's hold for a refresh skipped behind a locked Keychain
+        is the same alert as a refused switch: header and prompt, said once."""
+        line = ("stay: Keychain locked: unlock it to refresh account 1's login; "
+                "nothing changed, rota tries again in 60s")
+        app = make_app(three_accounts(tmp_path))
+        async with app.run_test(size=(200, 30)) as pilot:
+            await settle(pilot)
+            said = []
+            real_say = app.say
+            app.say = lambda text, *a, **k: (said.append(text), real_say(text, *a, **k))
+            for _ in range(3):
+                await emit(
+                    fake_engine.instances[0],
+                    NoSwitchEvent(reason="keychain-locked", detail=line),
+                )
+            await settle(pilot)
+            assert "Keychain locked" in painted(app, "#status")
+            assert said == [line]
+
     async def test_header_says_why_a_switch_is_held(self, tmp_path):
         """At its threshold with a cooldown running, the header says the
         switch is held and for how long; under it, it says nothing."""

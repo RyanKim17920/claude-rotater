@@ -24,8 +24,9 @@ USAGE_TOKEN_EXPIRED = "token expired"
 # reported as this sentinel instead of being fetched from the OAuth usage API.
 USAGE_API_KEY = "api key"
 # The active account's macOS Keychain was unreadable (locked / denied / timeout)
-# with no plaintext fallback — distinct from a genuinely empty slot, so the user
-# isn't misled into an unnecessary re-login.
+# with no plaintext fallback, or its expired login's refresh was skipped because
+# the Keychain could not take the new token — distinct from a genuinely empty
+# slot or a dead login, so the user isn't misled into an unnecessary re-login.
 USAGE_KEYCHAIN_UNAVAILABLE = "keychain unavailable"
 # The stored refresh-token lineage is dead (repeated ``invalid_grant``). The
 # account is quarantined from fetching until a re-login (the TUI's l or a key)

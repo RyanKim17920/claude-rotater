@@ -79,6 +79,7 @@ from claude_rotater.forecast import elsewhere, external_burns
 from claude_rotater.json_output import (
     SCHEMA_VERSION,
     USAGE_FOREIGN_CREDENTIAL,
+    USAGE_KEYCHAIN_UNAVAILABLE,
     USAGE_NO_CREDENTIALS,
     USAGE_PROVIDER_BLOCKED,
     USAGE_RELOGIN_REQUIRED,
@@ -594,8 +595,8 @@ NO_HEADROOM_REASON = "no-headroom"
 # Manual mode (``autoswitch.mode``): the user picks the account; the detail
 # is a full "stay: ..." line saying what, if anything, rota still guards.
 MANUAL_REASON = "manual"
-# A switch was refused because the macOS Keychain is locked and still holds
-# the old login: nothing changed, and switching waits for an unlock.
+# A switch was refused, or the login on duty could not be refreshed, because
+# the macOS Keychain is locked: nothing changed, and both wait for an unlock.
 KEYCHAIN_LOCKED_REASON = "keychain-locked"
 # Reasons a UI should surface loudly (header note, prompt line).
 ALERT_REASONS = (
@@ -1463,6 +1464,16 @@ class AutoSwitchEngine:
                 # failover. Restore the marked account's own login, or stop.
                 self._unhealthy_ticks = 0
                 return self._repair_active(current, active_ref, active_entry)
+            if active_value == USAGE_KEYCHAIN_UNAVAILABLE:
+                # The login on duty cannot be read or refreshed behind a
+                # locked Keychain (its refresh is skipped so no token is
+                # spent). Nothing ran out, and a switch would be refused for
+                # the same reason: hold with the same alert as a refused
+                # switch until the Keychain is worth asking again.
+                self._unhealthy_ticks = 0
+                return self._hold_for_keychain(KeychainLockedError(
+                    action=f"refresh account {current}'s login"
+                ))
             if active_value == USAGE_TOKEN_EXPIRED:
                 # Expired and the refresh could not complete this pass (claude
                 # is running and owns the refresh, lock contention,

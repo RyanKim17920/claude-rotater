@@ -511,3 +511,35 @@ class TestKeychainLocksMidRefresh:
         entry_id = next(iter(manifest))
         assert s._store._read_unclaimed_credential(entry_id)[0] == REFRESHED
 
+
+class TestTheEngineSaysKeychainLocked:
+    def test_a_refresh_skipped_for_the_keychain_raises_the_locked_alert(
+        self, temp_home, caplog
+    ):
+        from claude_rotater import autoswitch
+        from claude_rotater.autoswitch import ALERT_REASONS, NoSwitchEvent, TickOutcome
+        from claude_rotater.credentials import KEYCHAIN_RECHECK_COOLDOWN_S
+        from claude_rotater.json_output import USAGE_KEYCHAIN_UNAVAILABLE
+        from tests.test_autoswitch import _usage
+
+        h = EngineHarness(temp_home)
+        h.seed(1, "a@example.com")
+        h.seed(2, "b@example.com")
+        h.make_live("a@example.com", 1)
+        usage = {"1": USAGE_KEYCHAIN_UNAVAILABLE, "2": _usage(10)}
+
+        with caplog.at_level("ERROR", logger=autoswitch._logger.name):
+            assert h.tick_with_usage(usage) is TickOutcome.BLOCKED
+            h.clock.advance(autoswitch.MIN_TICK_S)
+            assert h.tick_with_usage(usage) is TickOutcome.BLOCKED
+
+        events = [e for e in h.events if isinstance(e, NoSwitchEvent)]
+        assert [e.reason for e in events] == [autoswitch.KEYCHAIN_LOCKED_REASON] * 2
+        assert autoswitch.KEYCHAIN_LOCKED_REASON in ALERT_REASONS
+        assert "Keychain locked: unlock it to refresh account 1's login" in (
+            events[-1].human()
+        )
+        assert f"{KEYCHAIN_RECHECK_COOLDOWN_S:.0f}s" in events[-1].human()
+        assert h.active_number() == 1, "never a failover"
+        logged = [r for r in caplog.records if "Keychain locked" in r.getMessage()]
+        assert len(logged) == 1
