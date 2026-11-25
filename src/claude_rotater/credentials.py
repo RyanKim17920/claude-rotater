@@ -414,6 +414,21 @@ class CredentialStore:
             self._keychain_disabled_until = 0.0
         return self._keychain_usable_cache is not False
 
+    def _active_write_blocked(self) -> bool:
+        """Whether an active-login write now would be refused for a locked
+        Keychain (:class:`KeychainLockedError`), as far as this process knows.
+
+        True on macOS when the Keychain is known unusable (an op failed and
+        its re-probe cooldown has not lapsed) and no clear of the active item
+        was verified: the write would skip the Keychain, fail to clear the
+        item and refuse. A refresh asks this before it spends a refresh
+        token, because a refused write-back would strand the new one. Once
+        the cooldown lapses this reads False again and the refresh is tried.
+        """
+        if self._host.platform != Platform.MACOS or self._use_keychain():
+            return False
+        return self._residual_verdict is not True
+
     def _pin_file_mode(self, *, residual_cleared: bool) -> None:
         """Pin file mode for the rest of the process — no Keychain re-probe.
 
@@ -810,9 +825,7 @@ class CredentialStore:
             return False  # best-effort; a down Keychain can't be cleaned now
         return True
 
-    def _write_credentials(
-        self, credentials: str, *, same_login: bool = False
-    ) -> None:
+    def _write_credentials(self, credentials: str) -> None:
         """Write Claude Code's active credential, enforcing a single auth axis.
 
         Detects the kind from the payload (raw ``sk-ant-…`` key vs OAuth JSON).
@@ -824,10 +837,9 @@ class CredentialStore:
         - **API key** → rota's ``apiKeyHelper`` only (see ``_activate_api_key``);
           the OAuth credential and Claude Code's own key login stay untouched.
 
-        ``same_login`` says the write is a refreshed token for the login
-        already live (not a switch): a Keychain item that cannot be cleared
-        then holds that login's own older generation, so the file fallback
-        is kept rather than refused (see ``_write_oauth_credentials``).
+        A refreshed token for the login already live follows the same rule
+        as a switch: the refresh path checks :meth:`_active_write_blocked`
+        before it spends a refresh token, so a refusal here is rare.
 
         Runs under claude's secure-storage write lock (re-entrant: the switch
         paths already hold it across their read of the live store), so a
@@ -845,14 +857,14 @@ class CredentialStore:
             if looks_like_api_key(credentials):
                 self._activate_api_key(credentials.strip())
             else:
-                if not same_login and not self._delete_managed_keychain_item():
+                if not self._delete_managed_keychain_item():
                     # The key outranks the login, so it must be gone first;
                     # a failed delete removed nothing, so refusing changes
                     # nothing.
                     raise KeychainLockedError(
                         "the old API key could not be removed from it"
                     )
-                self._write_oauth_credentials(credentials, same_login=same_login)
+                self._write_oauth_credentials(credentials)
                 self._clear_managed_key()
                 api_key_mode.deactivate(self._data_dir(), get_claude_config_home())
 
@@ -937,9 +949,7 @@ class CredentialStore:
             except Exception as e:
                 self._host._logger.warning(f"Failed to clear primaryApiKey: {e}")
 
-    def _write_oauth_credentials(
-        self, credentials: str, *, same_login: bool = False
-    ) -> None:
+    def _write_oauth_credentials(self, credentials: str) -> None:
         """Write Claude Code's active OAuth credentials.
 
         macOS writes the Keychain when usable (recording backend ``"keychain"``). On
@@ -960,9 +970,9 @@ class CredentialStore:
         Keychain item is cleared first, and when that delete fails (and no
         clear was verified earlier this process) the write is refused with
         nothing changed. Claude Code reads the Keychain first, so the file
-        would switch nothing once the Keychain unlocks. ``same_login`` (a
-        refreshed token for the login already live) keeps the old fallback:
-        the residual there is its own older generation.
+        would switch nothing once the Keychain unlocks. A refresh of the
+        login already live is refused too: once the Keychain unlocks, the
+        CLI would read the older generation whose refresh token was spent.
 
         Raises:
             KeychainLockedError: The old Keychain item could not be cleared.
@@ -996,7 +1006,7 @@ class CredentialStore:
         cleared = (
             self._delete_active_keychain_entry() or self._residual_verdict is True
         )
-        if not cleared and not same_login:
+        if not cleared:
             raise KeychainLockedError("the old login could not be cleared from it")
         try:
             self._write_active_credentials_file(credentials)
@@ -1006,9 +1016,9 @@ class CredentialStore:
             # The delete above is best-effort; a stale Keychain item may remain.
             # Pin file mode so a later read-timeout cooldown can't re-probe onto
             # that residual and resurrect the wrong account (see _pin_file_mode).
-            # Its outcome is also the answer to whether the file is now the
-            # authority, so hand it over rather than re-deriving it from flags.
-            self._pin_file_mode(residual_cleared=cleared)
+            # The refusal above means the residual was cleared: the file is
+            # now the authority.
+            self._pin_file_mode(residual_cleared=True)
         self._last_active_credentials_backend = "file"
 
     def _active_oauth_write_service(self) -> str:

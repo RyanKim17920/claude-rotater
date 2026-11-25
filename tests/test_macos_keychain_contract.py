@@ -26,6 +26,8 @@ from unittest.mock import call, patch
 
 import pytest
 
+from claude_rotater.exceptions import KeychainLockedError
+
 from claude_rotater import macos_keychain
 from claude_rotater.exceptions import SwitchError
 from claude_rotater.models import Platform
@@ -394,12 +396,13 @@ class TestOurOwnFileModeIsNotAKeychainFailure:
             "premise: a locked Keychain makes an empty backup read unprovable"
         )
 
-        # One active-credential write falls back to the file and pins.
-        # (a refresh of the live login: a switch would refuse instead)
-        store._write_oauth_credentials(
-            '{"claudeAiOauth": {"accessToken": "sk-fb"}}', same_login=True
-        )
-        assert store._file_mode_is_ours is True, "premise: the write pinned"
+        # One active-credential write is refused (the old item cannot be
+        # cleared, so nothing is written and nothing pins).
+        with pytest.raises(KeychainLockedError):
+            store._write_oauth_credentials(
+                '{"claudeAiOauth": {"accessToken": "sk-fb"}}'
+            )
+        assert store._file_mode_is_ours is False, "premise: a refusal pins nothing"
 
         _value, unreadable = store._read_account_credentials_ex("3", "c@e.com")
         assert unreadable is True, (
@@ -440,11 +443,9 @@ class TestOurOwnFileModeIsNotAKeychainFailure:
             monkeypatch.setattr(_kc, fn, locked)
 
         assert store._read_active_credentials().degraded is True, "premise"
-        # (a refresh of the live login: a switch would refuse instead)
-        store._write_oauth_credentials(
-            '{"claudeAiOauth": {"accessToken": "x"}}', same_login=True
-        )
-        assert store._file_mode_is_ours is True, "premise: the write pinned"
+        with pytest.raises(KeychainLockedError):
+            store._write_oauth_credentials('{"claudeAiOauth": {"accessToken": "x"}}')
+        assert store._file_mode_is_ours is False, "premise: a refusal pins nothing"
 
         assert store._read_active_credentials().degraded is True, (
             "the Keychain is still locked; a write fallback for the active "

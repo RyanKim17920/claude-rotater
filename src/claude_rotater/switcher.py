@@ -23,6 +23,7 @@ from claude_rotater.exceptions import (
     ClaudeSwitchError,
     ConfigError,
     CredentialReadError,
+    KeychainLockedError,
     LockError,
     SessionError,
     SwitchError,
@@ -771,10 +772,8 @@ class ClaudeAccountSwitcher:
         key = (self._read_json(get_global_config_path()) or {}).get("primaryApiKey")
         return key if isinstance(key, str) else ""
 
-    def _write_credentials(
-        self, credentials: str, *, same_login: bool = False
-    ) -> None:
-        self._store._write_credentials(credentials, same_login=same_login)
+    def _write_credentials(self, credentials: str) -> None:
+        self._store._write_credentials(credentials)
 
     def _prepare_credentials_for_activation(
         self, target_credentials: str, live_credentials: str | None
@@ -3866,6 +3865,25 @@ class ClaudeAccountSwitcher:
         def _defer(record: "FetchRecord | None") -> "FetchRecord":
             return record or FetchRecord(sentinel=USAGE_TOKEN_EXPIRED)
 
+        # A refresh token is spent by the POST, so a refresh whose write-back
+        # a locked Keychain would refuse is never started: the new token
+        # would have nowhere the CLI reads. Logged once per lock, retried
+        # every pass (the Keychain is asked again once its cooldown lapses).
+        locked_key = (account_num, email, "keychain-locked")
+
+        def _keychain_locked() -> "FetchRecord":
+            if locked_key not in self._provenance_warned:
+                self._provenance_warned.add(locked_key)
+                self._logger.warning(
+                    "Keychain locked: account %s's login is due a refresh; "
+                    "not refreshing until it unlocks (the refresh token "
+                    "stays unspent).", account_num,
+                )
+            return _defer(
+                force_refresh
+                or FetchRecord(sentinel=USAGE_KEYCHAIN_UNAVAILABLE)
+            )
+
         # The CONSUME LOCK, taken in the gate's own order (consume -> global).
         # This path can POST the slot's BACKUP refresh token — refresh_input
         # becomes `backup` when the live bytes moved or were cleared — so it
@@ -3948,10 +3966,7 @@ class ClaudeAccountSwitcher:
         # above; consumption is refused until the keychain reads again —
         # CC refreshes on its own next use, exactly the pre-#167 shape.
         if self._active_read_degraded:
-            return _defer(
-                force_refresh
-                or FetchRecord(sentinel=USAGE_KEYCHAIN_UNAVAILABLE)
-            )
+            return _keychain_locked()
 
         # Store-resolution parity (M4), same refusal as the consume gate:
         # with CLAUDE_SECURESTORAGE_CONFIG_DIR set, CC reads/writes a
@@ -3997,6 +4012,10 @@ class ClaudeAccountSwitcher:
         # usable backup → restore the backup (the slot's own credential —
         # the stranded-live and stale-sync shapes both heal here).
         backup = self._read_account_credentials(account_num, email)
+        if not backup and self._store._active_write_blocked():
+            # No backup read behind a locked Keychain: not a provenance
+            # question, and nothing could be written back anyway.
+            return _keychain_locked()
         backup_fp = oauth.credential_fingerprint(backup)
         backup_oauth = oauth.extract_oauth_data(backup)
         backup_usable = bool(
@@ -4135,6 +4154,16 @@ class ClaudeAccountSwitcher:
                             "check.", account_num,
                         )
                 else:
+                    # Everything below writes the live store (a restore or a
+                    # refresh). Ask, under the write lock the write-back
+                    # takes, whether that write would be refused: if so,
+                    # spend nothing. Not held across the POST (claude retries
+                    # that lock only briefly); the write re-checks for real.
+                    with claude_storage_write_lock():
+                        blocked = self._store._active_write_blocked()
+                    if blocked:
+                        return _keychain_locked()
+                    self._provenance_warned.discard(locked_key)
                     # Pick the credential whose grant may be consumed:
                     # - live, when its lineage matches the backup (rotated /
                     #   drifted bytes of this slot);
@@ -4363,10 +4392,32 @@ class ClaudeAccountSwitcher:
                                 fresh = self._read_credentials()
                                 self._write_credentials(  # active store — CC reads this
                                     _with_live_shared_fields(working, fresh),
-                                    same_login=True,
                                 )
 
                         _with_write_retries(_write_live)
+                    except KeychainLockedError:
+                        # The Keychain locked after the check above (during
+                        # the POST): the live item still holds the spent
+                        # generation and nothing may be written beside it in
+                        # plaintext. The successor waits in rota's backup for
+                        # this account; once the Keychain unlocks, the next
+                        # pass restores it from there without another POST.
+                        live_ok = False
+                        self._provenance_warned.add(locked_key)
+                        if backup_ok:
+                            self._logger.warning(
+                                "Keychain locked during account %s's %s: the "
+                                "new login is kept in rota's backup and goes "
+                                "live once the Keychain unlocks.",
+                                account_num,
+                                "backup restore" if restore_source is not None
+                                else "refresh",
+                            )
+                        else:
+                            self._stash_unpersisted_successor(
+                                account_num, working, refresh_input
+                            )
+                        return FetchRecord(sentinel=USAGE_KEYCHAIN_UNAVAILABLE)
                     except Exception:
                         live_ok = False
                         self._logger.error(
@@ -4412,6 +4463,35 @@ class ClaudeAccountSwitcher:
             usage=outcome.usage,
             error=outcome.error,
             retry_after_s=outcome.retry_after_s,
+        )
+
+    def _stash_unpersisted_successor(
+        self, account_num: str, successor: str, consumed: str
+    ) -> None:
+        """Park a refreshed login that reached neither the backup nor the
+        live store in rota's stash (0600), where the consume gate adopts it
+        for the slot still holding ``consumed``. Never raises."""
+        try:
+            self._store._write_unclaimed_credential(
+                successor,
+                {
+                    "reason": "active-refresh-unpersisted",
+                    "configSlot": account_num,
+                    "consumedFp": oauth.credential_fingerprint(consumed),
+                    "fingerprint": oauth.credential_fingerprint(successor),
+                },
+            )
+        except Exception:
+            self._logger.error(
+                "Keychain locked during account %s's refresh and neither "
+                "the backup nor the stash took the new login; re-login may "
+                "be required.", account_num, exc_info=True,
+            )
+            return
+        self._logger.warning(
+            "Keychain locked during account %s's refresh and the backup "
+            "write failed: the new login is stashed in rota's credentials "
+            "folder.", account_num,
         )
 
     def _resync_rotated_backup(
